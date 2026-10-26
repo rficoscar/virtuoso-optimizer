@@ -1,0 +1,1264 @@
+# -*- coding: utf-8 -*-
+"""v09 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+
+Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
+code is the failure count. Known Windows failure: test_find_prog_env_override.
+"""
+from __future__ import print_function
+
+import copy
+import glob
+import gzip
+import hashlib
+import json
+import os
+import random
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Public engine symbols (the suite uses them unqualified).
+from optimizer import (  # noqa: F401
+    EXAMPLE_CFG, LOG_MODE_COMPACT, LOG_MODE_FULL, MANIFEST_NAME,
+    NETLIST_BASE_NAME, NETLIST_META_NAME, Optimization, RealRunner,
+    RunLogger, Settings, Target, Transform, build_optimizer, circuit_id,
+    compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
+    format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
+    parse_eng, parse_netlist_parameters, read_manifest, reconstruct_input_scs,
+    resolve_prog, resolve_run_dir, rewrite_netlist_parameters,
+    run_optimization, stop_all_runners, suggest_bounds, tool_report,
+)
+from optimizer import (  # private helpers referenced by the suite
+    _TOOL_CACHE, _archive_aside, _log_mode_of, _native_open, _read_text,
+    _sha1_file, _sha1_text,
+)
+from optimizer import open  # noqa: A001 - UTF-8 wrapper, shadowed on purpose
+from algorithm import _latin_hypercube  # LHS moved here when v09 dropped the old engine
+
+
+def example_config():
+    return copy.deepcopy(EXAMPLE_CFG)
+
+
+def mock_config(out_dir, max_iter):
+    cfg = example_config()
+    cfg["output_dir"] = out_dir
+    # Goals the mock model can not meet, so the run always uses max_iter.
+    cfg["targets"] = [
+        {"output": "S21 dB20", "metric": "band_min", "band": ["24G", "44G"],
+         "op": ">=", "goal": 6, "tol": 0.5},
+        {"output": "S21 dB20", "metric": "band_flatness", "band": ["24G", "44G"],
+         "op": "<=", "goal": 0.2, "tol": 0.2},
+    ]
+    cfg["settings"] = {"max_iter": max_iter, "patience": 100, "seed": 0}
+    return cfg
+
+
+def phys_opt(strategy, names, x0, bounds, seed=0):
+    """Build a strategy over physical bounds: the production run-loop path."""
+    tr = Transform([{"name": n, "init": x0[i], "min": bounds[i][0],
+                     "max": bounds[i][1]} for i, n in enumerate(names)])
+    return build_optimizer(strategy, tr, dict(zip(names, x0)), names, seed=seed)
+
+
+class TestEng(unittest.TestCase):
+    def test_parse(self):
+        for text, want in (("250p", 250e-12), ("1.5G", 1.5e9), ("3meg", 3e6), (12.5, 12.5)):
+            self.assertAlmostEqual(parse_eng(text), want)
+        self.assertAlmostEqual(parse_eng(-4.7e-6), parse_eng("-4.7u"))
+    def test_format(self):
+        for value, want in ((0, "0"), (250e-12, "250p"), (1.5e9, "1.5G"), (-4.5e-12, "-4.5p")):
+            self.assertEqual(format_eng(value), want)
+    def test_bad(self):
+        self.assertRaises(ValueError, parse_eng, "abc")
+        self.assertRaises(ValueError, parse_eng, "12x")
+    def test_suggest_bounds(self):
+        lo, hi = suggest_bounds("72f")
+        self.assertAlmostEqual(parse_eng(lo), 36e-15)
+        self.assertAlmostEqual(parse_eng(hi), 144e-15)
+        self.assertEqual(suggest_bounds("0"), ("0", ""))
+        lo, hi = suggest_bounds("-2")
+        self.assertLess(parse_eng(lo), parse_eng(hi))
+
+
+class TestTargets(unittest.TestCase):
+    curves = {"S21 dB20": ([1e9, 2e9, 3e9], [1.0, 5.0, 2.0])}
+    def error(self, spec):
+        return Target(spec).error(self.curves)
+    def test_point_targets(self):
+        spec = {"output": "S21 dB20", "metric": "band_max", "op": "<=",
+                "goal": 4, "tol": 0.5}
+        self.assertGreater(self.error(spec), 0.0)
+        spec["goal"] = 6
+        self.assertLessEqual(self.error(spec), 0.0)
+    def test_missing_curve_is_large_error(self):
+        spec = {"output": "none", "metric": "band_min", "op": ">=", "goal": 1, "tol": 0.1}
+        self.assertGreaterEqual(self.error(spec), 1e6)
+    def test_curve_target(self):
+        spec = {"output": "S21 dB20", "curve_op": "above",
+                "limit": {"x": [1, 2, 3], "y": [0, 4, 1]}}
+        self.assertGreater(self.error(spec), 0.0)
+
+
+class TestAlgorithm(unittest.TestCase):
+    """Old AskTellOptimizer simplex tests, now on build_optimizer + SpaceAdapter."""
+    def test_goes_to_the_minimum(self):
+        algo = phys_opt("simplex", ["a", "b"], [1.0, 0.0], [(0.0, 10.0), (-5.0, 5.0)], seed=3)
+        for _ in range(120):
+            pt = algo.ask()
+            algo.tell((pt[0] - 2.0) ** 2 + (pt[1] + 1.0) ** 2)
+        self.assertIsNotNone(algo.inner.best_y)
+        self.assertLess(algo.inner.best_y, 1e-6)
+    def test_points_stay_in_bounds(self):
+        algo = phys_opt("simplex", ["a"], [5.0], [(0.0, 10.0)], seed=1)
+        for _ in range(40):
+            pt = algo.ask()
+            self.assertGreaterEqual(pt[0], 0.0)
+            self.assertLessEqual(pt[0], 10.0)
+            algo.tell(abs(pt[0] - 8.0))
+    def test_degenerate_bounds(self):
+        algo = phys_opt("simplex", ["a"], [5.0], [(5.0, 5.0)], seed=1)
+        self.assertEqual(algo.ask(), [5.0])
+        algo.tell(0.0)
+        # A zero-width variable stays pinned at its only value after a tell.
+        self.assertEqual(algo.ask(), [5.0])
+
+
+class TestGlobalSearch(unittest.TestCase):
+    """Global search (LHS + DE) and the strategy switch."""
+    def test_lhs_is_stratified(self):
+        rng = random.Random(7)
+        count, n = 12, 3
+        pts = _latin_hypercube(count, n, rng)
+        self.assertEqual(len(pts), count)
+        for pt in pts:
+            self.assertEqual(len(pt), n)
+        for j in range(n):
+            buckets = set()
+            for i in range(count):
+                self.assertGreaterEqual(pts[i][j], 0.0)
+                self.assertLess(pts[i][j], 1.0)
+                buckets.add(int(pts[i][j] * count))
+            self.assertEqual(buckets, set(range(count)))
+    def test_de_converges_on_quadratic(self):
+        algo = phys_opt("global", ["a", "b"], [1.0, 0.0], [(0.0, 10.0), (-5.0, 5.0)], seed=3)
+        for _ in range(200):
+            pt = algo.ask()
+            algo.tell((pt[0] - 2.0) ** 2 + (pt[1] + 1.0) ** 2)
+        self.assertIsNotNone(algo.inner.best_y)
+        self.assertLess(algo.inner.best_y, 1e-4)
+    def test_de_handles_six_variables(self):
+        names = ["v%d" % i for i in range(6)]
+        algo = phys_opt("global", names, [0.0] * 6, [(-2.0, 2.0)] * 6, seed=11)
+        for _ in range(1200):
+            pt = algo.ask()
+            algo.tell(sum((pt[i] - 0.5) ** 2 for i in range(6)))
+        self.assertLess(algo.inner.best_y, 1e-3)
+    def test_de_escapes_local_trap(self):
+        # A shallow basin at (0.2, 0.2) traps a greedy descent; the global
+        # basin at (0.85, 0.85) must win for most seeds.
+        def trap(u):
+            g1 = (u[0] - 0.2) ** 2 + (u[1] - 0.2) ** 2 + 0.05
+            g2 = (u[0] - 0.85) ** 2 + (u[1] - 0.85) ** 2
+            return min(g1, g2)
+        escapes = 0
+        for seed in range(1, 13):
+            algo = phys_opt("global", ["a", "b"], [0.2, 0.2], [(0.0, 1.0)] * 2, seed=seed)
+            for _ in range(300):
+                pt = algo.ask()
+                algo.tell(trap(pt))
+            if algo.inner.best_y < 0.01:
+                escapes += 1
+        self.assertGreaterEqual(escapes, 8)
+    def test_de_points_stay_in_bounds(self):
+        algo = phys_opt("global", ["a", "b"], [5.0, 0.0], [(0.0, 10.0), (-5.0, 5.0)], seed=2)
+        for _ in range(60):
+            pt = algo.ask()
+            self.assertGreaterEqual(pt[0], 0.0)
+            self.assertLessEqual(pt[0], 10.0)
+            self.assertGreaterEqual(pt[1], -5.0)
+            self.assertLessEqual(pt[1], 5.0)
+            algo.tell(1e300)  # huge values must not push later points out of the box
+        # A normal evaluation afterwards still becomes the best (no corruption).
+        pt = algo.ask()
+        algo.tell(abs(pt[0] - 8.0))
+        self.assertLess(algo.inner.best_y, 1e3)
+    def test_restart_keeps_best_and_decays(self):
+        for strategy in ("global", "simplex"):
+            algo = phys_opt(strategy, ["a", "b"], [1.0, 0.0],
+                            [(0.0, 10.0), (-5.0, 5.0)], seed=5)
+            for _ in range(20):
+                pt = algo.ask()
+                algo.tell((pt[0] - 2.0) ** 2 + (pt[1] + 1.0) ** 2)
+            best_y = algo.inner.best_y
+            self.assertIsNotNone(best_y)
+            algo.restart(spread=0.25)
+            self.assertEqual(algo.inner.restarts, 1)
+            self.assertAlmostEqual(algo.inner.last_restart_radius, 0.25)
+            self.assertEqual(algo.inner.best_y, best_y)  # best survives the restart
+            for _ in range(6):
+                pt = algo.ask()
+                self.assertGreaterEqual(pt[0], 0.0)
+                self.assertLessEqual(pt[0], 10.0)
+                self.assertGreaterEqual(pt[1], -5.0)
+                self.assertLessEqual(pt[1], 5.0)
+                algo.tell((pt[0] - 2.0) ** 2 + (pt[1] + 1.0) ** 2)
+            algo.restart(spread=0.25)
+            self.assertEqual(algo.inner.restarts, 2)
+            self.assertLess(algo.inner.last_restart_radius, 0.25)
+    def test_strategy_validation(self):
+        self.assertEqual(Settings({}).strategy, "simplex")
+        self.assertEqual(Settings({"strategy": "global"}).strategy, "global")
+        self.assertEqual(Settings({"strategy": ""}).strategy, "simplex")
+        self.assertRaises(ValueError, Settings, {"strategy": "bad"})
+        try:
+            Settings({"strategy": "anneal"})
+        except ValueError as exc:
+            msg = str(exc)
+            self.assertIn("simplex", msg)
+            self.assertIn("global", msg)
+        else:
+            self.fail("Settings must reject an illegal strategy")
+    def test_strategy_selects_algorithm(self):
+        import algorithm as A
+        work = tempfile.mkdtemp()
+        cfg = {
+            "variables": [{"name": "x", "init": "1", "min": "0", "max": "2"}],
+            "targets": [{"output": "o", "metric": "scalar", "op": ">=", "goal": 0, "tol": 1}],
+            "output_dir": os.path.join(work, "out"),
+            "settings": {"max_iter": 3, "seed": 0, "strategy": "global"},
+        }
+        opt = Optimization(cfg, mock=True, max_iter=3)
+        self.assertIsInstance(opt.algo.inner, A.DifferentialEvolution)
+        self.assertEqual(opt.algo.name, "global")
+        cfg["settings"]["strategy"] = "simplex"
+        cfg["output_dir"] = os.path.join(work, "out2")
+        opt2 = Optimization(cfg, mock=True, max_iter=3)
+        self.assertIsInstance(opt2.algo.inner, A.NelderMead)
+        self.assertEqual(opt2.algo.name, "simplex")
+
+
+class TestPipeline(unittest.TestCase):
+    def test_mock_run_and_resume(self):
+        work = tempfile.mkdtemp()
+        out_dir = os.path.join(work, "out")
+        report = run_optimization(mock_config(out_dir, 20), mock=True)
+        self.assertEqual(report["iterations"], 20)
+        self.assertIsNotNone(report["best_total_error"])
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "report.json")))
+        for name in ("L1", "L2", "k0", "cin"):
+            self.assertIn(name, report["best_variables"])
+        # Resume must continue from iteration 20.
+        report2 = run_optimization(mock_config(out_dir, 30), mock=True)
+        self.assertEqual(report2["iterations"], 10)
+        self.assertLessEqual(report2["best_total_error"], report["best_total_error"])
+    def test_simulation_failures_stop_the_run(self):
+        work = tempfile.mkdtemp()
+        cfg = mock_config(os.path.join(work, "out"), 20)
+        cfg["virtuoso_bin"] = "/bin/false"
+        cfg["settings"]["fail_limit"] = 3
+        report = run_optimization(cfg, mock=False)
+        self.assertEqual(report["stop_reason"], "sim_failures")
+        self.assertEqual(report["iterations"], 3)
+    def test_stall_stops_the_run(self):
+        # A goal the mock model can not meet forces a stall stop.
+        work = tempfile.mkdtemp()
+        cfg = mock_config(os.path.join(work, "out"), 200)
+        cfg["settings"] = {"max_iter": 200, "patience": 3, "seed": 0,
+                           "max_restarts": 1, "improve_rel": 1e-6}
+        cfg["targets"] = [{"output": "S21 dB20", "metric": "band_min",
+                           "band": ["24G", "44G"], "op": ">=", "goal": 100, "tol": 0.5}]
+        report = run_optimization(cfg, mock=True)
+        self.assertIn(report["stop_reason"], ("no_feasible_solution", "no_improvement"))
+        self.assertLess(report["iterations"], 200)
+
+
+class TestFixes(unittest.TestCase):
+    """Regression tests for the 2026-10-14 hardening."""
+    def test_ticks_never_hang(self):
+        ticks = PlotCanvas._nice_ticks(2.4e9, 2.4e9 + 1e-6)
+        self.assertTrue(ticks)
+        self.assertIn(0.0, PlotCanvas._nice_ticks(0.0, 10.0))
+    def test_target_limit_validation(self):
+        base = {"output": "o", "metric": "scalar", "op": ">=", "goal": 1}
+        Target(dict(base))
+        bad = dict(base)
+        bad["curve_op"] = "above"
+        bad["limit"] = [1, 2]
+        self.assertRaises(ValueError, Target, bad)
+        bad2 = dict(base)
+        bad2["curve_op"] = "above"
+        bad2["limit"] = {"x": [1, 2], "y": [3]}
+        self.assertRaises(ValueError, Target, bad2)
+        good = dict(base)
+        good["curve_op"] = "below"
+        good["limit"] = {"x": ["1G", "2G"], "y": ["35", "35"]}
+        Target(good)
+        # A range target needs goal2.
+        self.assertRaises(ValueError, Target,
+                          {"output": "o", "metric": "scalar", "op": "range",
+                           "goal": 1, "tol": 0.1})
+    def test_env_merge(self):
+        r = RealRunner({"env": {"A": "1"}, "path_append": "/opt/x/bin"}, ".",
+                       env={"PATH": "/usr/bin", "DISPLAY": ":0"})
+        env = r._environment()
+        self.assertEqual(env.get("A"), "1")
+        self.assertNotIn("DISPLAY", env)
+        self.assertTrue(env.get("PATH", "").endswith("/opt/x/bin"))
+    def test_settings_seed(self):
+        self.assertIsNone(Settings({"seed": None}).seed)
+        self.assertEqual(Settings({}).seed, 0)
+    def test_netlist_parameter_rewrite(self):
+        # A PCell subckt keeps its own parameters line (_par0 style names);
+        # only the top level line may be rewritten.
+        deck = (
+            "simulator lang=spectre\n"
+            "global 0\n"
+            "parameters k=0.6 R1=1k L1=250p\n"
+            "subckt parxfmr (t1 b1 t2 b2)\n"
+            "parameters _par0=k _par1=L1 _par2=250p\n"
+            "K4 (t1 b1 t2 b2) ind coupling=_par0\n"
+            "ends parxfmr\n"
+            "I3 (a 0 b 0) parxfmr\n"
+            "op\n"
+        )
+        self.assertEqual(parse_netlist_parameters(deck),
+                         {"k": "0.6", "R1": "1k", "L1": "250p"})
+        line = "parameters k=0.75 R1=1k L1=300p"
+        new_text, n = rewrite_netlist_parameters(deck, line)
+        self.assertEqual(n, 1)
+        self.assertIn(line, new_text)
+        self.assertIn("parameters _par0=k _par1=L1 _par2=250p", new_text)
+        self.assertIn("coupling=_par0", new_text)
+        # Multiple top-level parameters merge into one line.
+        deck = ("parameters a=1\nparameters b=2\nsubckt s (p n)\n"
+                "parameters a=9\nends s\n")
+        self.assertEqual(parse_netlist_parameters(deck), {"a": "1", "b": "2"})
+        line = "parameters a=5 b=2"
+        new_text, n = rewrite_netlist_parameters(deck, line)
+        self.assertEqual(n, 2)
+        self.assertEqual(new_text.count(line), 1)
+        self.assertIn("parameters a=9", new_text)
+        self.assertNotIn("parameters b=2\nparameters", new_text)
+        # Continuation lines fold into the rewriting.
+        deck = "parameters a=1 \\\n+ b=2\nsubckt s (p n)\nends s\n"
+        self.assertEqual(parse_netlist_parameters(deck), {"a": "1", "b": "2"})
+        new_text, n = rewrite_netlist_parameters(deck, "parameters a=3 b=4")
+        self.assertEqual(n, 1)
+        self.assertIn("parameters a=3 b=4", new_text)
+        self.assertNotIn("+ b=2", new_text)
+        # No top-level parameters: report 0 and leave the deck untouched.
+        deck = "subckt s (p n)\nparameters a=1\nends s\n"
+        self.assertEqual(parse_netlist_parameters(deck), {})
+        new_text, n = rewrite_netlist_parameters(deck, "parameters a=2")
+        self.assertEqual(n, 0)
+        self.assertEqual(new_text, deck)
+
+
+class TestCurvesTabRemoved(unittest.TestCase):
+    """The removed curves tab stays gone; the live-plot helpers remain."""
+    def test_live_plot_helpers_kept(self):
+        for name in ("_record_curves", "_draw_live_curves", "_output_name_list",
+                     "_var_bounds_from_table", "_load_history_data"):
+            self.assertTrue(hasattr(OptimizerGui, name), name)
+
+
+class TestRunDirs(unittest.TestCase):
+    """Run folder layout and fresh numbering (logs structure)."""
+    def test_circuit_id(self):
+        self.assertEqual(circuit_id({"library": "lib", "cell": "cell"}), "lib_cell")
+        self.assertEqual(circuit_id({"library_cell": "lib_cell"}), "lib_cell")
+        self.assertEqual(circuit_id({"cell": "onlycell"}), "onlycell")
+        self.assertEqual(circuit_id({"name": "mytask"}), "mytask")
+        self.assertEqual(circuit_id({}), "circuit")
+        # Two circuits of one task must not share a logs folder.
+        self.assertNotEqual(circuit_id({"name": "t", "library": "a", "cell": "b"}),
+                            circuit_id({"name": "t", "library": "a", "cell": "c"}))
+        # The id is always a single path element (no separators or wildcards).
+        cid = circuit_id({"library": "a/b", "cell": 'c:d*e?f'})
+        self.assertNotIn(os.sep, cid)
+        for bad in (":", "*", "?", '"'):
+            self.assertNotIn(bad, cid)
+        self.assertEqual(cid, os.path.basename(cid))
+        self.assertEqual(circuit_id({"name": "  .. "}), "circuit")
+    def test_make_run_dir_layout_and_collision(self):
+        root = tempfile.mkdtemp()
+        path = make_run_dir(root, "cc")
+        self.assertTrue(os.path.isdir(path))
+        self.assertEqual(os.path.dirname(path), os.path.join(os.path.abspath(root), "cc"))
+        self.assertTrue(os.path.basename(path).startswith("run_"))
+        path2 = make_run_dir(root, "cc")
+        self.assertNotEqual(path, path2)
+        self.assertTrue(os.path.isdir(path))
+        self.assertTrue(os.path.isdir(path2))
+    def test_resolve_run_dir_rules(self):
+        # 1) Default: logs/<circuit>/run_*. The typed field keeps our run
+        # folder, so the next start builds a sibling, never a child.
+        work = tempfile.mkdtemp()
+        old = os.getcwd()
+        os.chdir(work)
+        try:
+            cfg = {"output_dir": "logs/run", "name": "滤波器"}
+            path, state = resolve_run_dir(cfg)
+            self.assertEqual(os.path.dirname(path), os.path.join(work, "logs", circuit_id(cfg)))
+            self.assertTrue(os.path.isdir(path))
+            path2, _state2 = resolve_run_dir(dict(cfg, output_dir=path), prev=state)
+            self.assertNotEqual(path2, path)
+            self.assertEqual(os.path.dirname(path2), os.path.dirname(path))
+        finally:
+            os.chdir(old)
+        # 2) A typed empty folder is used as-is; once it holds data the next
+        # start gets a circuit folder with a run folder inside it.
+        base = os.path.join(tempfile.mkdtemp(), "myout")
+        cfg = {"output_dir": base, "library": "L", "cell": "C"}
+        path, state = resolve_run_dir(cfg)
+        self.assertEqual(path, os.path.abspath(base))
+        self.assertTrue(os.path.isdir(path))
+        with open(os.path.join(path, "history.csv"), "w", encoding="utf-8") as f:
+            f.write("index\n")
+        path2, _state2 = resolve_run_dir(dict(cfg, output_dir=path), prev=state)
+        self.assertNotEqual(path2, path)
+        self.assertEqual(os.path.dirname(path2), os.path.join(path, "L_C"))
+        self.assertTrue(os.path.basename(path2).startswith("run_"))
+        # 3) Resume reuses the folder; a later fresh start is a sibling.
+        work = tempfile.mkdtemp()
+        cfg = {"output_dir": os.path.join(work, "task"), "name": "n"}
+        path, state = resolve_run_dir(cfg)
+        with open(os.path.join(path, "history.csv"), "w", encoding="utf-8") as f:
+            f.write("index\n")
+        again, _state2 = resolve_run_dir(dict(cfg, output_dir=path), resume=True)
+        self.assertEqual(again, path)
+        fresh, _state3 = resolve_run_dir(dict(cfg, output_dir=again), prev=state)
+        self.assertNotEqual(fresh, path)
+        self.assertTrue(fresh.startswith(path + os.sep))
+        # 4) A fresh start gets a sibling run folder, never a deeper nest.
+        work = tempfile.mkdtemp()
+        cfg = {"output_dir": os.path.join(work, "logs"), "name": "a"}
+        d1, s1 = resolve_run_dir(cfg)
+        with open(os.path.join(d1, "history.csv"), "w", encoding="utf-8") as f:
+            f.write("index\n")
+        d2, s2 = resolve_run_dir(dict(cfg, output_dir=d1), prev=s1)
+        self.assertNotEqual(d1, d2)
+        self.assertTrue(d2.startswith(d1 + os.sep))
+        self.assertTrue(os.path.basename(d2).startswith("run_"))
+        with open(os.path.join(d2, "history.csv"), "w", encoding="utf-8") as f:
+            f.write("index\n")
+        d3, _s3 = resolve_run_dir(dict(cfg, output_dir=d2), prev=s2)
+        self.assertNotEqual(d2, d3)
+        self.assertEqual(os.path.dirname(d3), os.path.dirname(d2))
+    def test_run_index_lifecycle(self):
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        report = run_optimization(mock_config(out, 4), mock=True, resume=False)
+        self.assertEqual(report["iterations"], 4)
+        # A fresh start labels its folder (circuit, start time) and starts at 0.
+        with open(os.path.join(out, "run_meta.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta["circuit"], circuit_id(mock_config(out, 1)))
+        self.assertFalse(meta["resumed"])
+        with open(os.path.join(out, "iter_0000", "record.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["index"], 0)
+        with open(os.path.join(out, "history.csv"), encoding="utf-8") as f:
+            rows = [ln for ln in f.read().splitlines() if ln.strip()]
+        self.assertEqual(len(rows), 5)  # header + 4 iterations
+        self.assertTrue(rows[1].startswith("0,"))
+        # Resume continues the index.
+        report = run_optimization(mock_config(out, 7), mock=True, resume=True)
+        self.assertEqual(report["iterations"], 3)
+        # A new fresh start never continues an older run's numbering.
+        out2 = os.path.join(work, "out2")
+        run_optimization(mock_config(out2, 5), mock=True, resume=False)
+        report = run_optimization(mock_config(out2, 2), mock=True, resume=False)
+        self.assertEqual(report["iterations"], 2)
+        with open(os.path.join(out2, "history.csv"), encoding="utf-8") as f:
+            rows = [ln for ln in f.read().splitlines() if ln.strip()]
+        self.assertEqual(len(rows), 3)  # header + 2, old rows dropped
+
+
+class TestHistorySeedV05(unittest.TestCase):
+    """History warm-start feeds algorithm internals."""
+    def test_seed_history_fills_models(self):
+        import algorithm as A
+        algo = A.create("tpe", ["a", "b"], [(0.0, 10.0)] * 2, seed=1)
+        algo.seed_history([([1.0, 2.0], 5.0), ([3.0, 4.0], 1.0)])
+        self.assertEqual(len(algo._X), 2)
+        self.assertEqual(algo.eval_count, 2)
+        self.assertAlmostEqual(algo.best_y, 1.0)
+        algo = A.create("de", ["a", "b"], [(0.0, 10.0)] * 2, seed=1)
+        algo.seed_history([([float(i), float(i) + 1], float(i)) for i in range(4)])
+        filled = sum(1 for v in algo.pop_values if v is not None)
+        self.assertGreaterEqual(filled, 4)
+    def test_snapshot_restore_beats_seeding(self):
+        # 12 mock iterations write a snapshot at iteration 9 (seed 7 never
+        # hits the total=0 early stop).
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "run")
+        cfg = example_config()
+        cfg["output_dir"] = out
+        cfg["settings"]["strategy"] = "cmaes_ipop"
+        cfg["settings"]["seed"] = 7
+        run_optimization(copy.deepcopy(cfg), mock=True, max_iter=12)
+        self.assertTrue([f for f in os.listdir(out) if f.startswith("snapshot")])
+        cfg2 = copy.deepcopy(cfg)
+        cfg2["settings"]["max_iter"] = 14
+        opt = Optimization(cfg2, mock=True, resume=True)
+        self.assertTrue(opt._try_restore_snapshot())
+    def test_no_snapshot_seeds_history(self):
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "run")
+        cfg = example_config()
+        cfg["output_dir"] = out
+        cfg["settings"]["strategy"] = "tpe"
+        cfg["settings"]["seed"] = 5
+        run_optimization(copy.deepcopy(cfg), mock=True, max_iter=3)
+        cfg2 = copy.deepcopy(cfg)
+        cfg2["settings"]["max_iter"] = 5
+        opt = Optimization(cfg2, mock=True, resume=True)
+        self.assertTrue(opt._history_seeds)
+        self.assertFalse(opt._try_restore_snapshot())
+        opt._seed_from_history()
+        self.assertGreaterEqual(opt.algo.inner.eval_count, len(opt._history_seeds))
+
+
+class TestResumeEquivalenceV05(unittest.TestCase):
+    """Interrupted + resumed run equals the uninterrupted run."""
+    def test_resume_matches_uninterrupted(self):
+        work = tempfile.mkdtemp()
+        cfg = example_config()
+        cfg["settings"]["strategy"] = "cmaes_ipop"
+        cfg["settings"]["seed"] = 7
+        cfg_a = copy.deepcopy(cfg)
+        cfg_a["output_dir"] = os.path.join(work, "a")
+        rep_a = run_optimization(cfg_a, mock=True, max_iter=24)
+        cfg_b = copy.deepcopy(cfg)
+        cfg_b["output_dir"] = os.path.join(work, "b")
+        run_optimization(copy.deepcopy(cfg_b), mock=True, max_iter=12)
+        rep_b = run_optimization(cfg_b, mock=True, max_iter=24)
+        self.assertAlmostEqual(rep_a["best_total_error"], rep_b["best_total_error"], places=9)
+
+
+class TestV06Hooks(unittest.TestCase):
+    """librf_opt hook present/absent: behaviour and runner selection."""
+    def test_runners_without_layout_em(self):
+        stop_all_runners()  # must not raise with or without librf_opt
+        cfg = example_config()
+        cfg["settings"]["seed"] = 1
+        opt = Optimization(cfg, mock=True, max_iter=1)
+        self.assertTrue(hasattr(opt.runner, "run"))
+        self.assertEqual(type(opt.runner).__name__, "MockRunner")
+    def test_runner_with_layout_em_mock(self):
+        import librf_opt  # noqa: F401 - must be importable in this deployment
+        work = tempfile.mkdtemp()
+        cfg = example_config()
+        cfg["settings"]["seed"] = 1
+        cfg["output_dir"] = os.path.join(work, "out")
+        cfg["variables"] = [
+            {"name": "dout", "init": "150", "min": "80", "max": "250"},
+            {"name": "L1", "init": "100p", "min": "50p", "max": "200p"},
+        ]
+        cfg["targets"] = [{"output": "L0", "metric": "scalar", "goal": 2e-9,
+                           "op": ">=", "tol": 0.5, "weight": 1.0}]
+        cfg["layout_em"] = {
+            "enabled": True, "type": "ind", "cell": "t", "work": work,
+            "geom_vars": ["dout"], "fixed_geom": {"n": 2.5},
+            "snp": os.path.join(work, "snps", "t.s2p"),
+            "emx": {"freq": "1e9:2e9:2"}, "geom_outputs": True, "mock": True}
+        opt = Optimization(cfg, mock=True, max_iter=1)
+        self.assertEqual(type(opt.runner).__name__, "GeomRunner")
+        rep = run_optimization(cfg, mock=True, max_iter=2)
+        self.assertIn(rep.get("stop_reason") or rep.get("reason"),
+                      ("max_iterations", "targets_met"))
+        recs = glob.glob(os.path.join(cfg["output_dir"], "iter_*", "record.json"))
+        self.assertTrue(recs)
+        with open(recs[0]) as fh:
+            rec = json.load(fh)
+        self.assertEqual(rec.get("status"), "ok")
+        self.assertIn("L0", json.dumps(rec))
+
+
+class TestToolDiscovery(unittest.TestCase):
+    """Tool paths probed at run time; no absolute paths in the config."""
+    def test_find_prog_env_override(self):
+        os.environ["OPT_TEST_PROG"] = "/bin/sh"
+        try:
+            path, src = find_prog("sh", ("OPT_TEST_PROG",))
+            self.assertEqual(src, "env")
+            self.assertTrue(path.endswith("sh"))
+        finally:
+            del os.environ["OPT_TEST_PROG"]
+    def test_find_prog_fallbacks(self):
+        work = tempfile.mkdtemp(prefix="v09_probe_")
+        name = "v09_probe_tool.exe" if os.name == "nt" else "v09_probe_tool"
+        exe = os.path.join(work, name)
+        with open(exe, "w") as fh:
+            fh.write("")
+        if os.name != "nt":
+            os.chmod(exe, 0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = work + os.pathsep + old_path
+        try:
+            path, src = find_prog(name, ())
+            self.assertEqual(src, "which")
+            self.assertEqual(os.path.normcase(os.path.abspath(path)),
+                             os.path.normcase(os.path.abspath(exe)))
+        finally:
+            os.environ["PATH"] = old_path
+            os.remove(exe)
+            os.rmdir(work)
+        path, src = find_prog("no_such_tool_xyz", ("OPT_NOPE",))
+        self.assertIsNone(path)
+        self.assertEqual(src, "none")
+    def test_resolve_prog_rules(self):
+        self.assertEqual(resolve_prog("spectre", "/bin/sh"), "/bin/sh")
+        # Explicit junk but a probe hit -> probe wins (cache injected so this
+        # runs without Cadence).
+        saved = dict(_TOOL_CACHE)
+        _TOOL_CACHE.clear()
+        try:
+            _TOOL_CACHE["spectre"] = {"path": "/bin/sh", "src": "which"}
+            self.assertEqual(resolve_prog("spectre", "/no/such/spectre-xyz"), "/bin/sh")
+            # Nothing found -> explicit value or the command name.
+            _TOOL_CACHE.clear()
+            self.assertEqual(resolve_prog("xyz_tool", "/no/such/xyz"), "/no/such/xyz")
+            self.assertEqual(resolve_prog("xyz_tool", None), "xyz_tool")
+        finally:
+            _TOOL_CACHE.clear()
+            _TOOL_CACHE.update(saved)
+        self.assertEqual(resolve_prog("virtuoso", "virtuoso"),
+                         resolve_prog("virtuoso", "virtuoso"))
+    def test_discover_tools_shape(self):
+        tools = discover_tools()
+        for key in ("spectre", "virtuoso", "emx", "dbaccess", "strmout", "ocean"):
+            self.assertIn(key, tools)
+            self.assertIn("path", tools[key])
+            self.assertIn("src", tools[key])
+            self.assertIn(tools[key]["src"], ("env", "hint", "which", "root", "none"))
+        rep = tool_report()
+        self.assertIn("spectre", rep)
+        self.assertIn("virtuoso", rep)
+
+
+class TestTextEncoding(unittest.TestCase):
+    """Chinese text I/O must never raise UnicodeDecodeError in any locale.
+
+    Target machine: Python 3.6 + C locale (ANSI_X3.4-1968); a bare open()
+    reading Chinese crashes (the layout-log failure root cause).
+    """
+    def test_utf8_text_roundtrip(self):
+        work = tempfile.mkdtemp()
+        p = os.path.join(work, "cjk.txt")
+        with _native_open(p, "wb") as f:
+            f.write("画矩形失败 layer=TM\n".encode("utf-8"))
+        with open(p) as f:
+            self.assertIn("画矩形失败", f.read())
+        p = os.path.join(work, "cjk2.json")
+        with open(p, "w") as f:
+            json.dump({"name": "测试电感"}, f, ensure_ascii=False)
+        with open(p) as f:
+            self.assertEqual(json.load(f)["name"], "测试电感")
+        p = os.path.join(work, "cjk3.txt")
+        with _native_open(p, "wb") as f:
+            f.write("北京".encode("utf-8"))
+        self.assertIn("北京", _read_text(p))
+        # run folders keep Chinese names in record.json
+        p = os.path.join(work, "record.json")
+        with open(p, "w") as f:
+            json.dump({"index": 0, "name": "电感优化"}, f, ensure_ascii=False)
+        with open(p) as f:
+            self.assertEqual(json.load(f)["name"], "电感优化")
+    def test_binary_mode_untouched(self):
+        p = os.path.join(tempfile.mkdtemp(), "bin.dat")
+        data = bytes(range(256))
+        with open(p, "wb") as f:
+            f.write(data)
+        with open(p, "rb") as f:
+            self.assertEqual(f.read(), data)
+
+
+class _CompactBase(unittest.TestCase):
+    DECK = (
+        "// sim deck header\n"
+        "simulator lang=spectre\n"
+        "global 0\n"
+        "parameters L1=250p L2=280p k0=0.75 cin=100f\n"
+        "subckt pcell(a)\n"
+        "parameters _par0=k\n"
+        "R1 (a 0) resistor r=50\n"
+        "ends pcell\n"
+        "V1 (in 0) vdc dc=1\n"
+        "X1 (in 0) pcell\n"
+        "sp sp1 ports=[in 0] start=1 stop=10\n"
+    )
+    def _run_dir(self):
+        run_dir = os.path.join(tempfile.mkdtemp(), "run")
+        os.makedirs(run_dir)
+        return run_dir
+    def _write_iter(self, run_dir, index, params_line, full_text=None):
+        """Write one iteration folder: netlist, big spectre log, psf, result."""
+        iter_dir = os.path.join(run_dir, "iter_%04d" % index)
+        os.makedirs(iter_dir, exist_ok=True)
+        text = (full_text if full_text is not None
+                else rewrite_netlist_parameters(self.DECK, params_line)[0])
+        with open(os.path.join(iter_dir, "input.scs"), "w", encoding="utf-8") as f:
+            f.write(text)
+        # A spectre log with a big repeated header (typical).
+        header = "Sun Spectre 23.1\nLicensed by cadence\n" + ("x" * 200)
+        with open(os.path.join(iter_dir, "spectre.log"), "w", encoding="utf-8") as f:
+            f.write(header * 80 + "\nError: none really\nTAIL-%d\n" % index)
+        return iter_dir, text
+
+
+class TestCompactLog(_CompactBase):
+    """Q4: compact iteration storage + lossless reconstruct."""
+    def test_netlist_dedup_and_reconstruct(self):
+        run_dir = self._run_dir()
+        texts = []
+        for i in range(5):
+            params_line = "parameters L1=%dp L2=280p k0=0.7 cin=100f" % (100 + i)
+            iter_dir, text = self._write_iter(run_dir, i, params_line)
+            texts.append(text)
+            meta = compact_netlist_file(iter_dir, text, params_line)
+            self.assertEqual(meta["base"], NETLIST_BASE_NAME)
+            self.assertFalse(os.path.isfile(os.path.join(iter_dir, "input.scs")))
+            # Iron rule: the full copy is archived under a new name, never deleted.
+            self.assertTrue(any(n.startswith("input.scs.old-") for n in os.listdir(iter_dir)))
+            self.assertTrue(os.path.isfile(os.path.join(iter_dir, NETLIST_META_NAME)))
+        self.assertTrue(os.path.isfile(os.path.join(run_dir, NETLIST_BASE_NAME)))
+        for i, want in enumerate(texts):
+            got, _path = reconstruct_input_scs(run_dir, i)
+            self.assertEqual(got, want)
+            self.assertEqual(_sha1_text(got), _sha1_text(want))
+        # Corrupt the recorded hash: reconstruct must refuse.
+        meta_path = os.path.join(iter_dir, NETLIST_META_NAME)
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["sha1"] = "0" * 40
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        self.assertRaises(ValueError, reconstruct_input_scs, run_dir, len(texts) - 1)
+    def test_spectre_log_gzip_keeps_tail_and_errors(self):
+        iter_dir = os.path.join(tempfile.mkdtemp(), "iter_0001")
+        os.makedirs(iter_dir)
+        log = os.path.join(iter_dir, "spectre.log")
+        body = ("header line\n" * 500 + "Error: fatal thing\n" + "end\n").encode("utf-8")
+        with open(log, "wb") as f:
+            f.write(body)
+        self.assertIsNotNone(compact_spectre_log(iter_dir))
+        self.assertTrue(os.path.isfile(log + ".gz"))
+        with gzip.open(log + ".gz", "rb") as gz:
+            raw = gz.read()
+        self.assertEqual(hashlib.sha1(raw).hexdigest(), hashlib.sha1(body).hexdigest())
+        kept = open(log, encoding="utf-8").read()
+        self.assertIn("spectre.log.gz", kept)
+        self.assertIn("Error: fatal thing", kept)
+        self.assertIn("end", kept)
+        # The kept log must shrink: tail is capped below the original.
+        self.assertLess(len(kept), len(body))
+        total = os.path.getsize(log) + os.path.getsize(log + ".gz")
+        self.assertLess(total, len(body) + 512)
+    def test_save_raw_0_and_1_unchanged(self):
+        work = tempfile.mkdtemp()
+        lg0 = RunLogger(os.path.join(work, "a"), save_raw=0, log_mode=LOG_MODE_FULL)
+        p0 = lg0.iter_dir(0)
+        os.makedirs(os.path.join(p0, "psf"), exist_ok=True)
+        lg0.log_iteration(0, {"x": "1"}, {"total": 1.0, "errors": {}}, "ok")
+        # save_raw=0 is applied by the runner, not the logger.
+        self.assertTrue(os.path.isdir(os.path.join(p0, "psf")))
+        lg1 = RunLogger(os.path.join(work, "b"), save_raw=1, log_mode=LOG_MODE_FULL)
+        p1 = lg1.iter_dir(0)
+        os.makedirs(os.path.join(p1, "psf"), exist_ok=True)
+        lg1.log_iteration(0, {"x": "1"}, {"total": 1.0, "errors": {}}, "ok")
+        lg1.finalize()
+        self.assertTrue(os.path.isdir(os.path.join(p1, "psf")))
+    def test_manifest_lists_files_and_hashes(self):
+        work = tempfile.mkdtemp()
+        logger = RunLogger(work, save_raw=1, log_mode=LOG_MODE_COMPACT)
+        path = logger.iter_dir(0)
+        with open(os.path.join(path, "result.txt"), "w", encoding="utf-8") as f:
+            f.write("STATUS ok\n")
+        logger.log_iteration(0, {"L1": "250p"}, {"total": 1.0, "errors": {}}, "ok")
+        self.assertTrue(os.path.isfile(os.path.join(work, MANIFEST_NAME)))
+        with open(os.path.join(work, MANIFEST_NAME), encoding="utf-8") as f:
+            entry = json.loads(f.readline())
+        self.assertEqual(entry["index"], 0)
+        self.assertEqual(entry["log_mode"], LOG_MODE_COMPACT)
+        self.assertIn("result.txt", entry["files"])
+        self.assertEqual(len(entry["files"]["result.txt"]["sha1"]), 40)
+    def test_full_mode_leaves_netlist_and_log_alone(self):
+        run_dir = self._run_dir()
+        params_line = "parameters L1=1 L2=2 k0=3 cin=4"
+        iter_dir, text = self._write_iter(run_dir, 0, params_line)
+        cfg = {"log_mode": "full"}
+        self.assertEqual(_log_mode_of(cfg), LOG_MODE_FULL)
+        # full mode: the compaction policy is a no-op.
+        if _log_mode_of(cfg) == LOG_MODE_COMPACT:
+            compact_netlist_file(iter_dir, text, params_line)
+        self.assertTrue(os.path.isfile(os.path.join(iter_dir, "input.scs")))
+        self.assertFalse(os.path.isfile(os.path.join(run_dir, NETLIST_BASE_NAME)))
+        # A full-mode iteration reconstructs straight from the on-disk netlist.
+        self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], text)
+    def test_compact_mock_run_writes_manifest_and_zips(self):
+        out_dir = os.path.join(tempfile.mkdtemp(), "out")
+        cfg = mock_config(out_dir, 6)
+        cfg["log_mode"] = "compact"
+        report = run_optimization(cfg, mock=True)
+        self.assertEqual(report["iterations"], 6)
+        self.assertTrue(os.path.isfile(os.path.join(out_dir, MANIFEST_NAME)))
+        # mock_s21.txt.gz exists; result.txt stays for the GUI.
+        self.assertTrue(glob.glob(os.path.join(out_dir, "iter_*", "mock_s21.txt.gz")))
+        self.assertTrue(glob.glob(os.path.join(out_dir, "iter_*", "result.txt")))
+        # history + resume untouched by compact mode.
+        self.assertTrue(os.path.isfile(os.path.join(out_dir, "history.csv")))
+        report2 = run_optimization(mock_config(out_dir, 8), mock=True)
+        self.assertEqual(report2["iterations"], 2)
+    def test_e2e_size_compact_beats_full(self):
+        """Synthetic RealRunner-sized artifacts: compact saves >=50%.
+
+        Sizes follow the user report (tens to 100KB of repeated netlist+log
+        per iter). live = working set (excludes .old-* archives, which the
+        iron rule never deletes).
+        """
+        def walk_size(root, live_only=True):
+            total = 0
+            for dirpath, dirnames, files in os.walk(root):
+                if live_only:
+                    dirnames[:] = [d for d in dirnames if ".old-" not in d]
+                for name in files:
+                    if ".old-" not in name:
+                        total += os.path.getsize(os.path.join(dirpath, name))
+            return total
+        def build(mode, save_raw):
+            run_dir = self._run_dir()
+            logger = RunLogger(run_dir, save_raw=save_raw, log_mode=mode)
+            # ~80KB deck and ~80KB spectre.log: the repetitive per-iter bulk.
+            deck = self.DECK + ("// pad line for realistic size\n" * 2600)
+            for i in range(20):
+                params_line = ("parameters L1=%dp L2=%dp k0=0.%d cin=100f"
+                               % (150 + i, 200 + i, 40 + (i % 20)))
+                iter_dir, text = self._write_iter(
+                    run_dir, i, params_line,
+                    full_text=rewrite_netlist_parameters(deck, params_line)[0])
+                os.makedirs(os.path.join(iter_dir, "psf"), exist_ok=True)
+                with open(os.path.join(iter_dir, "psf", "data.psf"), "wb") as f:
+                    f.write(b"\x00" * 100000)
+                with open(os.path.join(iter_dir, "result.txt"), "w", encoding="utf-8") as f:
+                    f.write("STATUS ok\nCURVE_BEGIN S21\n")
+                    for k in range(400):
+                        f.write("%d %d\n" % (k, k * 2))
+                    f.write("CURVE_END\n")
+                if mode == LOG_MODE_COMPACT:
+                    compact_netlist_file(iter_dir, text, params_line)
+                    compact_spectre_log(iter_dir)
+                if save_raw == 0:
+                    _archive_aside(os.path.join(iter_dir, "psf"))
+                if i == 5:
+                    total, status = 1e6, "fail: x"
+                elif i < 4:
+                    total, status = float(5 - i), "ok"
+                else:
+                    total, status = 2.5 + 0.01 * i, "ok"
+                logger.log_iteration(i, {"L1": "1p"}, {"total": total, "errors": {}}, status)
+            logger.finalize()
+            return run_dir, walk_size(run_dir, True), walk_size(run_dir, False)
+        run_full, full_live, full_all = build(LOG_MODE_FULL, 1)
+        run_cmp, cmp_live, cmp_all = build(LOG_MODE_COMPACT, 2)
+        self.assertLess(cmp_live, full_live)
+        self.assertLessEqual(cmp_live, full_live * 0.5)
+        # compact+save_raw=2 live size is the working set; .old-* archives
+        # stay on disk (iron rule) and are reported.
+        self.assertLess(cmp_all, full_all)
+        # Reconstruct every iter of the compact dir.
+        for i in range(20):
+            text, _p = reconstruct_input_scs(run_cmp, i)
+            self.assertIn("parameters", text)
+            self.assertGreater(len(text), 1000)
+
+
+class TestCompactRobust(_CompactBase):
+    """Q4 crash injection + state-machine hardening (P0/P1 regressions)."""
+    def _psf_ok(self, run_dir, index):
+        return os.path.isdir(os.path.join(run_dir, "iter_%04d" % index, "psf"))
+    def _archived(self, run_dir, index, prefix):
+        names = os.listdir(os.path.join(run_dir, "iter_%04d" % index))
+        return any(n.startswith(prefix) for n in names)
+    def _logger(self, save_raw=2):
+        work = tempfile.mkdtemp()
+        return work, RunLogger(work, save_raw=save_raw, log_mode=LOG_MODE_COMPACT)
+    def _log_one(self, logger, index, total, status="ok"):
+        path = logger.iter_dir(index)
+        os.makedirs(os.path.join(path, "psf"), exist_ok=True)
+        with open(os.path.join(path, "psf", "data.psf"), "wb") as f:
+            f.write(b"\x01" * 64)
+        with open(os.path.join(path, "result.txt"), "w", encoding="utf-8") as f:
+            f.write("STATUS ok\nCURVE_BEGIN S21\n0 %d\nCURVE_END\n" % index)
+        return logger.log_iteration(index, {"x": "1"}, {"total": total, "errors": {}}, status)
+    def test_p0_gzip_does_not_lose_new_content(self):
+        work = tempfile.mkdtemp()
+        path = os.path.join(work, "dump.txt")
+        with open(path, "wb") as f:
+            f.write(b"A" * 20000)
+        gz1 = gzip_file_in_place(path, keep_stub=False)
+        self.assertEqual(gz1, path + ".gz")  # stable name
+        # A same-name smaller file replaces the old gzip content (the old gz
+        # is bigger than the new raw: the P0 bug skipped the rewrite).
+        small = b"B" * 40
+        with open(path, "wb") as f:
+            f.write(small)
+        self.assertEqual(gzip_file_in_place(path, keep_stub=False), gz1)
+        with gzip.open(gz1, "rb") as gz:
+            self.assertEqual(gz.read(), small)
+        # Iron rule: raw archived under .old-, never deleted.
+        self.assertFalse(os.path.isfile(path))
+        self.assertTrue(any(n.startswith("dump.txt.old-") for n in os.listdir(work)))
+        # A corrupt .gz is rewritten from the raw bytes.
+        with open(path, "wb") as f:
+            f.write(b"C" * 100)
+        with open(gz1, "wb") as f:
+            f.write(b"not gzip at all")
+        self.assertEqual(gzip_file_in_place(path, keep_stub=False), gz1)
+        with gzip.open(gz1, "rb") as gz:
+            self.assertEqual(gz.read(), b"C" * 100)
+    def test_p1_resume_seeds_best(self):
+        work, logger = self._logger()
+        logger.seed_best(1.0)  # historical best 1.0
+        self._log_one(logger, 5, 5.0)  # worse -> ordinary, not best
+        entries = read_manifest(os.path.join(work, MANIFEST_NAME))
+        self.assertEqual(entries[5]["psf_kept"], "ordinary",
+                         "the first ok after resume must not be mistaken for best")
+        self._log_one(logger, 6, 0.5)  # a real new best
+        self.assertTrue(self._psf_ok(work, 6))
+        self._log_one(logger, 7, 0.7)  # ordinary -> expire 5
+        self.assertFalse(self._psf_ok(work, 5), "ordinary 5 is archived when replaced")
+        self.assertTrue(self._archived(work, 5, "psf.old-"))
+        logger.finalize()
+        self.assertTrue(self._psf_ok(work, 7), "last ordinary kept")
+        self.assertTrue(self._psf_ok(work, 6), "best kept")
+        # Without a seed the first ok is treated as best (keep more, never lose).
+        work, logger = self._logger()
+        self._log_one(logger, 3, 9.0)
+        self.assertTrue(self._psf_ok(work, 3))
+    def test_p1_manifest_sync_after_expire(self):
+        work, logger = self._logger()
+        self._log_one(logger, 0, 1.0)  # first
+        self._log_one(logger, 1, 2.0)  # ordinary pending
+        self._log_one(logger, 2, 3.0)  # ordinary -> expire 1
+        logger.finalize()              # keep 2 as last
+        entries = read_manifest(os.path.join(work, MANIFEST_NAME))
+        self.assertIn(1, entries)
+        e1 = entries[1]
+        self.assertFalse(e1.get("provisional", False))
+        self.assertNotIn("result.txt", e1["files"],
+                         "after expire the manifest must not list the gone plain result.txt")
+        self.assertIn("result.txt.gz", e1["files"])
+        for name, info in e1["files"].items():
+            fp = os.path.join(work, "iter_0001", name)
+            self.assertTrue(os.path.isfile(fp), "manifest files must exist on disk")
+            self.assertEqual(info["sha1"], _sha1_file(fp))
+        # At least one retention refresh; read_manifest keeps the newest per index.
+        raw_lines = open(os.path.join(work, MANIFEST_NAME), encoding="utf-8").read()
+        self.assertIn('"type": "retention"', raw_lines)
+        self.assertEqual(entries[1].get("type"), "retention")
+    def test_manifest_sha1_matches_disk_after_finalize(self):
+        work, logger = self._logger()
+        for i, total in enumerate([1.0, 5.0, 4.0, 3.0, 2.0, 6.0]):
+            self._log_one(logger, i, total, "fail: x" if i == 2 else "ok")
+        logger.finalize()
+        entries = read_manifest(os.path.join(work, MANIFEST_NAME))
+        self.assertTrue(entries)
+        for index, entry in entries.items():
+            path = os.path.join(work, "iter_%04d" % index)
+            for name, info in (entry.get("files") or {}).items():
+                fp = os.path.join(path, name)
+                self.assertTrue(os.path.isfile(fp), "iter %d missing %s" % (index, name))
+                self.assertEqual(info["sha1"], _sha1_file(fp),
+                                 "iter %d %s sha1 mismatch" % (index, name))
+                self.assertEqual(info["bytes"], os.path.getsize(fp))
+    def _run_order(self, plan):
+        """plan = [(index, total, status), ...]; return the kept set."""
+        work, logger = self._logger()
+        for index, total, status in plan:
+            self._log_one(logger, index, total, status)
+        logger.finalize()
+        kept = set()
+        for index, _t, _s in plan:
+            if self._psf_ok(work, index):
+                kept.add(index)
+            else:
+                # A replaced psf must be archived, not deleted.
+                self.assertTrue(self._archived(work, index, "psf.old-"),
+                                "iter %d psf must be archived, not deleted" % index)
+        return kept
+    def test_save_raw2_retention_matrix(self):
+        cases = [
+            ([(0, 5.0, "ok"), (1, 9.0, "fail: e"), (2, 3.0, "ok"), (3, 4.0, "ok")],
+             {0, 1, 2, 3}),  # 3 = last ordinary
+            ([(0, 5.0, "ok"), (1, 4.0, "ok"), (2, 1.0, "ok")], {0, 1, 2}),  # best is last
+            ([(0, 9.0, "ok"), (1, 8.0, "ok"), (2, 7.0, "ok"), (3, 6.0, "ok"),
+              (4, 5.0, "ok")], {0, 1, 2, 3, 4}),  # every iter improves
+            ([(0, 1.0, "ok"), (1, 2.0, "ok"), (2, 2.1, "ok"), (3, 2.2, "ok"),
+              (4, 2.3, "ok")], {0, 4}),  # plateau keeps first and last
+            ([(0, 1.0, "ok"), (1, 2.0, "ok"), (2, 3.0, "fail: z")], {0, 2}),
+            ([(0, 1.0, "ok"), (1, 1e6, "fail: a"), (2, 1e6, "fail: b"),
+              (3, 2.0, "ok")], {0, 1, 2, 3}),  # consecutive fails all kept
+        ]
+        for plan, want in cases:
+            self.assertEqual(self._run_order(plan), want, "plan=%s" % (plan,))
+    def test_crash_before_finalize_keeps_bytes(self):
+        work, logger = self._logger()
+        for i, total in enumerate([1.0, 2.0, 3.0, 4.0]):
+            self._log_one(logger, i, total)
+        # Crash: no finalize. pending=3 stays; it must not be archived.
+        self.assertTrue(self._psf_ok(work, 0))
+        self.assertFalse(self._psf_ok(work, 1))
+        self.assertTrue(self._psf_ok(work, 3))
+        # Every iteration is recoverable from its own record.
+        for i in range(4):
+            rec = json.load(open(os.path.join(work, "iter_%04d" % i, "record.json"),
+                                 encoding="utf-8"))
+            self.assertEqual(rec["index"], i)
+        # Resume: a new logger continues; the old pending 3 stays (keep more).
+        logger2 = RunLogger(work, save_raw=2, log_mode=LOG_MODE_COMPACT)
+        logger2.seed_best(1.0)
+        self._log_one(logger2, 4, 5.0)
+        logger2.finalize()
+        self.assertTrue(self._psf_ok(work, 3),
+                        "a crash-left pending psf must not be archived on resume")
+        self.assertTrue(self._psf_ok(work, 4))
+    def test_crash_mid_finalize_leaves_key_iters(self):
+        work, logger = self._logger()
+        self._log_one(logger, 0, 1.0)
+        self._log_one(logger, 1, 2.0)             # pending=1
+        self._log_one(logger, 2, 3.0)             # expire 1, pending=2
+        self._log_one(logger, 3, 9.0, "fail: x")  # last=3 != pending 2
+        # Inject: finalize raises while expiring 2.
+        boom = []
+        def _bad_expire(path, index=None):
+            boom.append(path)
+            raise RuntimeError("injected")
+        logger._expire_ordinary = _bad_expire
+        logger.finalize()  # must not propagate
+        self.assertEqual(len(boom), 1)
+        self.assertTrue(self._psf_ok(work, 0), "first must not be lost")
+        self.assertTrue(self._psf_ok(work, 3), "fail must not be lost")
+        self.assertTrue(self._psf_ok(work, 2),
+                        "pending must stay when expire fails (never lose)")
+    def test_crash_manifest_then_resume_ids_stale(self):
+        work, logger = self._logger()
+        self._log_one(logger, 0, 1.0)
+        self._log_one(logger, 1, 2.0)
+        self._log_one(logger, 2, 3.0)  # expire 1
+        # Kill-window half line, then another one on an existing index.
+        with open(os.path.join(work, MANIFEST_NAME), "a", encoding="utf-8") as f:
+            f.write('{"index": 99, "broken')
+        with open(os.path.join(work, MANIFEST_NAME), "a", encoding="utf-8") as f:
+            f.write('{"index": 0, "half')
+        entries = read_manifest(os.path.join(work, MANIFEST_NAME))
+        self.assertNotIn(99, entries, "half lines must be recognised as invalid/stale")
+        self.assertEqual(entries[0]["index"], 0)  # intact line still readable
+        # Every valid entry's files must exist on disk.
+        for index, entry in entries.items():
+            for name, info in (entry.get("files") or {}).items():
+                fp = os.path.join(work, "iter_%04d" % index, name)
+                self.assertTrue(os.path.isfile(fp))
+                self.assertEqual(info["sha1"], _sha1_file(fp))
+    def test_template_drift_fallback_and_reconstruct(self):
+        run_dir = self._run_dir()
+        deck_a = "// deck A\nparameters L1=1 L2=2\nR1 (a 0) r=1\n"
+        deck_b = "// deck B CHANGED\nparameters L1=1 L2=2\nR1 (a 0) r=2\n"
+        # iter0 uses deck A.
+        p0 = "parameters L1=10 L2=2"
+        t0 = rewrite_netlist_parameters(deck_a, p0)[0]
+        it0 = os.path.join(run_dir, "iter_0000")
+        os.makedirs(it0)
+        open(os.path.join(it0, "input.scs"), "w", encoding="utf-8").write(t0)
+        self.assertIsNone(compact_netlist_file(it0, t0, p0).get("fallback"))
+        # iter1: the template drifts (the user re-netlists in ADE mid-run).
+        p1 = "parameters L1=11 L2=2"
+        t1 = rewrite_netlist_parameters(deck_b, p1)[0]
+        it1 = os.path.join(run_dir, "iter_0001")
+        os.makedirs(it1)
+        open(os.path.join(it1, "input.scs"), "w", encoding="utf-8").write(t1)
+        meta1 = compact_netlist_file(it1, t1, p1)
+        self.assertEqual(meta1.get("fallback"), "full_input_kept")
+        self.assertTrue(os.path.isfile(os.path.join(it1, "input.scs")),
+                        "a drifted iter must keep the full text")
+        # Reconstruct: iter0 from base; iter1 from the kept full text.
+        self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], t0)
+        g1, _ = reconstruct_input_scs(run_dir, 1)
+        self.assertEqual(g1, t1)
+        self.assertEqual(_sha1_text(g1), meta1["sha1"])
+        # Tampered params but the full text still exists -> still refuses
+        # (never silently uses base).
+        meta_path = os.path.join(it1, NETLIST_META_NAME)
+        meta = json.load(open(meta_path, encoding="utf-8"))
+        meta["params_line"] = "parameters L1=99 L2=99"
+        meta["fallback"] = None
+        meta["base"] = NETLIST_BASE_NAME
+        meta["sha1"] = "0" * 40
+        open(meta_path, "w", encoding="utf-8").write(json.dumps(meta))
+        self.assertRaises(ValueError, reconstruct_input_scs, run_dir, 1)
+    def test_reconstruct_accepts_full_mode_iter(self):
+        run_dir = self._run_dir()
+        it = os.path.join(run_dir, "iter_0000")
+        os.makedirs(it)
+        body = "parameters L1=1\nX\n"
+        open(os.path.join(it, "input.scs"), "w", encoding="utf-8").write(body)
+        self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], body)
+
+
+class TestTechProfile(unittest.TestCase):
+    """tech_profile.json is explicit and functionally equal to the built-in default."""
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    TP_PATH = os.path.join(HERE, "tech_profile.json")
+    def _load(self, **kw):
+        import librf_opt
+        kw.setdefault("use_cache", False)
+        return librf_opt.load_tech_profile(**kw)
+    def test_profile_functional_equals_default(self):
+        self.assertTrue(os.path.isfile(self.TP_PATH), "v08+ ships tech_profile.json")
+        t = self._load(path=self.TP_PATH)
+        import librf_opt
+        d = librf_opt.DEFAULT_TECH
+        for key in ("techlib", "techlib_dir", "layermap", "proc", "layers", "text", "drc"):
+            self.assertEqual(t[key], d[key], "tech_profile.%s must equal DEFAULT_TECH" % key)
+        self.assertEqual([k for k in t if str(k).startswith("_doc")], [],
+                         "_doc* keys must be stripped by the loader")
+        # The source file does carry _doc* -> stripping happens on load.
+        raw = json.load(open(self.TP_PATH, encoding="utf-8"))
+        self.assertTrue([k for k in raw if str(k).startswith("_doc")])
+    def test_auto_load_no_self_disturb(self):
+        """Auto-load order hits the local profile but still equals the default."""
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.HERE)
+            t = self._load(work=".")
+        finally:
+            os.chdir(cwd)
+        import librf_opt
+        d = librf_opt.DEFAULT_TECH
+        self.assertEqual(t["techlib"], d["techlib"])
+        self.assertEqual(librf_opt.tech_layer(t, "spiral"), librf_opt.tech_layer(d, "spiral"))
+        self.assertEqual(librf_opt.tech_layer(t, "via_sp"), librf_opt.tech_layer(d, "via_sp"))
+        self.assertEqual(librf_opt.tech_drc(t)["min_w"], librf_opt.tech_drc(d)["min_w"])
+        self.assertEqual(t["layers"], d["layers"])
+        self.assertEqual(t["drc"], d["drc"])
+
+
+class TestS3EmBridge(unittest.TestCase):
+    """S3 circuit integration: em_bridge parse + isolation rules.
+
+    S3-ISO-01/02/03/05/06/07 + parse validation. S3-ISO-04 bit-exact
+    comparison lives in s3_iso_baseline.json (maintained by mock e2e step 1.4).
+    """
+    def _base_cfg(self, **extra):
+        cfg = {
+            "name": "s3", "library": "MyLib", "cell": "c",
+            "state_dir": "", "work_dir": ".", "output_dir": "work/_s3_iso",
+            "save_raw": 0, "log_mode": "compact",
+            "settings": {"max_iter": 3, "patience": 10, "seed": 3},
+            "variables": [{"name": "L1", "init": "250p", "min": "150p", "max": "350p"}],
+            "targets": [{"output": "S21 dB20", "metric": "band_min", "op": ">=",
+                         "goal": 3, "tol": 0.5, "band": ["24G", "44G"]}],
+        }
+        cfg.update(extra)
+        return cfg
+    def _opt(self, cfg, parsed=True):
+        opt = Optimization.__new__(Optimization)
+        opt.cfg = cfg
+        opt.em_bridge_cfg = parse_em_bridge_cfg(cfg) if parsed else None
+        return opt
+    def _em(self, **kw):
+        em = {"enabled": True, "tech": "T",
+              "devices": [{"device_type": "ind", "f_op": "28G",
+                           "target_var": "L1", "tech": "T"}]}
+        em.update(kw)
+        return em
+    def test_s3_iso_01_no_section_is_none(self):
+        """S3-ISO-01/02: no em_bridge section, or enabled=false -> None."""
+        self.assertIsNone(parse_em_bridge_cfg(self._base_cfg()))
+        self.assertIsNone(parse_em_bridge_cfg(self._base_cfg(em_bridge={"enabled": False})))
+    def test_s3_iso_03_mutual_exclusion(self):
+        """S3-ISO-03 em_bridge + layout_em both on -> mutual-exclusion assert."""
+        opt = self._opt(self._base_cfg(em_bridge=self._em(), layout_em={"enabled": True}))
+        with self.assertRaises(ValueError):
+            opt._build_runner(mock=True)
+    def test_s3_iso_05_lazy_import_ok_when_off(self):
+        """S3-ISO-05 lazy import: em_bridge.py missing + enabled=false still builds."""
+        opt = self._opt(self._base_cfg(), parsed=False)  # no em_bridge section
+        runner = opt._build_runner(mock=True)
+        self.assertEqual(type(runner).__name__, "MockRunner")
+    def test_s3_iso_06_enabled_without_module_raises(self):
+        """S3-ISO-06 enabled=true but import fails -> Chinese ImportError, no silence."""
+        import sys
+        opt = self._opt(self._base_cfg(em_bridge=self._em()))
+        saved = sys.modules.pop("em_bridge", None)
+        # None makes import raise ImportError.
+        sys.modules["em_bridge"] = None
+        try:
+            with self.assertRaises(ImportError) as cm:
+                opt._build_runner(mock=True)
+            self.assertIn("em_bridge", str(cm.exception))
+        finally:
+            if saved is not None:
+                sys.modules["em_bridge"] = saved
+            else:
+                sys.modules.pop("em_bridge", None)
+    def test_s3_iso_07_layout_em_still_works(self):
+        """S3-ISO-07 em_bridge absent + layout_em on -> GeomRunner (v07 behaviour)."""
+        cfg = self._base_cfg(layout_em={"enabled": True, "type": "ind", "mock": True,
+                                        "geom_vars": [], "cell": "t", "work": "work"})
+        opt = self._opt(cfg, parsed=False)
+        try:
+            runner = opt._build_runner(mock=True)
+            self.assertEqual(type(runner).__name__, "GeomRunner")
+        except Exception as exc:
+            # Without librf_opt loading may fail, but never via EmBridge.
+            self.assertNotIn("EmBridge", type(exc).__name__)
+    def test_parse_rejects_invalid(self):
+        """Bad mode / missing f_op / sparse grid all raise ValueError."""
+        cases = (
+            self._em(mode="nope"),
+            self._em(devices=[{"device_type": "ind", "target_var": "L1", "tech": "T"}]),
+            self._em(devices=[{"device_type": "ind", "f_op": "28G", "target_var": "L1",
+                               "tech": "T", "tolerances": {"L0": 0.01},
+                               "grid_spec": {"step_rel": 0.05}}]),
+        )
+        for em in cases:
+            with self.assertRaises(ValueError):
+                parse_em_bridge_cfg(self._base_cfg(em_bridge=em))
+    def test_parse_norm_ok(self):
+        cfg = self._base_cfg(em_bridge=self._em(
+            mode="track", fallback="actual", library="work/em_lib",
+            devices=[{"device_type": "ind", "f_op": "28G", "target_var": "L1"}]))
+        eb = parse_em_bridge_cfg(cfg)
+        self.assertTrue(eb["enabled"])
+        self.assertEqual(eb["mode"], "track")
+        self.assertEqual(eb["devices"][0]["tech"], "T")
+        self.assertAlmostEqual(eb["devices"][0]["tolerances"]["L0"], 0.02)
+        self.assertAlmostEqual(eb["em_opt"]["budget"]["max_em"], 20)
+
+
+_TEST_CLASSES = (
+    TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
+    TestFixes, TestCurvesTabRemoved, TestRunDirs, TestHistorySeedV05,
+    TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
+    TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
+    TestS3EmBridge,
+)
+
+
+def run_selftests():
+    """Run the regression tests. Return the number of failures."""
+    # GUI classes stay here so a headless CLI run never imports tkinter.
+    global OptimizerGui, PlotCanvas
+    from gui import OptimizerGui, PlotCanvas
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite([loader.loadTestsFromTestCase(cls) for cls in _TEST_CLASSES])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return len(result.failures) + len(result.errors)
+
+
+if __name__ == "__main__":
+    sys.exit(1 if run_selftests() else 0)

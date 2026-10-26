@@ -1,0 +1,43 @@
+{
+  "_doc": "工艺配置模板：功能字段与 librf_opt.DEFAULT_TECH 逐项一致；_doc* 仅说明，loader 会剥掉。换工艺时改本文件即可。",
+  "_doc_usage": "查找顺序：$LIBRF_TECH_PROFILE -> 工作目录 -> 当前目录 -> 模块目录 -> 内建默认；缺项逐项回落。建议基于本模板另存一份，用 LIBRF_TECH_PROFILE 指过去。",
+  "_doc_layers": "角色 -> 你的 PDK 层名：spiral=螺旋主金属、underpass=下穿金属、route=走线、ground=地、via_sp=螺旋下方过孔、via_un=下穿过孔、marker=电感标记层。",
+  "_doc_text": "金属层 -> 文字层；缺省规则为 <层名>TXT。",
+  "_doc_drc": "参数级自检阈值（不是 sign-off DRC）：min_w/max_w 金属宽、min_s 间距、min_area 按层最小面积、via 的 cut/spacing/enclosure。按你的 PDK 规则填写。",
+  "name": "Generic RF CMOS (template)",
+  "techlib": "RFCMOS",
+  "techlib_dir": "",
+  "layermap": "",
+  "proc": "",
+  "layers": {
+    "spiral": "M5",
+    "underpass": "M4",
+    "route": "M3",
+    "ground": "M3",
+    "via_sp": "V4",
+    "via_un": "V3",
+    "marker": "MARKER"
+  },
+  "text": {
+    "M5": "M5TXT",
+    "M4": "M4TXT",
+    "M3": "M3TXT",
+    "M2": "M2TXT",
+    "M1": "M1TXT"
+  },
+  "drc": {
+    "min_w": 1.0,
+    "max_w": 30.0,
+    "min_s": 1.0,
+    "min_area": {
+      "M5": 4.0,
+      "M4": 4.0,
+      "M3": 4.0
+    },
+    "via": {
+      "cut": 0.5,
+      "spacing": 0.5,
+      "enclosure": 0.2
+    }
+  }
+}
