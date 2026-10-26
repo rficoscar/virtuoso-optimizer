@@ -42,12 +42,23 @@ DEF_WS = "~/virtuoso_work"
 DEF_FREQ = "1e9:30e9:21"
 DEF_EMX_TIMEOUT = 1800
 DEF_SKILL_TIMEOUT = 600
-# PDK 中 layermap / 工艺文件的常见文件名与相对位置（用于现场搜索）
-LAYERMAP_NAMES = ("layer.map", "layermap.txt", "*.layermap")
+# PDK 中 layermap / 工艺文件的常见文件名与相对位置（用于现场搜索，工艺无关）
+LAYERMAP_NAMES = ("*.layermap", "layer.map", "layermap.txt", "layermap")
 PROC_NAMES = ("*.proc",)
-TECHLIB_SUBDIRS = ()  # 额外搜索的工艺库子目录名；空=只按 techlib 名搜索
+TECHLIB_SUBDIRS = ()  # 工艺库子目录名从 profile 的 techlib 推导，不写死 PDK
 TECH_PROFILE_NAME = "tech_profile.json"  # LIBRF_TECH_PROFILE 可覆盖
-# 内建默认工艺：通用占位。换工艺时在 tech_profile.json 里覆盖，缺项逐项回落本表。
+# 工艺叠层 / 横截面模块（v08c 交付，可能未部署）。
+# 导入失败时静默降级：require_tech_ready 用内置最小正则检查，
+# GUI 工艺页横截面显示灰色占位。
+try:
+    from proc_cross_section import (
+        parse_proc as _xs_parse_proc,
+        parse_layermap as _xs_parse_layermap,
+        validate_flow_stack as _xs_validate_flow_stack)
+except Exception:
+    _xs_parse_proc = _xs_parse_layermap = _xs_validate_flow_stack = None
+# 内建默认工艺配置（仅作为缺省值；工艺无关门禁不依赖这里的层名）。
+# 缺项逐项回落，不给 tech_profile.json 时行为同 v06。
 DEFAULT_TECH = { "name": "Generic RF CMOS (built-in default)", "techlib": "RFCMOS",
     "techlib_dir": "", "layermap": "", "proc": "", "layers": {
         "spiral": "M5", "underpass": "M4", "route": "M3", "ground": "M3",
@@ -55,6 +66,9 @@ DEFAULT_TECH = { "name": "Generic RF CMOS (built-in default)", "techlib": "RFCMO
         "M5": "M5TXT", "M4": "M4TXT", "M3": "M3TXT", "M2": "M2TXT", "M1": "M1TXT", }, "drc": {
         "min_w": 1.0, "max_w": 30.0, "min_s": 1.0, "min_area": {"M5": 4.0, "M4": 4.0, "M3": 4.0},
         "via": {"cut": 0.5, "spacing": 0.5, "enclosure": 0.2}, }, }
+# PORT 行未写 text 层时的兜底层名：取默认工艺螺旋金属的 text 层。
+DEF_PORT_LAYER = DEFAULT_TECH["text"].get(DEFAULT_TECH["layers"]["spiral"],
+                                          "%sTXT" % DEFAULT_TECH["layers"]["spiral"])
 class LibrfError(Exception):
     """librf_opt 统一错误类型（中文信息，GeomRunner 转 SimResult）"""
 def _eprint(*a):
@@ -406,6 +420,500 @@ def load_tech_profile(work=None, path=None, use_cache=True):
     if use_cache:
         _TECH_CACHE[key] = prof
     return prof
+# ---- 工艺门禁（v08c build_tech / require_tech_ready 移植） ----
+# 真源优先级（与 v10 既有 tech_profile.json 并存时的取舍）：
+#   内建 DEFAULT_TECH < tech_profile.json（load_tech_profile 载入）
+#   < build_tech 的显式入参（GUI/CLI 填了才覆盖，留空=沿用上一层）。
+# 理由：v10 已把 tech_profile.json 定为唯一可部署配置源，GUI 只是它的输入面板；
+# 若 GUI 入参反而被 JSON 覆盖，用户改了没反应；若 JSON 被弃用，现场已有的
+# profile 会失效。逐项覆盖既保留 JSON 默认，又让用户输入即时生效。
+# 注意：本模块既有 _deep_merge（不丢空值）继续给 metal_override/load 用；
+# build_tech 用下面的 _tech_deep_merge（空值不覆盖），避免空 layers/text/drc
+# 把内建默认抹掉。
+# 需使用者提供路径的工艺文件清单（供 UI 提示与校验）
+TECH_REQUIRED_FILES = (
+    ("cds_lib", "cds.lib（工作区库映射）"),
+    ("layermap", "layermap（层名->GDS 层号）"),
+    ("proc", "EMX proc（工艺叠层）"),
+    ("techlib_dir", "工艺库目录（层定义）"),
+)
+# 工艺无关的角色语义（必检项全部由 tech_profile.json 的 layers 推导）：
+#   金属角色 -> 必须出现在 layermap；有 proc 且本次需要时还必须作为 conductor；
+#   通孔角色 -> 必须出现在 layermap；标记角色 -> 只要求 layermap 中存在。
+TECH_METAL_ROLES = ("spiral", "underpass", "route", "ground")
+TECH_VIA_ROLES = ("via_sp", "via_un")
+TECH_MARKER_ROLES = ("marker",)
+TECH_LAYER_ROLES = TECH_METAL_ROLES + TECH_VIA_ROLES + TECH_MARKER_ROLES
+# 门禁可要求的文件键：layermap 恒需；proc 仅在跑 EMX 时需；
+# techlib_dir / cds_lib 缺失只告警（可回退探查/自动生成 cds.lib）。
+TECH_NEED_KEYS = ("layermap", "proc", "techlib_dir", "cds_lib")
+def _tech_deep_merge(base, over):
+    """dict 递归合并：over 覆盖 base，返回新 dict（不改入参）。
+
+    与 _deep_merge 的差异：None/""/[]/{} 不覆盖已有值（v08c 语义），
+    保证 build_tech 的 layers/text/drc 缺项仍回落到内建默认。
+    """
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _tech_deep_merge(out[k], v)
+        elif v not in (None, "", [], {}):
+            out[k] = v
+    return out
+def build_tech(techlib=None, techlib_dir=None, layermap=None, proc=None,
+               cds_lib=None, layers=None, text=None, drc=None, base=None):
+    """由使用者输入 + 当前 tech_profile.json 拼出 tech dict（纯构造，不读文件）。
+
+    base 缺省 = load_tech_profile()（环境变量/工作目录/本模块目录自动找
+    tech_profile.json，找不到则内建 DEFAULT_TECH）。显式传入的 4 个路径与
+    库名才覆盖 base；layers/text/drc 用 _tech_deep_merge 逐项合并。
+    不校验存在性、不抛业务异常（存在性由 require_tech_ready 负责）。
+    """
+    base = base if base is not None else load_tech_profile()
+    prof = _tech_deep_merge(base, {})
+    if techlib:
+        prof["techlib"] = str(techlib).strip()
+    if techlib_dir:
+        prof["techlib_dir"] = os.path.abspath(
+            os.path.expanduser(str(techlib_dir).strip()))
+    if layermap:
+        prof["layermap"] = os.path.abspath(
+            os.path.expanduser(str(layermap).strip()))
+    if proc:
+        prof["proc"] = os.path.abspath(
+            os.path.expanduser(str(proc).strip()))
+    if cds_lib:
+        prof["cds_lib"] = os.path.abspath(
+            os.path.expanduser(str(cds_lib).strip()))
+    if layers:
+        prof["layers"] = _tech_deep_merge(prof.get("layers") or {}, layers)
+    if text:
+        prof["text"] = _tech_deep_merge(prof.get("text") or {}, text)
+    if drc:
+        prof["drc"] = _tech_deep_merge(prof.get("drc") or {}, drc)
+    prof["_src"] = "(GUI/CLI 输入; base=%s)" % (base.get("_src") or "default")
+    return prof
+def check_tech_paths(prof):
+    """校验使用者提供的工艺文件路径 -> [(项, 路径, 是否存在), ...]"""
+    out = []
+    for key, label in TECH_REQUIRED_FILES:
+        p = (prof or {}).get(key) or ""
+        out.append((label, p, bool(p) and os.path.exists(
+            os.path.expanduser(str(p)))))
+    return out
+def _role_kind(role):
+    """角色 -> metal / via / marker（决定是否要求 proc conductor）。"""
+    if role in TECH_METAL_ROLES:
+        return "metal"
+    if role in TECH_VIA_ROLES:
+        return "via"
+    return "marker"
+def _tech_role_layers(prof):
+    """profile.layers -> [(角色, 层名)]（按角色优先级，同名层只保留一次）。"""
+    layers = (prof or {}).get("layers") or {}
+    out, seen = [], set()
+    for role in TECH_LAYER_ROLES:
+        name = layers.get(role)
+        if name is None:
+            continue
+        name = str(name).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append((role, name))
+    return out
+def _tech_file_ok(path, want_dir=False):
+    if not path:
+        return False
+    p = os.path.expanduser(str(path))
+    try:
+        return os.path.isdir(p) if want_dir else os.path.isfile(p)
+    except (TypeError, ValueError):
+        return False
+def _resolve_tech_files(prof, work=None):
+    """补齐工艺文件路径：显式配置优先，缺失/无效时按环境变量与工作区探查兜底。
+
+    返回 (profile, notes)：profile 为新 dict（不改入参）；notes 是可继续的告警。
+    只有最终仍缺且被 need 要求时才由 require_tech_ready 报错。
+    """
+    prof = dict(prof or {})
+    notes = []
+    ws = os.path.expanduser(_env_path("LIBRF_WS", DEF_WS))
+    anchor = work or os.getcwd()
+    search_dirs = [os.environ.get("LIBRF_TECHLIB_DIR", ""),
+                   prof.get("techlib_dir") or "", ws, anchor, _HERE,
+                   os.path.join(_HERE, "tech"), os.path.join(ws, "tech")]
+    # 探查目录只接受真实目录，避免把某个误填的文件路径当成搜索根
+    search_dirs = [d for d in search_dirs
+                   if d and os.path.isdir(os.path.expanduser(str(d)))]
+    def _fill(key, env_vars, patterns, want_dir=False):
+        given = str(prof.get(key) or "").strip()
+        if given and _tech_file_ok(given, want_dir):
+            prof[key] = os.path.abspath(os.path.expanduser(given))
+            return
+        found, _src = _probe_data_file(key, env_vars, search_dirs,
+                                       patterns=tuple(patterns))
+        if found:
+            if given:
+                notes.append("配置的 %s 不可用（%s），已改用探查到的 %s"
+                             % (key, given, found))
+            prof[key] = os.path.abspath(os.path.expanduser(str(found)))
+        elif given:
+            prof[key] = os.path.abspath(os.path.expanduser(given))
+    _fill("layermap", ("LIBRF_LAYERMAP",), LAYERMAP_NAMES)
+    _fill("proc", ("LIBRF_PROC",), PROC_NAMES)
+    _fill("cds_lib", ("LIBRF_CDSSETUP",), ("cds.lib",))
+    given = str(prof.get("techlib_dir") or "").strip()
+    if given and _tech_file_ok(given, True):
+        prof["techlib_dir"] = os.path.abspath(os.path.expanduser(given))
+    else:
+        techlib = str(prof.get("techlib") or "").strip()
+        found = None
+        if techlib:
+            for d in search_dirs:
+                if not d:
+                    continue
+                cand = os.path.join(os.path.expanduser(str(d)), techlib)
+                if os.path.isdir(cand):
+                    found = cand
+                    break
+        if found:
+            if given:
+                notes.append("配置的 techlib_dir 不可用（%s），已改用探查到的 %s"
+                             % (given, found))
+            prof["techlib_dir"] = os.path.abspath(os.path.expanduser(found))
+        elif given:
+            prof["techlib_dir"] = os.path.abspath(os.path.expanduser(given))
+    return prof, notes
+def _merge_tools_into_tech(tech, tools):
+    """把 find_tools 探查到的工艺路径并入 profile（只补空/不可用项）。"""
+    out = dict(tech or {})
+    for key in ("layermap", "proc", "techlib_dir"):
+        want_dir = (key == "techlib_dir")
+        if _tech_file_ok(out.get(key), want_dir):
+            continue
+        hit = (tools or {}).get(key) or {}
+        path = hit.get("path") if hit.get("found") else None
+        if path and _tech_file_ok(path, want_dir):
+            out[key] = os.path.abspath(os.path.expanduser(str(path)))
+    return out
+def _parse_layermap_generic(path):
+    """proc_cross_section 不可用时的最小 layermap 解析 -> {"by_name": {...}}。"""
+    by_name = {}
+    try:
+        with open(path) as fh:
+            for raw in fh:
+                toks = raw.split("#", 1)[0].split()
+                if len(toks) < 4:
+                    continue
+                try:
+                    by_name.setdefault(toks[0], (int(toks[2]), int(toks[3])))
+                except ValueError:
+                    pass
+    except OSError as e:
+        raise LibrfError("layermap 读取失败：%s\n文件：%s" % (e, path))
+    return {"by_name": by_name}
+def _parse_proc_generic(path):
+    """proc_cross_section 不可用时的最小 proc 解析（导体/通孔/叠层）。"""
+    data = {"conductors": [], "vias": [], "stack": []}
+    try:
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    except OSError as e:
+        raise LibrfError("proc 读取失败：%s\n文件：%s" % (e, path))
+    for ln, raw in enumerate(lines, 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.match(r"conductor\s+(\S+)\s+(.+?)\s+(\S+)$", line, re.I)
+        if m:
+            try:
+                thick = float(m.group(1))
+            except ValueError:
+                thick = None
+            name = m.group(3)
+            data["conductors"].append(
+                {"name": name, "thickness": thick, "line": ln})
+            data["stack"].append({"kind": "conductor", "name": name,
+                                  "thickness": thick, "line": ln})
+            continue
+        m = re.match(r"via\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", line, re.I)
+        if m:
+            try:
+                res = float(m.group(3))
+            except ValueError:
+                res = None
+            data["vias"].append({"bottom": m.group(1), "top": m.group(2),
+                                 "resistance": res, "name": m.group(4),
+                                 "line": ln})
+    if not data["conductors"]:
+        raise LibrfError("proc 中未识别到任何 conductor 行：%s" % path)
+    return data
+def _tech_flow(prof):
+    """归一化 profile['flow']，未提供返回 None。
+
+    支持 {"metals": [有序金属], "vias": [[底, 顶, 通孔名], ...],
+    "gaps": [[底, 顶, 期望 μm], ...], "via_res": {通孔名: Ω/via},
+    "strict": bool}，或直接给有序金属链 [...]。全部为可选校验项。
+    """
+    raw = (prof or {}).get("flow")
+    if not raw:
+        return None
+    strict = bool((prof or {}).get("strict_flow"))
+    if isinstance(raw, dict):
+        metals = raw.get("metals") or raw.get("stack") or []
+        vias = raw.get("vias") or []
+        gaps = raw.get("gaps") or []
+        via_res = raw.get("via_res") or {}
+        strict = strict or bool(raw.get("strict"))
+    elif isinstance(raw, (list, tuple)):
+        metals, vias, gaps, via_res = list(raw), [], [], {}
+    else:
+        return None
+    metals = [str(x).strip() for x in metals if str(x).strip()]
+    vias_n = []
+    for item in vias:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            vias_n.append((str(item[0]).strip(), str(item[1]).strip(),
+                           str(item[2]).strip() if len(item) > 2 else ""))
+    gaps_n = []
+    for item in gaps:
+        if isinstance(item, (list, tuple)) and len(item) >= 3:
+            try:
+                gaps_n.append((str(item[0]).strip(), str(item[1]).strip(),
+                               float(item[2])))
+            except (TypeError, ValueError):
+                pass
+    via_res_n = {}
+    if isinstance(via_res, dict):
+        for k, v in via_res.items():
+            try:
+                via_res_n[str(k)] = float(v)
+            except (TypeError, ValueError):
+                pass
+    if not metals and not vias_n:
+        return None
+    return {"metals": metals, "vias": vias_n, "gaps": gaps_n,
+            "via_res": via_res_n, "strict": strict}
+def _proc_conductor_z(proc_data):
+    """按 proc 叠层顺序累加厚度 -> {导体名: (z0, z1)}（μm）。"""
+    z, out = 0.0, {}
+    for item in (proc_data or {}).get("stack") or []:
+        thick = item.get("thickness")
+        if thick is None:
+            break
+        try:
+            thick = float(thick)
+        except (TypeError, ValueError):
+            break
+        z0, z = z, z + thick
+        if item.get("kind") == "conductor" and item.get("name"):
+            out.setdefault(item["name"], (z0, z))
+    return out
+def _flow_warnings(flow, cond_names, proc_data, cond_z):
+    """profile 显式提供 flow 时的顺序/通孔/间距/电阻校验 -> warnings（不阻断）。"""
+    warnings = []
+    metals = flow.get("metals") or []
+    pos = dict((n, i) for i, n in enumerate(cond_names))
+    missing = [n for n in metals if n not in pos]
+    if missing:
+        warnings.append("flow 金属 %s 未在 proc 中找到（跳过对应顺序校验）"
+                        % ", ".join(missing))
+    expected = [n for n in metals if n in pos]
+    actual = [n for _p, n in sorted((pos[n], n) for n in expected)]
+    if expected and actual != expected:
+        warnings.append("proc 流程金属顺序与 flow 不一致：flow=%s，实际=%s"
+                        "（当前工艺，仅告警）"
+                        % (" → ".join(expected), " → ".join(actual)))
+    vias = proc_data.get("vias") or []
+    for bottom, top, name in flow.get("vias") or []:
+        hit = [v for v in vias
+               if v.get("bottom") == bottom and v.get("top") == top
+               and (not name or v.get("name") == name)]
+        if not hit:
+            warnings.append("flow 通孔 %s（%s→%s）未在 proc 中找到（当前工艺）"
+                            % (name or "?", bottom, top))
+    for low, high, want in flow.get("gaps") or []:
+        lo, hi = cond_z.get(low), cond_z.get(high)
+        if not lo or not hi:
+            continue
+        gap = hi[0] - lo[1]
+        if abs(gap - want) > 0.02:
+            warnings.append("间距偏差 %s→%s：实测 %.3f μm，期望 %.3f μm"
+                            "（当前工艺，仅告警）" % (low, high, gap, want))
+    want_res = flow.get("via_res") or {}
+    for v in vias:
+        want = want_res.get(v.get("name"))
+        got = v.get("resistance")
+        if want is None or got is None:
+            continue
+        if abs(got - want) > max(0.02, 0.1 * abs(want)):
+            warnings.append("通孔电阻偏差 %s：实测 %s Ω/via，期望 %g Ω/via"
+                            "（当前工艺，仅告警）" % (v.get("name"), got, want))
+    return warnings
+def _generic_stack_check(prof, lmap_by_name, proc_data=None):
+    """工艺无关的必检项与告警 -> (errors, warnings)。
+
+    硬错（LibrfError）：layers 为空 / 角色层不在 layermap /
+    需要 proc 时金属角色层不是 proc conductor。
+    告警（不阻断）：profile 显式 flow 的顺序、通孔、间距、电阻偏差。
+    """
+    errors, warnings = [], []
+    roles = _tech_role_layers(prof)
+    if not roles:
+        errors.append("工艺配置 layers 为空：请至少定义 spiral/underpass/route/"
+                      "via_sp 等角色（当前工艺）")
+    if lmap_by_name is not None:
+        errors.extend(_tech_lm_errors({"by_name": lmap_by_name}, prof))
+    if proc_data is not None:
+        cond_names = [c.get("name") for c in (proc_data.get("conductors") or [])
+                      if c.get("name")]
+        for role, name in roles:
+            if _role_kind(role) == "metal" and name not in cond_names:
+                errors.append("proc 中缺少角色 %s 的导体层 %s（当前工艺）"
+                              % (role, name))
+        flow = _tech_flow(prof)
+        if flow:
+            warnings.extend(_flow_warnings(
+                flow, cond_names, proc_data, _proc_conductor_z(proc_data)))
+    elif _tech_flow(prof):
+        warnings.append("工艺配置提供了 flow，但本次未提供 proc，"
+                        "已跳过叠层顺序/通孔校验")
+    return errors, warnings
+def _tech_lm_errors(lmap_data, prof=None):
+    """按当前工艺 layers 角色核对 layermap（不写死层名/层号）。"""
+    if prof is None:
+        return []
+    by_name = {}
+    if isinstance(lmap_data, dict):
+        by_name = lmap_data.get("by_name") or {}
+        if not isinstance(by_name, dict):
+            by_name = {}
+    errs = []
+    for role, name in _tech_role_layers(prof):
+        if name not in by_name:
+            errs.append("layermap 缺少层 %s（角色 %s，当前工艺）"
+                        % (name, role))
+    return errs
+def _tech_error_text(errors, prof):
+    lm = os.path.expanduser(str((prof or {}).get("layermap") or "")) or "(未填)"
+    pr = os.path.expanduser(str((prof or {}).get("proc") or "")) or "(未填)"
+    return ("工艺检查未通过，已停止本次任务：\n  " + "\n  ".join(errors)
+            + "\n文件：layermap=%s\n      proc=%s\n"
+              "建议：核对 tech_profile.json 的 layers 角色映射与对应 PDK "
+              "文件；换工艺只需改 layers（及可选 flow），无需改代码。"
+            % (lm, pr))
+def _missing_tech_error(missing):
+    lines = ["  %s = (未填写/未探查到)" % label for _key, label in missing]
+    return ("工艺文件缺失或不可读，已停止本次任务：\n" + "\n".join(lines)
+            + "\n建议：在「工艺」页填写，或用环境变量指定 "
+              "LIBRF_LAYERMAP / LIBRF_PROC / LIBRF_TECHLIB_DIR / "
+              "LIBRF_CDSSETUP；也可把文件放到工作目录或工作空间中由工具"
+              "自动探查。")
+def _normalize_need(need):
+    if need is None:
+        return ("layermap",)
+    if isinstance(need, str):
+        need = (need,)
+    keys = []
+    for k in need:
+        k = str(k).strip()
+        if k in TECH_NEED_KEYS and k not in keys:
+            keys.append(k)
+    return tuple(keys)
+def require_tech_ready(prof, need=None, work=None, probe=True):
+    """开始版图/EM 前自动检查工艺（工艺无关，不再要求用户点确认）。
+
+    - need 指定本次确实需要的文件（默认只查 layermap；跑 EMX 时加 proc）。
+      必需文件缺失/不可读 -> LibrfError；techlib_dir/cds_lib 缺失只告警。
+    - 必检项由 tech_profile.json 的 layers 角色推导：角色层必须在 layermap
+      中存在；需要 proc 时，金属角色层还必须作为 conductor 出现。
+      这些属于硬错 -> LibrfError（中文、可操作）。
+    - profile 显式提供 flow 时才校验叠层顺序/通孔/间距/电阻，且只告警。
+    - strict_flow 为真时才调用 proc_cross_section.validate_flow_stack
+      （按 profile 的 flow 段做叠层严格校验），其 errors 升级为异常；默认不调用。
+    - probe=True 时先用环境变量/工作区探查补齐空路径（显式配置优先）。
+    返回 warnings 列表（GUI 弹一次警告后继续任务）。
+    """
+    prof = dict(prof or {})
+    notes = []
+    if probe:
+        prof, notes = _resolve_tech_files(prof, work=work)
+    need = _normalize_need(need)
+    warnings = list(notes)
+    missing = []
+    for key, label in TECH_REQUIRED_FILES:
+        ok = _tech_file_ok(prof.get(key), key == "techlib_dir")
+        if key in need:
+            if not ok:
+                missing.append((key, label))
+        elif not ok and key in ("techlib_dir", "cds_lib"):
+            warnings.append("%s 未配置/不可用（%s）；将回退默认探查或自动生成"
+                            % (label, "未填"))
+    if missing:
+        raise LibrfError(_missing_tech_error(missing))
+    lmap_path = os.path.expanduser(str(prof.get("layermap") or ""))
+    lmap_data = None
+    lmap_by_name = None
+    if lmap_path and _tech_file_ok(lmap_path):
+        if _xs_parse_layermap is not None:
+            try:
+                lmap_data = _xs_parse_layermap(lmap_path)
+            except Exception as e:
+                raise LibrfError(
+                    "layermap 解析失败：%s\n文件：%s\n建议：确认每行格式为 "
+                    "name purpose layer datatype（空格/制表符分隔）。"
+                    % (e, lmap_path))
+        else:
+            lmap_data = _parse_layermap_generic(lmap_path)
+        lmap_by_name = lmap_data.get("by_name") or {}
+    proc_path = os.path.expanduser(str(prof.get("proc") or ""))
+    proc_data = None
+    if "proc" in need and _tech_file_ok(proc_path):
+        if _xs_parse_proc is not None:
+            try:
+                proc_data = _xs_parse_proc(proc_path)
+            except Exception as e:
+                raise LibrfError(
+                    "proc 解析失败：%s\n文件：%s\n建议：检查报错行号处的 "
+                    "conductor/layer/via 语法，或改用 PDK 原始 proc。"
+                    % (e, proc_path))
+        else:
+            proc_data = _parse_proc_generic(proc_path)
+    errors, gen_warnings = _generic_stack_check(prof, lmap_by_name, proc_data)
+    warnings.extend(gen_warnings)
+    flow = _tech_flow(prof)
+    strict = bool(prof.get("strict_flow") or (flow and flow.get("strict")))
+    if strict:
+        if flow is None:
+            warnings.append("已请求 strict_flow，但 profile 未提供 flow 段，"
+                            "已跳过叠层严格校验")
+        elif proc_data is None:
+            warnings.append("已请求 strict_flow，但本次未提供/未需要 proc，"
+                            "已跳过 proc_cross_section 严格校验")
+        elif _xs_validate_flow_stack is None:
+            warnings.append("已请求 strict_flow，但 proc_cross_section 不可用，"
+                            "已降级为通用检查")
+        else:
+            try:
+                strict_errs, strict_warns = _xs_validate_flow_stack(
+                    proc_data, lmap_data, flow=flow)
+            except Exception as e:
+                raise LibrfError("工艺叠层严格校验异常：%s\n文件：%s"
+                                 % (e, proc_path))
+            errors.extend(str(x) for x in (strict_errs or []))
+            warnings.extend(str(x) for x in (strict_warns or []))
+    if errors:
+        raise LibrfError(_tech_error_text(errors, prof))
+    out = []
+    for w in warnings:
+        s = str(w)
+        if s and s not in out:
+            out.append(s)
+    return out
+def require_tech_confirmed(prof):
+    """兼容旧名：行为等同 require_tech_ready（不再检查确认标记）。"""
+    return require_tech_ready(prof)
 def tech_layer(prof, role):
     """角色 -> 层名（找不到角色名时按原样返回，允许直接传层名）。"""
     lay = (prof or {}).get("layers") or {}
@@ -625,7 +1133,8 @@ def gen_driver_il(req, layout_il=None, tech=None):
     if libdir is None:
         libdir = os.path.join(os.path.dirname(result), lib)
     libdir = os.path.abspath(libdir)
-    order = ["type", "lib", "cell", "view", "shape", "n", "w", "s", "dout",
+    order = ["type", "lib", "cell", "view", "kind", "shape", "n", "w", "s",
+             "W", "H", "corner", "seam", "tangle", "stub", "dout",
              "din", "ct", "ports", "x0", "y0", "underpass", "style", "np",
              "ns", "gap", "len", "gnd", "gnd_layer", "fence", "cpw",
              "freq_hint", "ex", "ey", "ind_mark", "ct_dir"]
@@ -721,7 +1230,7 @@ def parse_skill_result(path):
                     pass
             elif head == "PORT" and len(toks) >= 4:
                 p = {"name": toks[1], "x": None, "y": None,
-                     "layer": toks[-1] if len(toks) > 4 else "M5TXT"}
+                     "layer": toks[-1] if len(toks) > 4 else DEF_PORT_LAYER}
                 try:
                     p["x"], p["y"] = float(toks[2]), float(toks[3])
                 except ValueError:
@@ -1660,6 +2169,13 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
     """一键管线：layout -> strmout -> EMX -> views -> 指纹。"""
     if on_step is None:
         on_step = lambda msg: None
+    # ind：统一规范化 + 提交前可行性校验（失败中文报错，不静默降级）。
+    # 拓扑 key = geom["kind"]（se/diff/f8/sym），req.update(geom) 会带进 driver。
+    if typ == "ind" and isinstance(geom, dict):
+        geom = lri_norm_geom(geom)
+        _ok, _msg = lri_validate(geom)
+        if not _ok:
+            raise LibrfError("电感几何不可行：%s" % _msg)
     emx_opts = emx_opts or {}
     st = skill_timeout or DEF_SKILL_TIMEOUT
     et = emx_timeout or DEF_EMX_TIMEOUT
@@ -1668,8 +2184,15 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
     # 每轮可覆盖金属角色：metal_override = {"spiral": "M4", ...}
     if metal_override:
         tech = _deep_merge(tech, {"layers": dict(metal_override)})
+    # 先现场探查（环境变量/PATH/工作区），再把解析出的 layermap/proc/
+    # techlib_dir 并入门禁 profile；只有探查后仍缺且本次确实需要时才报错。
     if tools is None:
         tools = find_tools(proc=emx_opts.get("proc"), verbose=verbose, tech=tech, work=work)
+    tech = _merge_tools_into_tech(tech, tools)
+    need = ["layermap"]
+    if not (no_emx or no_gds):
+        need.append("proc")  # 只有真的跑 EMX 才要求 proc
+    tech_warns = require_tech_ready(tech, need=need, work=work)
     loc = resolve_work(work=work, ws=ws, lib=lib, tools=tools)
     work_dir, lib_name, libdir = loc["work"], loc["lib"], loc["libdir"]
     if loc.get("refresh"):
@@ -1699,7 +2222,8 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
     ports = [p["name"] for p in res["ports"]]
     out = {"cell": cell, "lib": lib_name, "libdir": libdir,
            "type": typ, "geom": geom, "bbox": res["bbox"], "ports": ports,
-           "ports_detail": res["ports"], "layers": res["layers"], "views": {}, "warn": None}
+           "ports_detail": res["ports"], "layers": res["layers"], "views": {},
+           "warn": None, "tech_warnings": tech_warns}
     # 2) GDS
     gds_path = None
     if not no_gds:
@@ -1781,6 +2305,14 @@ class GeomRunner(object):
         self.delegate = delegate
         le = cfg.get("layout_em") or {}
         self.le = le
+        # 工艺 profile：cfg 顶层 tech 键（_EmHook 从「工艺」页注入）逐项覆盖
+        # tech_profile.json；GeomRunner 每轮复用，不重复读文件。
+        self.tech = build_tech(
+            techlib=cfg.get("techlib"),
+            techlib_dir=cfg.get("techlib_dir"),
+            layermap=cfg.get("layermap"),
+            proc=cfg.get("proc"),
+            cds_lib=cfg.get("cds_lib"))
         self.geom_names = list(le.get("geom_vars") or [])
         self.fixed = dict(le.get("fixed_geom") or {})
         self.type = le.get("type") or "ind"
@@ -1902,6 +2434,9 @@ class GeomRunner(object):
         if changed:
             delegate.deck = ("".join(lines), params)
     def _ensure_geom(self, geom):
+        # 规范化后再算缓存键：seam=S 与 bottom、shape=octagon 与 oct 视为同一组。
+        if self.type == "ind":
+            geom = lri_norm_geom(geom)
         key = geom_key(self.type, geom, {"freq": self.emx_opts.get("freq"),
                         "edge": self.emx_opts.get("edge"), "3d": self.emx_opts.get("3d"),
                         "mode": self.emx_opts.get("mode")})
@@ -1916,6 +2451,7 @@ class GeomRunner(object):
             lib=self.lib, freq=self.emx_opts.get("freq") or DEF_FREQ,
             emx_opts=self.emx_opts, views_mode=self.views_mode,
             snp_out=self.snp_path, no_views=True, verbose=self.verbose,
+            tech=self.tech,
             on_step=lambda m: logv(m, self.verbose))
         # 命中过的 snp 按 key 另存（缓存复用），固定路径保持最新；用 sha1 而非 hash()（跨进程不稳）。
         try:
@@ -2122,15 +2658,1022 @@ def emx_cmd_preview(st, gds="/path/cell.gds", struct="cell", proc=None, out_snp=
                         mode=opts.get("mode"), ports=None, extra=opts.get("extra"),
                         s_impedance=opts.get("s_impedance"))
     return " ".join(cmd)
+# ===========================================================================
+# lri 电感几何内核（从 v08c layout_em.py 逐行移植，与 librf.il 的 lri* 对应）
+#   ① 版图示意图按真实参数绘制   ② 提交 SKILL 前做可行性校验
+#   环族自相似切角 => 每圈都是 ring0 的精确内缩
+#   => 金属间距恒 = s，bbox 恒 = W x H，所有段 ∈ {0,45,90}
+#   kind(拓扑) 经 geom['kind'] 进 driver req：se/diff/f8/sym
+# ===========================================================================
+def lri_seglen(p, q):
+    return math.hypot(q[0] - p[0], q[1] - p[1])
+
+
+def lri_dedup(pts):
+    out = []
+    for p in pts:
+        if not out or lri_seglen(out[-1], p) > 1e-6:
+            out.append(p)
+    return out
+
+
+def lri_shift(pts, dx, dy):
+    return [(x + dx, y + dy) for x, y in pts]
+
+
+def lri_rot180(pts):
+    return [(-x, -y) for x, y in pts]
+
+
+def lri_mirrorx(pts):
+    return [(-x, y) for x, y in pts]
+
+
+def lri_mirrory(pts):
+    return [(x, -y) for x, y in pts]
+
+
+def lri_plen(pts):
+    return sum(lri_seglen(a, b) for a, b in zip(pts[:-1], pts[1:]))
+
+
+def lri_inter(p1, p2, q1, q2):
+    """两条直线求交（用于凸多边形 miter 内缩）"""
+    d1 = (p2[0] - p1[0], p2[1] - p1[1])
+    d2 = (q2[0] - q1[0], q2[1] - q1[1])
+    det = d1[0] * (-d2[1]) - d1[1] * (-d2[0])
+    if abs(det) < 1e-12:
+        return None
+    rx, ry = q1[0] - p1[0], q1[1] - p1[1]
+    t = (rx * (-d2[1]) - ry * (-d2[0])) / det
+    return (p1[0] + t * d1[0], p1[1] + t * d1[1])
+
+
+def lri_ring(a, b, c, seam="bottom"):
+    """带 45° 切角的矩形环（中心线），seam 为起点，逆时针"""
+    # 旧版 0.49*min 会把 (2-sqrt(2))=0.586 的标准 45° 切角截短，
+    # 使各圈切角边不再平行等距（连接点会跑出边外）。这里只防退化。
+    c = max(0.0, min(c, 0.999 * min(a, b)))
+    if seam == "top":
+        r = [(0, b), (c - a, b), (-a, b - c), (-a, c - b)]
+        r += [(c - a, -b), (a - c, -b), (a, c - b), (a, b - c)]
+        r.append((a - c, b))
+    elif seam == "left":
+        r = [(-a, 0), (-a, c - b), (c - a, -b), (a - c, -b)]
+        r += [(a, c - b), (a, b - c), (a - c, b), (c - a, b)]
+        r.append((-a, b - c))
+    elif seam == "right":
+        r = [(a, 0), (a, b - c), (a - c, b), (c - a, b)]
+        r += [(-a, b - c), (-a, c - b), (c - a, -b), (a - c, -b)]
+        r.append((a, c - b))
+    else:                                    # bottom
+        r = [(0, -b), (a - c, -b), (a, c - b), (a, b - c)]
+        r += [(a - c, b), (c - a, b), (-a, b - c), (-a, c - b)]
+        r.append((c - a, -b))
+    return lri_dedup(r)
+
+
+def lri_offset(poly, d):
+    """凸多边形向内 miter 内缩 d（d>0 向内）"""
+    n = len(poly)
+    out = []
+    for i in range(n):
+        p0 = poly[(i - 1) % n]
+        p1 = poly[i]
+        p2 = poly[(i + 1) % n]
+        d1x, d1y = p1[0] - p0[0], p1[1] - p0[1]
+        L1 = math.hypot(d1x, d1y)
+        d2x, d2y = p2[0] - p1[0], p2[1] - p1[1]
+        L2 = math.hypot(d2x, d2y)
+        n1x, n1y = -d1y / L1, d1x / L1
+        n2x, n2y = -d2y / L2, d2x / L2
+        q = lri_inter(
+            (p0[0] + d * n1x, p0[1] + d * n1y),
+            (p1[0] + d * n1x, p1[1] + d * n1y),
+            (p1[0] + d * n2x, p1[1] + d * n2y),
+            (p2[0] + d * n2x, p2[1] + d * n2y))
+        if q is None:
+            q = (p1[0] + d * n1x, p1[1] + d * n1y)
+        out.append(q)
+    return out
+
+
+def lri_rings(W, H, w, s, n, corner, seam="bottom", pitch=None):
+    """环族：ring0 起，自相似切角，保证每圈都是 ring0 的精确内缩"""
+    p = pitch if pitch else (w + s)
+    a0 = (W - w) / 2.0
+    b0 = (H - w) / 2.0
+    ratio = corner / min(a0, b0) if min(a0, b0) > 0 else 0.0
+    nring = int(math.ceil(n)) + 2
+    rs = [lri_ring(a0, b0, ratio * min(a0, b0), seam)]
+    for k in range(1, nring):
+        a, b = a0 - k * p, b0 - k * p
+        if min(a, b) <= w / 2.0:
+            break
+        rs.append(lri_ring(a, b, ratio * min(a, b), seam))
+    return rs, p
+
+
+def lri_cut_ring(r, frac):
+    if frac >= 0.9999:
+        return list(r) + [r[0]]
+    tot = lri_plen(list(r) + [r[0]])
+    want = tot * frac
+    acc = 0.0
+    out = [r[0]]
+    for i in range(len(r)):
+        a = r[i]
+        b = r[(i + 1) % len(r)]
+        L = lri_seglen(a, b)
+        if L < 1e-9:
+            return out
+        if acc + L >= want - 1e-9:
+            t = (want - acc) / L
+            out.append((a[0] + (b[0] - a[0]) * t,
+                        a[1] + (b[1] - a[1]) * t))
+            return out
+        out.append(b)
+        acc += L
+    return out
+
+
+def lri_unit(a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L = math.hypot(dx, dy)
+    return (0.0, 0.0) if L < 1e-12 else (dx / L, dy / L)
+
+
+def lri_cut_open(pts, frac):
+    """开放折线按弧长比例截断（不闭合）。"""
+    if frac >= 0.9999:
+        return list(pts)
+    tot = lri_plen(pts)
+    if tot < 1e-9:
+        return list(pts)
+    want, acc = tot * frac, 0.0
+    out = [pts[0]]
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        L = lri_seglen(a, b)
+        if L < 1e-9:
+            continue          # 跳过重合点，不能因此丢掉整段剩余路径
+        if acc + L >= want - 1e-9:
+            t = (want - acc) / L
+            out.append((a[0] + (b[0] - a[0]) * t,
+                        a[1] + (b[1] - a[1]) * t))
+            return out
+        out.append(b)
+        acc += L
+    return out
+
+
+def lri_rot_list(l, i):
+    """列表循环移位：从索引 i 起取一周。"""
+    n = len(l)
+    k = i % n
+    return [l[(k + j) % n] for j in range(n)]
+
+
+def lri_step_edge(r):
+    """seam=bottom 环的左竖直边（顺时针遍历方向）索引；找不到则报错。"""
+    m = len(r)
+    for i in range(m):
+        a, b = r[i], r[(i + 1) % m]
+        if (abs(b[0] - a[0]) < 1e-9 and abs(b[1] - a[1]) > 1e-9
+                and a[0] < 0.0 and b[1] < a[1]):
+            return i
+    raise ValueError("lri: 环上没有可用的左侧竖直边，无法构造螺旋")
+
+
+def lri_rot_exact(pts, ang):
+    """精确 90/180/270 旋转（避免 cos/sin 误差破坏 0/45/90 角度）。"""
+    if ang == 90:
+        return [(-y, x) for x, y in pts]
+    if ang == 180:
+        return [(-x, -y) for x, y in pts]
+    if ang == 270:
+        return [(y, -x) for x, y in pts]
+    return list(pts)
+
+
+def _lri_spiral_bottom(W, H, w, s, n, corner, pitch=None):
+    """seam=bottom 的标准矩形/切角螺旋（单一连续路径，无自交）。
+
+    每一圈从左侧竖直边上的 L 出发，向下绕过整圈后回到该边上的 D 结束，
+    D 比 L 高一个 pitch；然后沿内法向（+x）平移 pitch 到下一圈的 L。
+    因此同圈起止端之间留出 pitch 的缺口，金属净距 = s；
+    相邻两圈的过渡段相距 pitch，也不会重叠。路径不回到已走过的点。
+    """
+    rs, p = lri_rings(W, H, w, s, n, corner, "bottom", pitch)
+    r0 = rs[0]
+    i = lri_step_edge(r0)
+    m = len(r0)
+    b_idx = (i + 1) % m              # 左侧竖直边的下端顶点 B
+    nfull = int(n + 1e-7)
+    frac = n - nfull
+    if len(rs) < nfull + 1:
+        raise ValueError(
+            "lri: 内孔已闭合，只能容纳 %.2f 圈 < 请求 %.2f 圈；"
+            "请减小 n 或 s/w" % (max(0, len(rs) - 1), n))
+
+    def on_left(k, y):
+        r = rs[k]
+        a, b = r[i], r[(i + 1) % m]
+        t = (y - a[1]) / (b[1] - a[1])
+        if t < -1e-9 or t > 1.0 + 1e-9:
+            raise ValueError(
+                "lri: 第 %d 圈左侧边长度不足，无法容纳螺旋台阶 "
+                "(需要 y=%.3f, 边范围 %.3f..%.3f)；请减小 n 或 s/w"
+                % (k, y, min(a[1], b[1]), max(a[1], b[1])))
+        return (a[0], y)
+
+    if nfull == 0:
+        # 不足一圈：沿外圈从 seam 点绕 frac 圈（足迹小于 W/H）
+        closed = lri_rot_list(r0, 0) + [r0[0]]
+        return lri_dedup(lri_cut_open(closed, frac)), p
+
+    # ring0：从 seam 点绕到左侧边，结束于 D0（高度 = ring1 的 B 点）
+    l1 = rs[1][b_idx]
+    d0 = on_left(0, l1[1])
+    pts = lri_rot_list(r0, 0)[:i + 1] + [d0]
+
+    # ring1 的起点 = 左侧边下端 B1；此后每圈起点都比上一圈高 pitch
+    lk = l1
+    pts.append(lk)
+    for k in range(1, nfull):
+        r = rs[k]
+        rot = lri_rot_list(r, b_idx)
+        pts.append(r[b_idx])          # L_k -> B_k（沿左侧边向下）
+        pts += rot[1:]                 # 绕过整圈到 A_k
+        if k + 1 < len(rs):
+            dk = on_left(k, lk[1] + p)
+            pts.append(dk)             # A_k -> D_k
+            if k < nfull - 1 or frac > 1e-9:
+                nxt = (rs[k + 1][i][0], dk[1])
+                pts.append(nxt)        # D_k -> L_{k+1}（内法向）
+                lk = nxt
+    if frac > 1e-9 and nfull < len(rs):
+        r = rs[nfull]
+        # 小数圈从 L 开始：L -> B -> 绕环 -> 回到 L，再按弧长截断
+        closed = lri_dedup([lk] + lri_rot_list(r, b_idx) + [lk])
+        pts += lri_cut_open(closed, frac)[1:]
+    return lri_dedup(pts), p
+
+
+def lri_spiral(W, H, w, s, n, corner, seam="bottom", pitch=None):
+    """连续螺旋（无自交），seam 仅决定端口边。
+
+    统一用 bottom 版本生成再精确旋转，避免左/上/右端口的螺旋提前
+    收进导致足迹不足或台阶间距小于线宽。
+    """
+    if seam == "bottom":
+        return _lri_spiral_bottom(W, H, w, s, n, corner, pitch)[0]
+    if seam == "top":
+        return lri_rot_exact(_lri_spiral_bottom(W, H, w, s, n, corner,
+                                                pitch)[0], 180)
+    if seam == "right":
+        return lri_rot_exact(_lri_spiral_bottom(H, W, w, s, n, corner,
+                                                pitch)[0], 90)
+    if seam == "left":
+        return lri_rot_exact(_lri_spiral_bottom(H, W, w, s, n, corner,
+                                                pitch)[0], 270)
+    return _lri_spiral_bottom(W, H, w, s, n, corner, pitch)[0]
+
+
+def lri_point_at(pts, frac):
+    tot = lri_plen(pts)
+    want = tot * frac
+    acc = 0.0
+    for i in range(1, len(pts)):
+        a, b = pts[i - 1], pts[i]
+        L = lri_seglen(a, b)
+        if acc + L >= want - 1e-9:
+            t = (want - acc) / L if L > 0 else 0.0
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        acc += L
+    return pts[-1]
+
+
+def lri_sweep(pts, w):
+    """中心线 -> miter 扫掠多边形（用于画图；与 dbCreatePath 的拐角一致）"""
+    h = w / 2.0
+    segs = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dy)
+        if L > 1e-9:
+            segs.append((a, b, -dy / L, dx / L))
+    if not segs:
+        return []
+
+    def bound(sign):
+        out = [(segs[0][0][0] + sign * h * segs[0][2],
+                segs[0][0][1] + sign * h * segs[0][3])]
+        for i in range(1, len(segs)):
+            q = lri_inter(
+                (segs[i - 1][0][0] + sign * h * segs[i - 1][2],
+                 segs[i - 1][0][1] + sign * h * segs[i - 1][3]),
+                (segs[i - 1][1][0] + sign * h * segs[i - 1][2],
+                 segs[i - 1][1][1] + sign * h * segs[i - 1][3]),
+                (segs[i][0][0] + sign * h * segs[i][2],
+                 segs[i][0][1] + sign * h * segs[i][3]),
+                (segs[i][1][0] + sign * h * segs[i][2],
+                 segs[i][1][1] + sign * h * segs[i][3]))
+            out.append(q if q else (segs[i][0][0] + sign * h * segs[i][2],
+                                    segs[i][0][1] + sign * h * segs[i][3]))
+        la = segs[-1]
+        out.append((la[1][0] + sign * h * la[2],
+                    la[1][1] + sign * h * la[3]))
+        return out
+
+    return bound(1) + bound(-1)[::-1]
+
+
+SEAM_MAP = {"N": "top", "S": "bottom", "E": "right", "W": "left",
+            "TOP": "top", "BOTTOM": "bottom", "LEFT": "left",
+            "RIGHT": "right", "T": "top", "B": "bottom"}
+
+
+def lri_norm_geom(g):
+    """把表单值规范成内核参数：补 H / seam / corner，统一类型"""
+    g = dict(g)
+    raw_kind = str(g.get("kind", "")).strip().lower()
+    if raw_kind in ("sym", "symmetric", "wiki", "rfw"):
+        is_sym = True
+    elif (raw_kind in ("", "auto")
+          and "dout" in g and "W" not in g and "H" not in g):
+        is_sym = True
+    else:
+        is_sym = False
+    if is_sym:
+        # 最小参数集：dout/n/w/s。其余字段给兼容默认值。
+        dout = float(g.get("dout", g.get("W", 160.0)))
+        g.update(kind="sym", dout=dout, W=dout, H=dout,
+                 w=float(g.get("w", 10.0)),
+                 s=float(g.get("s", 3.2)),
+                 n=float(g.get("n", 3.0)))
+        g["shape"] = "oct"
+        g["corner"] = 0.0
+        g["ct"] = 0
+        g["seam"] = "bottom"
+        g["tangle"] = 180
+        return g
+    W = float(g.get("W", g.get("dout", 150.0)))
+    H = float(g.get("H", W))
+    w = float(g.get("w", 10.0))
+    shape = str(g.get("shape", "rect")).strip().lower() or "rect"
+    kind = str(g.get("kind", "se")).strip().lower() or "se"
+    if kind in ("figure8", "fig8", "f8"):
+        kind = "f8"
+    if kind not in ("se", "diff", "f8"):
+        kind = "se"
+    if shape in ("octagon", "oct"):
+        shape = "oct"
+    elif shape in ("square", "sq", "rect", "rectangle"):
+        shape = "rect"
+    else:
+        shape = "rect"
+    g["kind"] = kind
+    g["shape"] = shape
+    g["W"] = W
+    g["H"] = H
+    g["w"] = w
+    g["s"] = float(g.get("s", 2.6))
+    g["n"] = float(g.get("n", 2.5))
+    g["ct"] = int(float(g.get("ct", 0) or 0))
+    sm = str(g.get("seam", "S")).strip().upper()
+    g["seam"] = SEAM_MAP.get(sm, "bottom")
+    try:
+        g["tangle"] = int(float(g.get("tangle", 180) or 180))
+    except (TypeError, ValueError):
+        g["tangle"] = 180
+    if g["tangle"] not in (0, 90, 180):
+        g["tangle"] = 180
+    if g.get("corner") in ("", None):
+        if shape == "oct":
+            g["corner"] = ((2.0 - math.sqrt(2.0))
+                           * min((W - w) / 2.0, (H - w) / 2.0))
+        else:
+            g["corner"] = 0.0
+    else:
+        g["corner"] = float(g["corner"])
+    if g.get("corner") and shape == "oct":
+        pass
+    return g
+
+
+def lri_validate(g):
+    """可行性校验 -> (ok, msg)。空 msg = 通过"""
+    kind0 = str(g.get("kind", "se")).strip().lower()
+    if kind0 == "sym":
+        dout = float(g.get("dout", g.get("W", 160.0)))
+        w = float(g.get("w", 10.0))
+        s = float(g.get("s", 3.2))
+        n = float(g.get("n", 3.0))
+        if s < LRI_WIDE_S and w >= LRI_WIDE_W:
+            return False, ("宽金属(w>=%g)间距需 >= %.2f (当前 s=%g)"
+                           % (LRI_WIDE_W, LRI_WIDE_S, s))
+        try:
+            lri_sym_arm(dout, n, w, s)
+        except ValueError as exc:
+            return False, str(exc)
+        return True, ""
+    W = float(g.get("W", 150.0))
+    H = float(g.get("H", W))
+    w = float(g.get("w", 10.0))
+    s = float(g.get("s", 2.6))
+    n = float(g.get("n", 2.5))
+    kind = g.get("kind", "se")
+    if min(W, H) <= 0.0 or w <= 0.0 or s <= 0.0:
+        return False, "W/H/w/s 必须 > 0"
+    if w >= min(W, H):
+        return False, "线宽 w=%g 不小于外径" % w
+    if s < LRI_WIDE_S and w >= LRI_WIDE_W:
+        return False, "宽金属(w>=%g)间距需 >= %.2f (当前 s=%g)" % (LRI_WIDE_W, LRI_WIDE_S, s)
+    p = w + s
+    a0, b0 = (W - w) / 2.0, (H - w) / 2.0
+    units = 1.0 if kind != "diff" else 2.0
+    n_max = (min(a0, b0) - w / 2.0) / (p * units)
+    if n > n_max + 1e-9:
+        return False, ("匝数 n=%.2f 超出可行域: W=%g H=%g w=%g s=%g "
+                       "最多 %.2f 圈" % (n, W, H, w, s, n_max))
+    if n < 1.0:
+        return False, "匝数 n 至少 1 圈（不足一圈无法形成螺旋）"
+    if kind == "f8" and min(W, H) - 8.0 <= 0:
+        return False, "f8 的 W 太小"
+    # 用实际螺旋构造试算一次：45° 切角、f8 子环、diff 的 B 臂都会
+    # 让解析 n_max 偏乐观，提前在这里给出可读的失败原因。
+    try:
+        corner = float(g.get("corner") or 0.0)
+        if kind == "diff":
+            p2 = w + s
+            lri_spiral(W, H, w, s, n, corner, "bottom", 2.0 * p2)
+            lri_spiral(W - 2.0 * p2, H - 2.0 * p2, w, s, n, corner,
+                       "bottom", 2.0 * p2)
+        elif kind == "f8":
+            gapf = g.get("gap")
+            gapf = 8.0 if gapf in (None, "") else float(gapf)
+            gapf = max(gapf, w + s)
+            d = (W - gapf) / 2.0
+            cf8 = corner
+            if min(a0, b0) > 0.0:
+                cf8 = corner * min((d - w) / 2.0, b0) / min(a0, b0)
+            lri_spiral(d, H, w, s, n / 2.0, cf8, "left")
+        else:
+            lri_spiral(W, H, w, s, n, corner, g.get("seam", "bottom"))
+    except ValueError as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def lri_rot(pts, ang_deg, cx=0.0, cy=0.0):
+    a = math.radians(ang_deg)
+    ca, sa = math.cos(a), math.sin(a)
+    out = []
+    for x, y in pts:
+        dx, dy = x - cx, y - cy
+        out.append((cx + dx * ca - dy * sa, cy + dx * sa + dy * ca))
+    return out
+
+
+_DIRS = {"N": (0.0, 1.0), "S": (0.0, -1.0), "E": (1.0, 0.0), "W": (-1.0, 0.0)}
+
+
+def lri_dir_key(v):
+    x, y = v
+    if abs(x) >= abs(y):
+        return "E" if x >= 0.0 else "W"
+    return "N" if y >= 0.0 else "S"
+
+
+def lri_angle_deg(k1, k2):
+    v1, v2 = _DIRS[k1], _DIRS[k2]
+    dot = v1[0] * v2[0] + v1[1] * v2[1]
+    if dot > 0.5:
+        return 0
+    if dot < -0.5:
+        return 180
+    return 90
+
+
+def lri_pick_dirs(tangle, nat1, nat2):
+    """从 N/S/E/W 里选 (d1,d2)：夹角==tangle，尽量贴近自然出向"""
+    best = None
+    for k1 in ("N", "S", "E", "W"):
+        for k2 in ("N", "S", "E", "W"):
+            if lri_angle_deg(k1, k2) != tangle:
+                continue
+            cost = (0 if k1 == nat1 else 1, 0 if k2 == nat2 else 1)
+            if best is None or cost < best[0]:
+                best = (cost, k1, k2)
+    return best[1], best[2]
+
+
+def _lri_lead(pt, k, length):
+    dx, dy = _DIRS[k]
+    return [(pt[0], pt[1]), (pt[0] + dx * length, pt[1] + dy * length)]
+
+
+def _lri_exit_pad(pt, k, bbox_w, bbox_h, length):
+    """从 pt 沿 k 走到包围盒外的出线点（用于 underpass 出口）"""
+    dx, dy = _DIRS[k]
+    reach = max(bbox_w, bbox_h) + length
+    return (pt[0] + dx * reach, pt[1] + dy * reach)
+
+# ---------------------------------------------------------------------------
+# RFIC Wiki 风格对称电感（最小参数版）
+#   dout, n, w, s  ->  左右镜像半圈交错双臂 + 同侧双端口 + 底部中心 underpass
+# 其余全部由这 4 个参数推导：
+#   p = w+s, xj = p/2, R0 = dout/2-w/2, N = 2*floor(n)+1,
+#   45° 切角 c = (2-sqrt(2))*R（正八角），端子引线固定 20um。
+# ---------------------------------------------------------------------------
+def lri_half_right(R, xj):
+    """右半圈：从 (xj,R) 顺时针经右侧到 (xj,-R)。"""
+    c = (2.0 - math.sqrt(2.0)) * R
+    return [(xj, R), (R - c, R), (R, R - c),
+            (R, -(R - c)), (R - c, -R), (xj, -R)]
+
+
+def lri_half_left(R, xj):
+    """左半圈：从 (-xj,-R) 顺时针经左侧到 (-xj,R)。"""
+    return [(-x, y) for x, y in reversed(lri_half_right(R, xj))]
+
+
+# 换圈交叉处：underpass 段要跨过另一臂的顶层斜线，顶层半圈的
+# 满宽端帽若直接落在轴线上会与那条斜线搭接（实测 w=10/s=2.6 重叠
+# 1.09um）。因此把顶层半圈端点沿水平边外移 delta，通孔直接放在
+# 外移后的宽端下方，underpass 从通孔继续向中心延伸；螺旋顶层不再
+# 向中心伸窄颈。通孔几何默认值取 tech_profile.json 的 drc.via 段
+# （下列常量在导入时按内建默认工艺解析一次）；通孔在宽端下方，
+# y 向可放 1/2/3 个 cut。
+SYM_VIA_CUT = float(DEFAULT_TECH["drc"]["via"]["cut"])
+SYM_VIA_SPACE = float(DEFAULT_TECH["drc"]["via"]["spacing"])
+SYM_VIA_ENCL = float(DEFAULT_TECH["drc"]["via"]["enclosure"])
+SYM_VIA_PAD = SYM_VIA_CUT + 2.0 * SYM_VIA_ENCL   # 单 cut 外框
+SYM_VIA_EDGE = SYM_VIA_CUT / 2.0 + SYM_VIA_ENCL  # 金属端→孔中心
+SYM_IND_S = 2.5
+# 宽金属间距规则（工艺无关的通用口径）：线宽 >= LRI_WIDE_W 时，
+# 间距需 >= LRI_WIDE_S（默认取 drc.min_s 的 2 倍）；分档细则按你的 PDK 收紧。
+LRI_WIDE_W = 8.0
+LRI_WIDE_S = 2.0 * float(DEFAULT_TECH["drc"]["min_s"])
+
+
+def lri_sym_via_width(w):
+    """宽端下方通孔阵列的 y 向宽度：1/2/3 个 cut，两侧各留 0.5 包覆。"""
+    for vw in (7.5, 4.5, 1.5):
+        if vw <= w - 2.0 * SYM_VIA_ENCL + 1e-9:
+            return vw
+    return 1.5
+
+
+def lri_sym_stub(w):
+    """端头水平短段长度。
+
+    端头外侧顶边 = stub + h(√2-1)。工艺规则要求这条边（开口楔）
+    >= 2.5；取 2.6 留 0.1um 余量。w 较大时 1.25 已够，取 1.25。
+    """
+    back = (w / 2.0) * (math.sqrt(2.0) - 1.0)
+    return max(SYM_VIA_EDGE, 2.6 - back)
+
+
+def lri_sym_under_poly(pts, w):
+    """underpass 下穿多边形（与 SKILL lriUnderPolyPts 一致）。
+
+    端头 1.25um 水平短段后紧跟 45° 弯。直接按 miter 扫掠时，弯折侧的
+    端头竖边与 45° 边之间会留下 1.25-h(√2-1) 宽的尖楔（w=4/6 时
+    <2.5um，不满足工艺规则）。这里把端头竖边延长到与 45° 边直接相交，
+    让两段边共点，尖楔消失；右侧两端共线，竖边仍是整宽平头。
+    """
+    if len(pts) != 5:
+        return lri_sweep(pts, w)
+    (x0, y0), (x1, _y1), (x2, y2), _p3, (x4, _y4) = pts
+    h = w / 2.0
+    back = h * (math.sqrt(2.0) - 1.0)
+    sg = 1.0 if y2 >= pts[1][1] else -1.0
+    ya = y0 - sg * h
+    yb = y2 + sg * h
+    return [
+        (x0, ya),
+        (x1 + back, ya),
+        (x2 + back, y2 - sg * h),
+        (x4, y2 - sg * h),
+        (x4, yb),
+        (x2 - back, yb),
+        # 竖边与 45° 边的交点：从 M=(x1-back, y0+sg*h) 沿斜率 sg 外推
+        (x0, y0 + sg * (h + back - (x1 - x0))),
+    ]
+
+
+def lri_sym_delta_window(w, s, R, p):
+    """换圈端点的外移窗口 [dmin,dmax]（顶层 45° 双斜线夹缝）。
+
+    端点 b=(xj, R-p) 外移 delta 后，满宽端帽的两个危险角点：
+      1) 另一臂换圈斜线 u-v=xj-R：净距 (delta+p-w/2)/√2 - w/2 >= 2.5
+      2) 半径 R 外圈切角  u+v=√2 R：净距 (√2R-(delta+R-p/2+w/2))/√2 - w/2 >= 2.5
+    其中 u=|x|, v=|y|（按端点所在象限镜像）。返回 (dmin,dmax)。
+    """
+    a = math.sqrt(2.0) * (w / 2.0 + SYM_IND_S)
+    dmin = a - p + w / 2.0
+    dmax = (math.sqrt(2.0) - 1.0) * R + p / 2.0 - w / 2.0 - a
+    return dmin, dmax
+
+
+def lri_sym_min_dout(n, w, s):
+    """当前 n/w/s 下能画出的最小 dout（取整前的最内圈/直边约束）。"""
+    p = w + s
+    xj = p / 2.0
+    rt2 = math.sqrt(2.0)
+    N = 2 * int(math.floor(float(n) / 2.0)) + 1
+    if N < 1:
+        N = 1
+    if N == 1:
+        return 2.0 * (xj / (rt2 - 1.0) + w / 2.0)
+    a = rt2 * (w / 2.0 + SYM_IND_S)
+    dmin = a - p + w / 2.0
+    # 45° 夹缝下界 / 上界 / 水平直边 / 最内半圈直边
+    r1 = (dmin + p / 2.0) / (rt2 - 1.0) + w / 2.0
+    r2 = (2.0 * a + w - p * (0.5 + rt2)) / (rt2 - 1.0)
+    r3 = xj / (rt2 - 1.0)
+    Rlast = max(r1, r2, r3, 0.0)
+    return 2.0 * (Rlast + (N - 1) * p + w / 2.0)
+
+
+def lri_sym_arm(dout, n, w, s, side=1):
+    """RFIC-GPT 对称型单臂：交替左右半圈 + 轴线处换圈。
+
+    返回 (tops, unders, vias, N, R0, Rlast, xj)。
+    tops   = 顶层金属连续折线列表（半圈 + 本臂顶层的换圈段）；
+    unders = 下层 underpass 走线段 [(左端, 右端), ...]，两端为平头，长度已
+             包含通孔包覆；underpass 从宽端下方一直延伸到另一臂；
+    vias   = 通孔阵列中心与 y 向宽度 [(x, y, via_w), ...]。
+
+    side=+1：A 臂，偶数半圈后（下方）换圈走顶层，奇数半圈后（上方）走 underpass；
+    side=-1：B 臂，几何镜像，层正好相反（保证两臂在同一轴心处交叉时只有
+             一段走 underpass，不会同层短路）。
+    N = 2*floor(n/2)+1：总圈数取最近的奇数（本结构两端内端必须在下方
+    对称轴相接，故总圈数只能是奇数）。
+    """
+    if dout <= 0.0 or w <= 0.0 or s <= 0.0:
+        raise ValueError("dout/w/s 必须 > 0")
+    p = w + s
+    xj = p / 2.0
+    R0 = dout / 2.0 - w / 2.0
+    if R0 <= 0.0:
+        raise ValueError("dout=%.3f 太小（需 > w=%.3f）" % (dout, w))
+    N = 2 * int(math.floor(float(n) / 2.0)) + 1
+    if N < 1:
+        N = 1
+    Rlast = R0 - (N - 1) * p
+    if Rlast <= 0.0:
+        raise ValueError(
+            "dout=%.3f 放不下 %d 圈；请把 dout 增大到 >= %.1f 或减小 n/w/s"
+            % (dout, N, lri_sym_min_dout(n, w, s)))
+    if Rlast * (math.sqrt(2.0) - 1.0) < xj - 1e-9:
+        raise ValueError(
+            "最内半圈 R=%.3f 的直边太短，放不下 xj=%.3f；"
+            "请把 dout 增大到 >= %.1f 或减小 w/s"
+            % (Rlast, xj, lri_sym_min_dout(n, w, s)))
+    halfs = []
+    for k in range(N):
+        R = R0 - k * p
+        seg = (lri_half_right(R, xj) if k % 2 == 0
+               else lri_half_left(R, xj))
+        if side < 0:
+            seg = [(-x, y) for x, y in seg]
+        halfs.append(seg)
+    unders = []
+    vias = []
+    trim_pts = []
+    via_w = lri_sym_via_width(w)
+    stub = lri_sym_stub(w)
+    for k in range(N - 1):
+        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
+        if not under_here:
+            continue
+        R = R0 - k * p
+        dmin, dmax = lri_sym_delta_window(w, s, R, p)
+        Rin = R - p
+        # flush 面必须落在内圈水平边的“内边线”以内，否则切角内边
+        # 会在 flush 面处收成一个斜楔，宽端外角会掉出本圈金属形成
+        # <1.5um 的缺口（sym_b 实测顶层金属角违规）。
+        chord_max = (math.sqrt(2.0) - 1.0) * (Rin - w / 2.0) - xj
+        # underpass 从宽端下方再向外包住通孔，端点不能越过对应螺旋顶层的直边
+        # R-c；否则通孔外侧包覆不足，underpass 也会伸出这一圈。
+        tm_max = ((math.sqrt(2.0) - 1.0) * R - xj
+                  - (SYM_VIA_EDGE + stub))
+        upper = min(dmax, chord_max, tm_max)
+        if upper < dmin - 1e-9:
+            raise ValueError(
+                "换圈半径 R=%.3f（内圈 %.3f）的 45° 夹缝放不下 w=%.2f 端头"
+                "（下界 %.2f，上界 min(%.2f,直边 %.2f,TM端 %.2f)=%.2f）；"
+                "请把 dout 增大到 >= %.1f 或减小 w/s"
+                % (R, Rin, w, dmin, dmax, chord_max, tm_max, upper,
+                   lri_sym_min_dout(n, w, s)))
+        delta = max(0.0, 0.5 * (dmin + upper))
+        a = halfs[k][-1]
+        b = halfs[k + 1][0]
+        sa = 1.0 if a[0] >= 0.0 else -1.0
+        sb = 1.0 if b[0] >= 0.0 else -1.0
+        at = (a[0] + sa * delta, a[1])
+        bt = (b[0] + sb * delta, b[1])
+        halfs[k][-1] = at
+        halfs[k + 1][0] = bt
+        # 通孔放在外移后的宽端下方；underpass 从通孔继续向中心延伸。
+        av = (at[0] + sa * SYM_VIA_EDGE, at[1])
+        bv = (bt[0] + sb * SYM_VIA_EDGE, bt[1])
+        ae = (av[0] + sa * stub, av[1])
+        be = (bv[0] + sb * stub, bv[1])
+        # 45° 斜段 + 水平段：避免水平包覆段与细长斜线之间出现
+        # 锐角 miter（w=10 时会甩出很长的尖角）。
+        c = (av[0] - sa * p, bv[1])
+        unders.append([ae, av, c, bv, be])
+        vias.append([av[0], av[1], via_w])
+        vias.append([bv[0], bv[1], via_w])
+        trim_pts.extend([at, bt])
+    tops = []
+    run = list(halfs[0])
+    for k in range(N - 1):
+        nxt = halfs[k + 1][0]
+        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
+        if under_here:
+            tops.append(run)
+            run = list(halfs[k + 1])
+        else:
+            run.append(nxt)
+            run.extend(halfs[k + 1][1:])
+    tops.append(run)
+    # 换圈 flush 端（通孔在宽端下方）不能加满宽方端帽：w x w 的
+    # 端帽会同时撞上另一臂 45° 斜线和外圈切角；dbCreatePath 的
+    # pathType=0 平头端才是安全的。
+    def _is_trim(pt):
+        return any(abs(pt[0] - q[0]) <= 1e-6 and abs(pt[1] - q[1]) <= 1e-6
+                   for q in trim_pts)
+    topcaps = [(not _is_trim(rr[0]), not _is_trim(rr[-1])) for rr in tops]
+    return tops, unders, vias, topcaps, N, R0, Rlast, xj
+
+
+def lri_build_ind(g):
+    """geom -> {"metal":[路径], "under":[路径], "ports":[(name,pt)], ...}
+
+    kind: se=单螺旋 / diff=对称双螺旋(180°旋转对称) / f8=8字双环(中心交叉)
+    tangle: 两端子出线方向夹角 0/90/180
+    """
+    W = float(g.get("W", g.get("dout", 160.0)))
+    H = float(g.get("H", W))
+    w = float(g["w"])
+    s = float(g["s"])
+    n = float(g.get("n", 3.0))
+    corner = float(g.get("corner") or 0.0)
+    seam = g.get("seam", "bottom")
+    kind = g.get("kind", "se")
+    ct = int(g.get("ct", 0) or 0)
+    _tv = g.get("tangle", 180)
+    tangle = int(float(180 if _tv in (None, "") else _tv))
+    stub = float(g.get("stub", 40.0) or 40.0)
+    out = {"metal": [], "under": [], "ports": [],
+           "bx": W, "by": H, "kind": kind}
+
+    if kind == "sym":
+        # RFIC Wiki 截图样式：4 个几何参数 dout/n/w/s，其余全部推导。
+        # 每臂 = 交替左右半圈，换圈处跨过对称轴；两臂在上下轴线处
+        # 交叉，一段走顶层、一段走 underpass（层互补）。
+        dout = float(g.get("dout", W))
+        ta, ua, va, ca, N, R0, Rlast, xj = lri_sym_arm(dout, n, w, s, +1)
+        tb, ub, vb, cb, _, _, _, _ = lri_sym_arm(dout, n, w, s, -1)
+        # 两臂内端都在下方对称轴：把短桥并入 A 臂最后一条顶层路径，
+        # 避免被间距检查误判为两段独立金属。
+        ta[-1].append((-xj, -Rlast))
+        lead = 20.0
+        out["metal"] = list(ta) + list(tb)
+        # 两个端口都在顶部：从两臂外端垂直向上引出
+        out["metal"].append([(xj, R0), (xj, R0 + lead)])
+        out["metal"].append([(-xj, R0), (-xj, R0 + lead)])
+        out["topcaps"] = list(ca) + list(cb) + [(True, True), (True, True)]
+        out["under"] = list(ua) + list(ub)
+        out["under_poly"] = [lri_sym_under_poly(p, w)
+                             for p in list(ua) + list(ub)]
+        out["vias"] = list(va) + list(vb)
+        out["ports"] = [("p01", (xj, R0 + lead)),
+                        ("p02", (-xj, R0 + lead))]
+        out["bx"] = dout
+        out["by"] = dout
+        out["N"] = N
+        return out
+
+    if kind == "diff":
+        # 对称交错双臂（与 SKILL lriBuildDiff 一致）：A/B 交错填充
+        # (union 间距恒 s)；B 取 A 的镜像（不是 180° 旋转），
+        # 内端对接后两臂电流同向、互感为正。
+        p2 = w + s
+        A = lri_spiral(W, H, w, s, n, corner, "bottom", 2.0 * p2)
+        B = lri_mirrory(lri_spiral(W - 2.0 * p2, H - 2.0 * p2, w, s, n,
+                                   corner, "bottom", 2.0 * p2))
+        out["metal"] = [A, B]
+        # A 外端在下方外缘，直接 S 出线；B 外端在 A 外圈之内，
+        # 同层直线会穿过 A 外圈 -> 先用 underpass 逃到 A 外，再出 p02。
+        # 中心桥走空区：A内端 -> (B内端x, A内端y) -> B内端。
+        out["under"] = [[A[-1], (B[-1][0], A[-1][1]), B[-1]]]
+        lead1 = _lri_lead(A[0], "S", stub)
+        bx, _by = B[0]
+        pex, pey = bx, H / 2.0 + w + 40.0 + stub
+        out["under"].append([B[0], (pex, pey)])
+        lead2 = [(pex, pey), (pex, pey + stub)]
+        out["metal"] += [lead1, lead2]
+        out["ports"] = [("p01", lead1[-1]), ("p02", lead2[-1])]
+        if ct:
+            tip = (B[-1][0], -(H / 2.0 + w + 40.0 + stub))
+            out["under"].append([B[-1], tip])
+            out["ports"].append(("ct1", tip))
+        return out
+
+
+    if kind == "f8":
+        # 8 字双环：两环左右相切于中心(腰)，外端东西出线，
+        # 两内端经原点交叉 underpass（8 字的「腰」），全正交、无任意角旋转
+        gapf = g.get("gap")
+        gapf = 8.0 if gapf in (None, "") else float(gapf)
+        # 内端 landing 是 w x w；两环内端间距必须 >= w+s，否则直接短路。
+        gapf = max(gapf, w + s)
+        d = (W - gapf) / 2.0
+        nA = n / 2.0
+        dx = (gapf + d) / 2.0
+        # 子环外径 d < W：45° 切角必须按比例缩小，否则 oct 的切角
+        # 会超过子环半径而退化成自交图形。
+        a0m, b0m = (W - w) / 2.0, (H - w) / 2.0
+        cf8 = corner
+        if min(a0m, b0m) > 0.0:
+            cf8 = corner * min((d - w) / 2.0, b0m) / min(a0m, b0m)
+        # seam=left: 外端在西、内端在东(朝中心)；镜像环反之
+        Lf = lri_shift(lri_spiral(d, H, w, s, nA, cf8, "left"), -dx, 0.0)
+        Rg = lri_shift(lri_mirrorx(
+            lri_spiral(d, H, w, s, nA, cf8, "left")), dx, 0.0)
+        out["metal"] = [Lf, Rg]
+        # 腰：两内端经原点交叉（视觉 8 字关键）；先走到 y=0 再横穿，
+        # 保证 underpass 全为 0/90 段。
+        out["under"] = [[Lf[-1], (Lf[-1][0], 0.0), (0.0, 0.0),
+                         (Rg[-1][0], 0.0), Rg[-1]]]
+        nat1 = lri_dir_key((Lf[0][0] + dx, Lf[0][1]))
+        nat2 = lri_dir_key((Rg[0][0] - dx, Rg[0][1]))
+        k1, k2 = lri_pick_dirs(tangle, nat1, nat2)
+        lead1 = _lri_lead(Lf[0], k1, stub)
+        lead2 = _lri_lead(Rg[0], k2, stub)
+        out["metal"] += [lead1, lead2]
+        out["ports"] = [("p01", lead1[-1]), ("p02", lead2[-1])]
+        return out
+
+    # ---- se: 单螺旋（出向对齐 SKILL：p01=seam 边，p02=内端径向）----
+    body = lri_spiral(W, H, w, s, n, corner, seam)
+    out["metal"] = [body]
+    nat1 = {"top": "N", "left": "W", "right": "E"}.get(seam, "S")
+    ex, ey = body[-1][0], body[-1][1]
+    Lr = math.hypot(ex, ey)
+    nat2 = lri_dir_key((ex, ey) if Lr > 1e-6 else (0.0, 1.0))
+    k1, k2 = lri_pick_dirs(tangle, nat1, nat2)
+    lead1 = _lri_lead(body[0], k1, stub)
+    out["metal"].append(lead1)
+    tip = _lri_exit_pad(body[-1], k2, W, H, stub)
+    out["under"].append([body[-1], tip])
+    out["ports"] = [("p01", lead1[-1]), ("p02", tip)]
+    if ct:
+        cut = lri_point_at(body, 0.5)
+        k3 = "S" if k1 != "S" else "N"
+        tip2 = _lri_exit_pad(cut, k3, W, H, stub)
+        out["under"].append([cut, tip2])
+        out["ports"].append(("ct1", tip2))
+    return out
+
+def lri_draw_sketch(c, raw):
+    """在 Tk Canvas 上按真实参数画电感示意图（W/H/w/s/n/corner/ct 全反映）"""
+    try:
+        g = form_to_geom("ind", raw)
+        ok, msg = lri_validate(g)
+        if not ok:
+            raise ValueError(msg)
+        geo = lri_build_ind(g)
+    except Exception as exc:
+        c.create_text(140, 86, text="参数不可行", fill="#a03030",
+                      font=("fixed", 10))
+        c.create_text(140, 110, text=str(exc)[:42], fill="#a03030",
+                      font=("fixed", 8))
+        return
+    W, H = geo["bx"], geo["by"]
+    w = float(g["w"])
+    wu = w
+    sc = min(196.0 / max(W, 1e-9), 128.0 / max(H, 1e-9))
+    cx, cy = 140.0, 94.0
+
+    def tx(p):
+        return (cx + p[0] * sc, cy - p[1] * sc)
+
+    def poly(pts, width, fill, edge):
+        pp = lri_sweep(pts, width)
+        if len(pp) < 3:
+            return
+        flat = []
+        for q in pp:
+            x, y = tx(q)
+            flat.extend((x, y))
+        c.create_polygon(flat, fill=fill, outline=edge, width=1)
+
+    for pts in geo["metal"]:
+        poly(pts, w, "#3a6ea5", "#1f4064")
+    if geo.get("under_poly"):
+        # 下穿已按工艺规则干净的端头多边形给出，直接画，不再二次扫掠
+        for pp in geo["under_poly"]:
+            if len(pp) >= 3:
+                flat = []
+                for q in pp:
+                    x, y = tx(q)
+                    flat.extend((x, y))
+                c.create_polygon(flat, fill="#c0504d", outline="#7a2e2c",
+                                 width=1)
+    else:
+        for seg in geo["under"]:
+            poly(seg, wu, "#c0504d", "#7a2e2c")
+    # 通孔阵列（宽端下方，按实际 cut 数和间距画绿点）
+    for vx, vy, vw in geo.get("vias", []):
+        pitch = SYM_VIA_CUT + SYM_VIA_SPACE
+        n = max(1, int(round((vw + SYM_VIA_SPACE) / pitch)))
+        for i in range(n):
+            yy = vy + (i - (n - 1) / 2.0) * pitch
+            px, py = tx((vx, yy))
+            hw = max(0.8, SYM_VIA_CUT / 2.0 * sc)
+            c.create_rectangle(px - hw, py - hw, px + hw, py + hw,
+                               fill="#0a7d33", outline="#064d1f")
+    # 外框（目标 bbox）
+    x1, y1 = tx((-W / 2.0, H / 2.0))
+    x2, y2 = tx((W / 2.0, -H / 2.0))
+    c.create_rectangle(x1, y1, x2, y2, outline="#9a9a9a", dash=(3, 3))
+    # 端口
+    for name, pt in geo["ports"]:
+        x, y = tx(pt)
+        col = "#b02020" if name.startswith("ct") else "#0a7d33"
+        c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=col, outline="")
+        c.create_text(x, y - 9, text=name, fill=col, font=("fixed", 7))
+    # 尺寸
+    yb = max(y1, y2) + 13
+    c.create_line(x1, yb, x2, yb, fill="#a03030", arrow="both")
+    c.create_text((x1 + x2) / 2.0, yb + 8, text="W=%g" % W, fill="#a03030",
+                  font=("fixed", 8))
+    xl = min(x1, x2) - 14
+    c.create_line(xl, y1, xl, y2, fill="#a03030", arrow="both")
+    c.create_text(xl - 2, (y1 + y2) / 2.0, text="H=%g" % H, fill="#a03030",
+                  font=("fixed", 8), angle=90)
+    # 参数
+    if g.get("kind") == "sym":
+        c.create_text(140, 182, fill="#444444", font=("fixed", 8),
+                      text="dout=%g  w=%g  s=%g  实际圈数 N=%d"
+                           % (float(g.get("dout", W)), w, float(g["s"]),
+                              int(geo.get("N", 0))))
+        c.create_text(140, 197, fill="#666666", font=("fixed", 8),
+                      text="kind=sym  端口同侧顶部  内端下方对称轴")
+    else:
+        c.create_text(140, 182, fill="#444444", font=("fixed", 8),
+                      text="n=%g  w=%g  s=%g  corner=%g"
+                           % (float(g["n"]), w, float(g["s"]),
+                              float(g["corner"])))
+        c.create_text(140, 197, fill="#666666", font=("fixed", 8),
+                      text="kind=%s  shape=%s  ct=%d  seam=%s"
+                           % (g["kind"], g["shape"], int(g["ct"]), g["seam"]))
+
+
+def lri_sketch_after(tab):
+    """输入框连续输入时防抖重画示意图"""
+    try:
+        if getattr(tab, "_lri_after", None):
+            tab.sketch.after_cancel(tab._lri_after)
+    except Exception:
+        pass
+    try:
+        tab._lri_after = tab.sketch.after(
+            140, lambda: lri_redraw_sketch(tab))
+    except Exception:
+        tab._lri_after = None
+
+
+def lri_redraw_sketch(tab):
+    try:
+        tab._draw_geom_sketch("ind")
+    except Exception:
+        pass
+
 # ---- GUI：register(gui) -> 「版图 EM」页（子页：版图生成 / EM 仿真 / EM 优化迭代） ----
 PRESETS = [ {"name": "1nH 八角电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"shape": "octagon", "n": 2.5, "w": 10, "s": 2.6, "dout": 150,
-              "ct": 0, "underpass": "direct"}},
+     "geom": {"kind": "se", "shape": "octagon", "n": 2.5, "w": 10, "s": 2.6,
+              "dout": 150, "ct": 0, "underpass": "direct"}},
     {"name": "2nH 方形电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"shape": "square", "n": 3.5, "w": 12, "s": 2.6, "dout": 220,
-              "ct": 0, "underpass": "direct"}}, {"name": "中心抽头电感", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"shape": "octagon", "n": 2, "w": 10, "s": 2.6, "dout": 160,
-              "ct": 1, "underpass": "direct"}}, {"name": "50Ω 微带线", "type": "tl", "freq": "1e9:30e9:21",
+     "geom": {"kind": "se", "shape": "square", "n": 3.5, "w": 12, "s": 2.6,
+              "dout": 220, "ct": 0, "underpass": "direct"}},
+    {"name": "中心抽头电感", "type": "ind", "freq": "1e9:30e9:21",
+     "geom": {"kind": "se", "shape": "octagon", "n": 2, "w": 10, "s": 2.6,
+              "dout": 160, "ct": 1, "underpass": "direct"}},
+    {"name": "差分电感 (diff)", "type": "ind", "freq": "1e9:30e9:21",
+     "geom": {"kind": "diff", "shape": "octagon", "n": 2.5, "w": 10,
+              "s": 2.6, "dout": 220, "ct": 0}},
+    {"name": "8 字电感 (f8)", "type": "ind", "freq": "1e9:30e9:21",
+     "geom": {"kind": "f8", "shape": "octagon", "n": 3, "w": 10, "s": 2.6,
+              "dout": 200, "ct": 0}},
+    {"name": "50Ω 微带线", "type": "tl", "freq": "1e9:30e9:21",
      "geom": {"w": 20, "len": 300, "gnd": 1, "gnd_layer": "M1", "fence": 0, "cpw": 0, "gap": 5}},
     {"name": "CPW 线", "type": "tl", "freq": "1e9:30e9:21",
      "geom": {"w": 15, "len": 250, "gnd": 1, "gnd_layer": "M1", "fence": 0, "cpw": 1, "gap": 6}},
@@ -2143,12 +3686,24 @@ PRESETS = [ {"name": "1nH 八角电感", "type": "ind", "freq": "1e9:30e9:30",
     {"name": "平行耦合线", "type": "cpl", "freq": "1e9:30e9:21",
      "geom": {"w": 10, "gap": 3, "len": 200, "gnd": 1}}, ]
 # 各 type 的几何表单项：(key, 中文标签, 默认值, 数值?)
-GEOM_FORM = { "ind": [("shape", "形状 square/octagon", "octagon", False), ("n", "匝数 n", "2.5", True),
-            ("w", "线宽 w (µm)", "10", True), ("s", "间距 s (µm)", "2.6", True),
-            ("dout", "外径 dout (µm)", "150", True), ("din", "内径 din (µm, 留空=闭合)", "", True),
-            ("ct", "中心抽头 ct (0/1)", "0", True), ("ct_dir", "抽头方向 ct_dir (N/S/E/W)", "S", False),
-            ("underpass", "underpass direct/route", "direct", False), ("ex", "横向拉长 ex (µm)", "", True),
-            ("ey", "纵向拉长 ey (µm)", "", True), ("ind_mark", "IND 标记层 (0/1)", "0", True)],
+# ind 默认值按 lri 内核对齐（n=3 / s=3.2 / dout=160），表单显式带全键，
+# 不依赖内核缺省值：同一组参数经 lri_norm_geom 后与 SKILL 完全一致。
+GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/f8/sym)", "se", False),
+            ("shape", "形状 rect/oct", "octagon", False),
+            ("seam", "端口边 seam (N/S/E/W)", "S", False),
+            ("tangle", "端口夹角 tangle (0/90/180)", "180", True),
+            ("n", "匝数 n", "3", True), ("w", "线宽 w (µm)", "10", True),
+            ("s", "间距 s (µm)", "3.2", True), ("dout", "外径 dout (µm)", "160", True),
+            ("W", "宽 W (µm, 留空=dout)", "", True),
+            ("H", "高 H (µm, 留空=dout)", "", True),
+            ("corner", "45° 切角 corner (µm, 留空=八角自动)", "", True),
+            ("din", "内径 din (µm, 留空=闭合) [仅旧内核]", "", True),
+            ("ct", "中心抽头 ct (0/1)", "0", True),
+            ("ct_dir", "抽头方向 ct_dir (N/S/E/W) [仅旧内核]", "S", False),
+            ("underpass", "underpass direct/route [仅旧内核]", "direct", False),
+            ("ex", "横向拉长 ex (µm) [仅旧内核]", "", True),
+            ("ey", "纵向拉长 ey (µm) [仅旧内核]", "", True),
+            ("ind_mark", "MARKER 标记层 (0/1)", "0", True)],
     "tl": [("w", "线宽 w (µm)", "20", True), ("len", "长度 len (µm)", "300", True),
            ("gnd", "带地 gnd (0/1)", "1", True), ("gnd_layer", "地层", "M1", False),
            ("fence", "围栏 fence (0/1)", "0", True), ("cpw", "CPW 模式 (0/1)", "0", True),
@@ -2165,8 +3720,20 @@ for _rows in GEOM_FORM.values():
     for _k, _lab, _d, _num in _rows:
         if _num:
             GEOM_NUM.add(_k)
+# 下拉框字段：(key -> 取值元组)，表单渲染为 readonly Combobox
+GEOM_CHOICES = {
+    "kind": ("se", "diff", "f8", "sym"),
+    "shape": ("rect", "oct", "octagon", "square"),
+    "seam": ("S", "N", "E", "W"),
+    "tangle": ("180", "90", "0"),
+    "style": ("balun", "stacked", "interleaved"),
+}
 def form_to_geom(typ, raw):
-    """表单字符串 dict -> 几何 dict（数值键转 float，空项丢弃）"""
+    """表单字符串 dict -> 几何 dict（数值键转 float，空项丢弃）。
+
+    ind 额外过 lri_norm_geom：shape octagon->oct、seam S->bottom、
+    补齐 W/H/corner，保证 GUI 与 API（make_layout_emx）行为一致。
+    """
     geom = {}
     for key, _lab, _d, num in GEOM_FORM.get(typ, []):
         v = (raw.get(key) or "").strip()
@@ -2179,6 +3746,8 @@ def form_to_geom(typ, raw):
                 raise LibrfError("%s: %s" % (key, e))
         else:
             geom[key] = v
+    if typ == "ind":
+        geom = lri_norm_geom(geom)
     return geom
 class _EmOptTab(object):
     """「版图 EM」页签：A 版图生成 / B EM 仿真 / C EM 优化迭代"""
@@ -2260,8 +3829,18 @@ class _EmOptTab(object):
         self.ttk.Combobox(r2, textvariable=self.a_preset, width=22,
                           values=[p["name"] for p in PRESETS], state="readonly").pack(side="left")
         self.ttk.Button(r2, text="应用预设", command=self._apply_preset).pack(side="left", padx=6)
-        self.geom_frame = self.ttk.Frame(f)
-        self.geom_frame.pack(fill="x")
+        # 几何表单 + 草图（右侧 Tk Canvas，按真实参数画；与提交给 SKILL 的一致）
+        gbody = self.ttk.Frame(f)
+        gbody.pack(fill="x")
+        self.geom_frame = self.ttk.Frame(gbody)
+        self.geom_frame.pack(side="left", fill="x", expand=True)
+        try:
+            self.sketch = self.tk.Canvas(gbody, width=280, height=210, bg="white",
+                                         highlightthickness=1,
+                                         highlightbackground="#cccccc")
+            self.sketch.pack(side="left", padx=(6, 0), anchor="n")
+        except Exception:
+            self.sketch = None
         self.geom_vars = {}
         self._rebuild_geom()
         self.a_cell = self._entry(f, "cell 名", "")
@@ -2372,8 +3951,37 @@ class _EmOptTab(object):
             r = self._row(self.geom_frame, pady=1)
             self.ttk.Label(r, text=lab, width=26, anchor="w").pack(side="left")
             var = self.tk.StringVar(value=d)
-            self.ttk.Entry(r, textvariable=var, width=12).pack(side="left")
+            if key in GEOM_CHOICES:
+                ent = self.ttk.Combobox(r, textvariable=var, width=10,
+                                        values=GEOM_CHOICES[key], state="readonly")
+                ent.pack(side="left")
+                ent.bind("<<ComboboxSelected>>", lambda _e: lri_sketch_after(self))
+            else:
+                ent = self.ttk.Entry(r, textvariable=var, width=12)
+                ent.pack(side="left")
+                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
             self.geom_vars[key] = var
+        self._draw_geom_sketch(typ)
+    def _draw_geom_sketch(self, typ):
+        """几何预览：ind 用 lri 内核画真实版图；其余类型保持文字占位。"""
+        c = getattr(self, "sketch", None)
+        if c is None:
+            return
+        try:
+            c.delete("all")
+        except Exception:
+            return
+        if typ != "ind":
+            c.create_text(140, 100, text="%s 预览暂未接入" % typ,
+                          fill="#777777", font=("fixed", 9))
+            return
+        raw = {k: (v.get() if v is not None else "")
+               for k, v in (self.geom_vars or {}).items()}
+        try:
+            lri_draw_sketch(c, raw)
+        except Exception as exc:
+            c.create_text(140, 100, text="预览失败: %s" % str(exc)[:40],
+                          fill="#a03030", font=("fixed", 8))
     def _apply_preset(self):
         name = self.a_preset.get()
         for p in PRESETS:
@@ -2390,12 +3998,45 @@ class _EmOptTab(object):
     def _collect_geom(self):
         raw = {k: v.get() for k, v in self.geom_vars.items()}
         return form_to_geom(self.a_type.get(), raw)
+    def _collect_tech(self):
+        """当前「工艺」页输入 -> tech dict（无工艺页时回落 profile）。"""
+        tab = getattr(self.gui, "tech_tab", None)
+        if tab is not None and hasattr(tab, "collect_tech"):
+            return tab.collect_tech()
+        return build_tech()
+    def _require_tech_ui(self, log=None):
+        """任务启动前的工艺门禁：通过/警告/错误均回显到对应页日志。"""
+        log = log if log is not None else getattr(self, "a_log", None)
+
+        def _say(msg):
+            if log is not None:
+                self._log(log, msg)
+        tab = getattr(self.gui, "tech_tab", None)
+        if tab is not None and hasattr(tab, "require_ready_ui"):
+            ok = tab.require_ready_ui(parent=self.root)
+            if not ok:
+                _say("工艺检查未通过，任务已取消（见「工艺」页）")
+            return ok
+        try:
+            warns = require_tech_ready(build_tech())
+        except LibrfError as e:
+            _say("工艺检查未通过: %s" % e)
+            return False
+        if warns:
+            _say("工艺检查通过（%d 条警告）: %s" % (len(warns), warns[0]))
+        return True
     def _do_make(self, task):
+        if not self._require_tech_ui():
+            return
         if self._busy:
             self._log(self.a_log, "已有任务在跑")
             return
         try:
             geom = self._collect_geom()
+            if self.a_type.get() == "ind":
+                _ok, _msg = lri_validate(geom)
+                if not _ok:
+                    raise LibrfError(_msg)
         except LibrfError as e:
             self._log(self.a_log, "几何错误: %s" % e)
             return
@@ -2483,6 +4124,8 @@ class _EmOptTab(object):
         st["solver"]["parallel"] = _opt_num(self.b_parallel.get(), int)
         return emx_settings_to_opts(st)
     def _run_emx(self):
+        if not self._require_tech_ui(log=getattr(self, "b_log", None)):
+            return
         if self._busy:
             self._log(self.b_log, "已有任务在跑")
             return
@@ -2627,6 +4270,8 @@ class _EmOptTab(object):
             "fixed_geom": fixed, "snp": snp, "emx": opts, "geom_outputs": True, "views_mode": "emx",
         }, geom_vars
     def _gen_device(self):
+        if not self._require_tech_ui(log=getattr(self, "c_log", None)):
+            return
         if self._busy:
             self._log(self.c_log, "已有任务在跑")
             return
@@ -2653,6 +4298,8 @@ class _EmOptTab(object):
         self._log(self.c_log, "请在电路原理图中例化 %s/%s/symbol（其 schematic 的 nport "
                   "已指向固定 sNp），然后在设计页填好网表即可开始 EM 优化。" % (payload.get("lib"), payload.get("cell")))
     def _start_em_opt(self):
+        if not self._require_tech_ui(log=getattr(self, "c_log", None)):
+            return
         try:
             le, geom_vars = self._layout_em_cfg()
         except LibrfError as e:
@@ -2839,6 +4486,18 @@ class _EmHook(object):
                                     "min": g["min"], "max": g["max"]})
                         cfg["variables"] = merged
                         cfg["layout_em"] = le
+                        # 工艺门禁：启用版图 EM 时校验工艺文件；tech 键写入
+                        # cfg 顶层，优化每轮 GeomRunner 复用（不打进 layout_em）。
+                        tech = tab._collect_tech()
+                        warns = require_tech_ready(
+                            tech, need=("layermap", "proc"))
+                        for k in ("techlib", "techlib_dir", "layermap",
+                                  "proc", "cds_lib"):
+                            if tech.get(k):
+                                cfg[k] = tech[k]
+                        if warns:
+                            tab._log(tab.a_log, "工艺检查通过（%d 条警告）：%s"
+                                     % (len(warns), warns[0]))
                 except Exception as exc:
                     if validate:
                         gui._dialog("版图 EM 配置错误", str(exc), error=True)
@@ -2923,9 +4582,109 @@ def _selftest():
     snp_p = os.path.join(tmp, "a.s2p")
     cmd = emx_cmd_preview(st, gds=gds_p, struct="c", out_snp=snp_p)
     check("emx preview order", cmd.index("--format") < cmd.index("--s-file") < cmd.index(gds_p))
-    g = form_to_geom("ind", {"shape": "octagon", "n": "2.5", "w": "10",
-                             "s": "2.6", "dout": "150", "ct": "0", "underpass": "direct", "din": ""})
-    check("form_to_geom", g.get("shape") == "octagon" and g.get("n") == 2.5 and "din" not in g)
+    g = form_to_geom("ind", {"kind": "se", "shape": "octagon", "n": "2.5",
+                             "w": "10", "s": "2.6", "dout": "150", "ct": "0",
+                             "seam": "S", "tangle": "180", "underpass": "direct",
+                             "din": ""})
+    check("form_to_geom", g.get("shape") == "oct" and g.get("n") == 2.5 and "din" not in g)
+    # 几何 v2（lri 内核）：规范化 / 校验 / 构造 / driver 键
+    check("lri norm W/H/seam", g.get("W") == 150.0 and g.get("H") == 150.0
+          and g.get("seam") == "bottom" and g.get("corner") > 0)
+    gn = lri_norm_geom({"kind": "se", "seam": "N", "dout": 160, "n": 3,
+                        "w": 10, "s": 3.2})
+    check("lri seam map N->top", gn.get("seam") == "top")
+    for _kind in ("se", "diff", "f8", "sym"):
+        _g = lri_norm_geom({"kind": _kind, "shape": "oct", "dout": 220,
+                            "n": 2.5, "w": 10, "s": 2.6})
+        _ok, _msg = lri_validate(_g)
+        check("lri validate %s" % _kind, _ok, _msg)
+        if _ok:
+            _geo = lri_build_ind(_g)
+            check("lri build %s ports" % _kind,
+                  len(_geo["ports"]) >= 2 and len(_geo["metal"]) >= 2)
+    _bad = lri_norm_geom({"kind": "se", "dout": 30, "n": 9, "w": 10, "s": 3.2})
+    _ok, _msg = lri_validate(_bad)
+    check("lri validate rejects", (not _ok) and bool(_msg), _msg)
+    _d = gen_driver_il({"type": "ind", "kind": "se", "seam": "bottom",
+                        "tangle": 180, "W": 160.0, "H": 160.0, "corner": 10.0,
+                        "cell": "c1", "n": 3, "w": 10, "result": "/tmp/r.txt"})
+    check("driver carries kind/seam", "'kind \"se\"" in _d and "'seam \"bottom\"" in _d)
+    check("driver carries W/H numeric", "'W 160.0" in _d and "'tangle 180.0" in _d)
+    # 工艺门禁（build_tech 真源优先级 + require_tech_ready 正常 fixture）
+    _fx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+    _cds = os.path.join(tmp, "cds.lib")
+    with _native_open(_cds, "w") as _fh:
+        _fh.write("DEFINE keepMe /k\n")
+    _tdir = os.path.join(tmp, "techlib")
+    if not os.path.isdir(_tdir):
+        os.makedirs(_tdir)
+    _tech = build_tech(techlib_dir=_tdir,
+                       layermap=os.path.join(_fx, "demo_stack.layermap"),
+                       proc=os.path.join(_fx, "demo_stack.proc"),
+                       cds_lib=_cds, base=DEFAULT_TECH)
+    check("build_tech abspath", os.path.isabs(_tech["proc"])
+          and os.path.isabs(_tech["layermap"]))
+    check("build_tech keeps defaults", _tech["layers"]["spiral"] == "M5"
+          and _tech["drc"]["via"]["cut"] == 0.5)
+    check("tech deep merge keeps empty",
+          _tech_deep_merge({"a": {"b": 1}}, {"a": {"b": ""}})["a"]["b"] == 1)
+    try:
+        _warns = require_tech_ready(_tech, need=("layermap", "proc"), probe=False)
+        check("require_tech_ready 默认 profile", _warns == [], str(_warns))
+    except LibrfError as _e:
+        check("require_tech_ready 默认 profile", False, str(_e))
+    try:
+        _sw = require_tech_ready(dict(_tech, strict_flow=True),
+                                 need=("layermap", "proc"), probe=False)
+        check("require_tech_ready strict_flow 跑通", isinstance(_sw, list), str(_sw))
+    except LibrfError as _e:
+        check("require_tech_ready strict_flow 跑通", False, str(_e))
+    # 通用工艺 profile：门禁只认 layers 角色映射，不认任何写死层名/层号
+    _glmap = os.path.join(tmp, "generic.layermap")
+    with open(_glmap, "w") as _fh:
+        _fh.write("M5 drawing 90 0\nM4 drawing 80 0\nM3 drawing 70 0\n"
+                  "V4 drawing 91 0\nV3 drawing 71 0\nMARKER drawing 199 0\n")
+    _gproc = os.path.join(tmp, "generic.proc")
+    with open(_gproc, "w") as _fh:
+        _fh.write("conductor 0.5 0.1 M3\nconductor 0.5 0.1 M4\n"
+                  "conductor 1.0 0.1 M5\nvia M3 M4 0.1 V3\n"
+                  "via M4 M5 0.1 V4\n")
+    _gtech = build_tech(techlib_dir=_tdir, layermap=_glmap, proc=_gproc,
+                        cds_lib=_cds, base={
+        "layers": {"spiral": "M5", "underpass": "M4", "route": "M3",
+                   "ground": "M3", "via_sp": "V4", "via_un": "V3",
+                   "marker": "MARKER"}, "text": {}, "drc": {}})
+    try:
+        _gw = require_tech_ready(_gtech, need=("layermap", "proc"), probe=False)
+        check("require_tech_ready 通用层名", _gw == [], str(_gw))
+    except LibrfError as _e:
+        check("require_tech_ready 通用层名", False, str(_e))
+    _gflow = dict(_gtech)
+    _gflow["flow"] = {"metals": ["M5", "M4", "M3"],
+                      "vias": [["M3", "M4", "V3"], ["M4", "M5", "V4"]]}
+    try:
+        _fw = require_tech_ready(_gflow, need=("layermap", "proc"), probe=False)
+        check("require_tech_ready flow 顺序仅告警",
+              any("顺序" in w for w in _fw)
+              and not any("未在 proc 中找到" in w for w in _fw), str(_fw))
+    except LibrfError as _e:
+        check("require_tech_ready flow 顺序仅告警", False, str(_e))
+    try:
+        require_tech_ready(build_tech(base=DEFAULT_TECH), probe=False)
+        check("require_tech_ready missing paths", False, "居然通过了")
+    except LibrfError as _e:
+        check("require_tech_ready missing paths", "工艺文件缺失" in str(_e))
+    _glmap2 = os.path.join(tmp, "generic_missing.layermap")
+    with open(_glmap2, "w") as _fh:
+        _fh.write("M4 drawing 80 0\nM3 drawing 70 0\n"
+                  "V3 drawing 71 0\nMARKER drawing 199 0\n")
+    try:
+        require_tech_ready(build_tech(base=_gtech, layermap=_glmap2),
+                           need=("layermap",), probe=False)
+        check("require_tech_ready 缺角色层", False, "居然通过了")
+    except LibrfError as _e:
+        check("require_tech_ready 缺角色层",
+              "M5" in str(_e) and "spiral" in str(_e), str(_e))
     msgs = _health_judge({"Lcurve": [[1e9, 1e-9], [2e9, 0.98e-9], [3e9, 0.95e-9]],
                           "Qcurve": [[1e9, 5], [2e9, 10], [3e9, 8]], "SRF": 30e9})
     check("health ok L", any(l == "ok" for l, _t in msgs))
@@ -2938,7 +4697,10 @@ def _selftest():
         "snp": os.path.join(tmp, "snps", "t_ind.s2p"),
         "emx": {"freq": "1e9:3e9:3"}, "geom_outputs": True}}
     gr = GeomRunner(cfg, _Delegate())
-    key = geom_key("ind", {"n": 2.5, "w": 10, "dout": 150.0},
+    # 缓存键随 lri 规范化变化：geom 会补 kind/W/H/corner/seam/tangle，
+    # 所以预置缓存必须用同一份规范化几何（否则缓存必 miss）。
+    _seed = lri_norm_geom({"n": 2.5, "w": 10, "dout": 150.0})
+    key = geom_key("ind", _seed,
                    {"freq": "1e9:3e9:3", "edge": None, "3d": None, "mode": None})
     fake_snp = os.path.join(tmp, "fake.s2p")
     write_snp(fake_snp, [1e9], [[[0.1j, 0.9], [0.9, 0.1j]]])
@@ -2998,7 +4760,7 @@ def _selftest():
     check("emx settings roundtrip", okw and st3["accuracy"]["edge_width"] == 1.0)
     # 目标机 py3.6 + C locale：getpreferredencoding() 是 ASCII，open() 不带 encoding 读中文即崩。
     cjk = (b"STATUS fail\n" b"ERR \xe7\x94\xbb\xe7\x9f\xa9\xe5\xbd\xa2\xe5\xa4\xb1\xe8\xb4\xa5 "
-           b"layer=TM\n" b"WARN \xe8\xa2\xab Virtuoso \xe5\x8d\xa0\xe7\x94\xa8\n"
+           b"layer=M5\n" b"WARN \xe8\xa2\xab Virtuoso \xe5\x8d\xa0\xe7\x94\xa8\n"
            b"CELL ind_test\n")
     pcjk = os.path.join(tmp, "res_cjk.txt")
     with _native_open(pcjk, "wb") as f:
@@ -3006,7 +4768,7 @@ def _selftest():
     try:
         rcjk = parse_skill_result(pcjk)
         check("skill result 中文不崩", rcjk["cell"] == "ind_test"
-              and rcjk["errs"] and "TM" in rcjk["errs"][0], str(rcjk["errs"]))
+              and rcjk["errs"] and "M5" in rcjk["errs"][0], str(rcjk["errs"]))
     except UnicodeDecodeError as e:
         check("skill result 中文不崩", False, str(e))
     sh = os.path.join(tmp, "cjk.sh")
@@ -3039,13 +4801,13 @@ def _selftest():
         fh.write("layermap placeholder\n")
     with open(_pr_real, "w") as fh:
         fh.write("# proc placeholder\n")
-    atomic_write_json(tp, { "techlib": "DEMOTECH",
+    atomic_write_json(tp, { "techlib": "TSMC65",
         "layers": {"spiral": "M6", "underpass": "M5", "route": "M4",
                    "ground": "M4", "via_sp": "V5", "via_un": "V4", "marker": "MARKER"},
         "text": {"M6": "M6TXT"}, "drc": {"min_w": 0.2, "min_area": {"M6": 0.1}},
         "layermap": _lm_real, "proc": _pr_real})
     d1 = load_tech_profile(path=tp, use_cache=False)
-    check("tech 自定义 techlib", d1["techlib"] == "DEMOTECH")
+    check("tech 自定义 techlib", d1["techlib"] == "TSMC65")
     check("tech 自定义 spiral=M6", tech_layer(d1, "spiral") == "M6")
     check("tech 自定义 via_sp=V5", tech_layer(d1, "via_sp") == "V5")
     check("tech 自定义文字层", tech_text(d1, "M6") == "M6TXT")
@@ -3057,18 +4819,18 @@ def _selftest():
     sk = tech_to_skill(d1)
     check("skill 注入含 librfTech", "librfTech = list(" in sk)
     check("skill 注入 spiral", 'list("spiral" "M6")' in sk)
-    check("skill 注入 techlib", 'librfTechLib = "DEMOTECH"' in sk)
+    check("skill 注入 techlib", 'librfTechLib = "TSMC65"' in sk)
     check("skill 注入 DRC", "librfDrc = list(" in sk)
     d2 = gen_driver_il({"type": "ind", "cell": "c_tech", "n": 2.5, "w": 10,
                         "s": 2.5, "dout": 100, "result": os.path.join(tmp, "r.txt"),
                         "libdir": os.path.join(tmp, "L")}, tech=d1)
     check("driver 含 librf.il", "librf.il" in d2)
     check("driver 含工艺注入", 'list("spiral" "M6")' in d2)
-    check("driver 含 techLibName", "DEMOTECH" in d2)
+    check("driver 含 techLibName", "TSMC65" in d2)
     t3 = find_tools(tech=d1, work=tmp)
     check("find_tools layermap=profile", (t3["layermap"]["path"] == _lm_real), str(t3["layermap"]))
     check("find_tools proc=profile", (t3["proc"]["path"] == _pr_real), str(t3["proc"]))
-    check("find_tools techlib=profile", t3["techlib"]["path"] == "DEMOTECH")
+    check("find_tools techlib=profile", t3["techlib"]["path"] == "TSMC65")
     # cds.lib 必须追加，不能像旧版那样 open(...,"w") 整个截断
     wdir = os.path.join(tmp, "ws_protect")
     os.makedirs(wdir)

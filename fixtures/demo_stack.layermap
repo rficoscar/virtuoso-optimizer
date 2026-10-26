@@ -1,0 +1,25 @@
+# 通用示教 layermap（纯演示数据，不对应任何真实工艺）。
+# 格式：层名 purpose GDS层号 datatype
+AA	drawing	1	0
+NW	drawing	2	0
+PW	drawing	3	0
+DG	drawing	4	0
+AP	drawing	5	0
+CT	drawing	6	0
+M1	drawing	61	0
+V1	drawing	70	0
+M2	drawing	62	0
+V2	drawing	71	0
+M3	drawing	63	0
+V3	drawing	72	0
+M4	drawing	64	0
+V4	drawing	73	0
+M5	drawing	65	0
+PA	drawing	80	0
+M1TXT	drawing	61	5
+M2TXT	drawing	62	5
+M3TXT	drawing	63	5
+M4TXT	drawing	64	5
+M5TXT	drawing	65	5
+APTXT	drawing	5	5
+MARKER	marker	199	0

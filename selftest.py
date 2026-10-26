@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v09 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Helix 1.0.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Known Windows failure: test_find_prog_env_override.
@@ -35,7 +35,8 @@ from optimizer import (  # private helpers referenced by the suite
     _sha1_file, _sha1_text,
 )
 from optimizer import open  # noqa: A001 - UTF-8 wrapper, shadowed on purpose
-from algorithm import _latin_hypercube  # LHS moved here when v09 dropped the old engine
+from optimizer import audit, audit_dump, audit_file, audit_sink
+from algorithm import _latin_hypercube  # LHS moved here after the old engine was dropped
 
 
 def example_config():
@@ -589,8 +590,8 @@ class TestToolDiscovery(unittest.TestCase):
         finally:
             del os.environ["OPT_TEST_PROG"]
     def test_find_prog_fallbacks(self):
-        work = tempfile.mkdtemp(prefix="v09_probe_")
-        name = "v09_probe_tool.exe" if os.name == "nt" else "v09_probe_tool"
+        work = tempfile.mkdtemp(prefix="helix_probe_")
+        name = "helix_probe_tool.exe" if os.name == "nt" else "helix_probe_tool"
         exe = os.path.join(work, name)
         with open(exe, "w") as fh:
             fh.write("")
@@ -650,7 +651,7 @@ class TestTextEncoding(unittest.TestCase):
         work = tempfile.mkdtemp()
         p = os.path.join(work, "cjk.txt")
         with _native_open(p, "wb") as f:
-            f.write("画矩形失败 layer=TM\n".encode("utf-8"))
+            f.write("画矩形失败 layer=M4\n".encode("utf-8"))
         with open(p) as f:
             self.assertIn("画矩形失败", f.read())
         p = os.path.join(work, "cjk2.json")
@@ -675,6 +676,47 @@ class TestTextEncoding(unittest.TestCase):
             f.write(data)
         with open(p, "rb") as f:
             self.assertEqual(f.read(), data)
+
+
+class TestAuditTrail(unittest.TestCase):
+    """Operation audit: file I/O and external calls carry time and abs path."""
+
+    def test_audit_records_absolute_path(self):
+        rec = audit("write", os.path.join("relative", "f.txt"), "test")
+        self.assertTrue(os.path.isabs(rec["path"]),
+                        "audit path must be absolute: %s" % rec["path"])
+        self.assertTrue(rec["ts"])
+
+    def test_audit_kinds_classified(self):
+        p = os.path.join(tempfile.mkdtemp(), "k.txt")
+        with open(p, "w") as f:
+            f.write("a")
+        with open(p, "a") as f:
+            f.write("b")
+        kinds = [r["kind"] for r in audit_dump() if r["path"] == p]
+        self.assertIn("write", kinds)
+        self.assertIn("append", kinds, "mode=a must be append, not write")
+
+    def test_audit_sink_callback(self):
+        got = []
+        audit_sink(got.append)
+        try:
+            audit("exec", "/bin/echo", "hello")
+            self.assertTrue(got, "sink callback must fire")
+            self.assertEqual(got[-1]["kind"], "exec")
+        finally:
+            audit_sink(None)
+
+    def test_audit_file_sink(self):
+        p = os.path.join(tempfile.mkdtemp(), "audit.jsonl")
+        audit_file(p)
+        try:
+            rec = audit("refuse", p, "test")
+        finally:
+            audit_file(None)
+        with open(p) as f:
+            lines = [json.loads(x) for x in f if x.strip()]
+        self.assertEqual(lines[-1], rec)
 
 
 class _CompactBase(unittest.TestCase):
@@ -1245,7 +1287,7 @@ _TEST_CLASSES = (
     TestFixes, TestCurvesTabRemoved, TestRunDirs, TestHistorySeedV05,
     TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
-    TestS3EmBridge,
+    TestS3EmBridge, TestAuditTrail,
 )
 
 

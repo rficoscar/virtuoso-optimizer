@@ -1240,6 +1240,173 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
         model["error"] = str(exc)
     return model
 
+class _TechTab:
+    """「工艺」页：工艺文件路径输入 + require_tech_ready 门禁 + 横截面（懒加载）。
+
+    真源优先级：内建默认 < tech_profile.json < 本页填写项（见 build_tech）。
+    示教 fixture 会出 1 条警告，状态显示「通过（1 条警告）」。
+    """
+    FIELDS = (
+        ("techlib", "工艺库名 techlib", "RFCMOS", "text"),
+        ("techlib_dir", "工艺库目录 techlib_dir", "", "dir"),
+        ("layermap", "layermap（层名->GDS 层号）", "", "file"),
+        ("proc", "EMX proc（工艺叠层）", "", "file"),
+        ("cds_lib", "cds.lib（工作区库映射）", "", "file"),
+    )
+    def __init__(self, gui, parent):
+        self.gui, self.tk, self.ttk = gui, gui.tk, gui.ttk
+        self.root = parent
+        self.vars = {}
+        self._xs_frame = None
+        self._build(parent)
+    def _build(self, parent):
+        self.ttk.Label(
+            parent, anchor="w", justify="left", foreground="#555555",
+            text=("开始版图/EM 前会自动执行工艺检查（路径存在性 -> proc/layermap "
+                  "解析 -> 叠层/层号核对），硬错误直接中止任务，警告仅在状态栏提示。"
+                  "留空的项沿用 tech_profile.json / 内建 RFCMOS 默认。")
+        ).pack(fill="x", pady=(0, 6))
+        box = self.ttk.LabelFrame(parent, text="工艺输入")
+        box.pack(fill="x", pady=(0, 4))
+        for key, label, default, kind in self.FIELDS:
+            row = self.ttk.Frame(box)
+            row.pack(fill="x", pady=2)
+            self.ttk.Label(row, text=label, width=26, anchor="w").pack(side="left")
+            var = self.tk.StringVar(value=default)
+            self.ttk.Entry(row, textvariable=var, width=58).pack(side="left", fill="x", expand=True)
+            if kind != "text":
+                self.ttk.Button(row, text="浏览",
+                                command=lambda k=key, t=kind: self._browse(k, t)
+                                ).pack(side="left", padx=4)
+            self.vars[key] = var
+        bar = self.ttk.Frame(parent)
+        bar.pack(fill="x", pady=2)
+        self.ttk.Button(bar, text="检查工艺", command=self.check).pack(side="left", padx=2)
+        self.ttk.Button(bar, text="显示横截面",
+                        command=self.show_cross_section).pack(side="left", padx=2)
+        self.status_var = self.tk.StringVar(value="尚未检查（任务开始时会自动检查）")
+        self.status_label = self.ttk.Label(bar, textvariable=self.status_var,
+                                           foreground="#555555", anchor="w")
+        self.status_label.pack(side="left", padx=8)
+        self.detail = self._text(parent, height=7)
+        self.detail.pack(fill="x", pady=(2, 4))
+        self.xs_host = self.ttk.Frame(parent)
+        self.xs_host.pack(fill="both", expand=True, pady=(2, 0))
+    def _text(self, parent, height=6):
+        from tkinter.scrolledtext import ScrolledText
+        box = ScrolledText(parent, height=height, width=80,
+                           font=("WenQuanYi Micro Hei", 9))
+        box.configure(state="disabled")
+        return box
+    def _set_detail(self, text):
+        try:
+            self.detail.configure(state="normal")
+            self.detail.delete("1.0", "end")
+            self.detail.insert("1.0", text)
+            self.detail.configure(state="disabled")
+        except Exception:
+            pass
+    def _set_status(self, text, color):
+        self.status_var.set(text)
+        try:
+            self.status_label.configure(foreground=color)
+        except Exception:
+            pass
+    def _browse(self, key, kind):
+        try:
+            from tkinter import filedialog
+        except Exception:
+            return
+        if kind == "dir":
+            path = filedialog.askdirectory(parent=self.root, title="选择工艺库目录")
+        else:
+            path = filedialog.askopenfilename(
+                parent=self.root, title="选择 %s" % key,
+                filetypes=[("所有文件", "*")])
+        if path:
+            self.vars[key].set(path)
+    def fill_from_cfg(self, cfg):
+        """配置载入时回填 5 个键（缺省不动，保留当前默认）。"""
+        for key, _label, _default, _kind in self.FIELDS:
+            if key in cfg and cfg[key] is not None:
+                self.vars[key].set(str(cfg[key]))
+    def collect_tech(self):
+        """本页输入 -> tech dict（显式项覆盖 profile，留空沿用 profile）。"""
+        import librf_opt
+        v = {k: (var.get() or "").strip() for k, var in self.vars.items()}
+        return librf_opt.build_tech(
+            techlib=v.get("techlib") or None,
+            techlib_dir=v.get("techlib_dir") or None,
+            layermap=v.get("layermap") or None,
+            proc=v.get("proc") or None,
+            cds_lib=v.get("cds_lib") or None)
+    def tech_cfg_keys(self):
+        """非空填写项 -> config 顶层键（保存/载入往返用）。"""
+        out = {}
+        for key, _label, _default, _kind in self.FIELDS:
+            v = (self.vars[key].get() or "").strip()
+            if v:
+                out[key] = v
+        return out
+    def check(self, parent=None, show_dialog=False):
+        """执行 require_tech_ready；状态栏分色。返回是否通过。"""
+        import librf_opt
+        try:
+            prof = self.collect_tech()
+            warns = librf_opt.require_tech_ready(prof)
+        except librf_opt.LibrfError as exc:
+            self._set_status("错误：工艺检查未通过", "#b3261e")
+            self._set_detail(str(exc))
+            if show_dialog:
+                self._msg("工艺检查未通过", str(exc), error=True)
+            return False
+        except Exception as exc:
+            self._set_status("错误：无法构造工艺配置", "#b3261e")
+            self._set_detail(str(exc))
+            if show_dialog:
+                self._msg("工艺配置错误", str(exc), error=True)
+            return False
+        if warns:
+            self._set_status("通过（%d 条警告）" % len(warns), "#b7791f")
+            self._set_detail("工艺检查通过，%d 条警告：\n  " % len(warns)
+                             + "\n  ".join(warns))
+        else:
+            self._set_status("通过", "#0a7d33")
+            self._set_detail("工艺检查通过（无警告）。proc/layermap 叠层与层号一致。")
+        return True
+    def require_ready_ui(self, parent=None):
+        """任务启动入口调用：失败弹窗并返回 False；警告只更新状态栏。"""
+        return self.check(parent=parent, show_dialog=True)
+    def _msg(self, title, text, error=False):
+        try:
+            from tkinter import messagebox
+            fn = messagebox.showerror if error else messagebox.showwarning
+            fn(title, text, parent=self.root)
+        except Exception:
+            print(text)
+    def show_cross_section(self):
+        """懒加载 proc_cross_section.build_cross_section_frame（第一次点才导入）。"""
+        if self._xs_frame is not None:
+            return
+        try:
+            from proc_cross_section import build_cross_section_frame
+        except Exception as exc:
+            self._xs_frame = "unavailable"
+            self.ttk.Label(self.xs_host, foreground="#888888",
+                           text="横截面模块不可用（未部署 proc_cross_section.py）：%s"
+                                % exc).pack(anchor="w")
+            return
+        try:
+            frame = build_cross_section_frame(
+                self.xs_host, self.vars["proc"], self.vars["layermap"], height=420)
+            frame.pack(fill="both", expand=True)
+            self._xs_frame = frame
+        except Exception as exc:
+            self._xs_frame = "unavailable"
+            self.ttk.Label(self.xs_host, foreground="#b3261e",
+                           text="横截面加载失败：%s" % exc).pack(anchor="w")
+
+
 class OptimizerGui:
     """Tkinter front end. Edit the config. Run and watch the optimizer."""
     def __init__(self, root, smoke=False):
@@ -1260,7 +1427,7 @@ class OptimizerGui:
         self.curve_stats = {"plain": 0, "gz": 0, "missing": 0, "corrupt": 0, "total": 0}
         self._vars_undo_stack, self._vars_redo_stack = [], []
         self.best_var_values = None
-        root.title("Virtuoso 参数优化器")
+        root.title("Helix: A Virtuoso Optimizer")
         root.geometry("1200x800")
         root.minsize(900, 600)
         self.mock_var = self.tk.BooleanVar(value=False)
@@ -1475,9 +1642,10 @@ class OptimizerGui:
         self._settings_help_switch()
     def _show_about(self):
         self._dialog("关于",
-                     "Virtuoso 参数优化器\n"
+                     "Helix: A Virtuoso Optimizer\n"
+                     "Version %s · MIT\n"
                      "spectre 直连快速引擎 (engine: fast)\n"
-                     "ADE L 状态驱动, 无 Maestro 依赖")
+                     "ADE L 状态驱动, 无 Maestro 依赖" % _opt.VERSION)
     def _build_tabs(self):
         self.notebook = self.ttk.Notebook(self.root)
         self.notebook.pack(side="top", fill="both", expand=True, padx=4, pady=4)
@@ -1486,6 +1654,7 @@ class OptimizerGui:
         self._build_targets_tab()
         self._build_settings_tab()
         self._build_env_tab()
+        self._build_tech_tab()
         self._build_simset_tab()
         self._build_em_tab()
         self._build_json_tab()
@@ -1864,6 +2033,10 @@ class OptimizerGui:
         self.set_detail_box.pack(fill="both", expand=True)
         self.set_help_nb.bind("<<NotebookTabChanged>>", self._settings_help_switch)
         self._settings_help_switch()
+    def _build_tech_tab(self):
+        tab = self.ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab, text="工艺")
+        self.tech_tab = _TechTab(self, tab)
     def _build_env_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="环境")
@@ -2352,6 +2525,9 @@ class OptimizerGui:
                    "sim_timeout", "variables", "fixed_variables", "targets", "settings",
                    "netlist", "sim_root", "spectre_bin", "env", "path_append")
         self.extra = {k: v for k, v in cfg.items() if k not in managed}
+        tech = getattr(self, "tech_tab", None)
+        if tech is not None:
+            tech.fill_from_cfg(cfg)
         for key, var in self.fields.items():
             var.set(str(cfg.get(key, "")))
         env_map = cfg.get("env") or {}
@@ -2422,6 +2598,10 @@ class OptimizerGui:
                 k, _eq, v = line.partition("=")
                 env_map[k.strip()] = v.strip()
             cfg["env"] = env_map
+            # 工艺页输入随配置往返（非空项）；门禁本身在任务启动时执行。
+            tech = getattr(self, "tech_tab", None)
+            if tech is not None:
+                cfg.update(tech.tech_cfg_keys())
             variables = []
             for iid in self.var_tree.get_children():
                 vals = self.var_tree.item(iid, "values")

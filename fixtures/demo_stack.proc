@@ -1,0 +1,48 @@
+assume microns
+assume ohms/sq
+assume ohms/via
+
+# ---------------------------------------------------------------------------
+# 通用示教叠层（纯演示数据，不对应任何真实工艺）：
+#   M1 -> M2 -> M3 -> M4 -> M5 -> AP（顶层铝焊盘）
+#   M1..M5 层间距 0.35 μm，M5 -> AP 间距 0.75 μm。
+# 实际工艺请用 tech_profile.json 的可选 "flow" 段覆盖，不要改本文件。
+# ---------------------------------------------------------------------------
+
+define m1res = 0.080
+define m2res = 0.060
+define m3res = 0.060
+define m4res = 0.045
+define m5res = 0.030
+define apres = 0.020
+
+
+layer 500 11.9 #sub_si
+layer 0.30 4.0 #STI
+layer 0.60 4.0 #ILD0
+
+conductor 0.20  m1res*(1+0.003*dtemp)  M1
+layer 0.05 6.5 #ESL1
+layer 0.30 4.0 #IMD1
+conductor 0.30  m2res*(1+0.003*dtemp)  M2
+layer 0.05 6.5 #ESL2
+layer 0.30 4.0 #IMD2
+conductor 0.30  m3res*(1+0.003*dtemp)  M3
+layer 0.05 6.5 #ESL3
+layer 0.30 4.0 #IMD3
+conductor 0.30  m4res*(1+0.003*dtemp)  M4
+layer 0.05 6.5 #ESL4
+layer 0.30 4.0 #IMD4
+conductor 0.40  m5res*(1+0.003*dtemp)  M5
+
+# M5 到顶层铝焊盘的钝化层总厚度 0.75 μm
+layer 0.75 6.5 #PASS1
+conductor 1.20  apres*(1+0.003*dtemp)  AP
+layer 0.50 4.0 #PASS2
+layer infinity 1
+
+via M1 M2 1.10 V1
+via M2 M3 0.90 V2
+via M3 M4 0.60 V3
+via M4 M5 0.35 V4
+via M5 AP 0.10 PA

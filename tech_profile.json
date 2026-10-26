@@ -1,9 +1,11 @@
 {
   "_doc": "工艺配置模板：功能字段与 librf_opt.DEFAULT_TECH 逐项一致；_doc* 仅说明，loader 会剥掉。换工艺时改本文件即可。",
   "_doc_usage": "查找顺序：$LIBRF_TECH_PROFILE -> 工作目录 -> 当前目录 -> 模块目录 -> 内建默认；缺项逐项回落。建议基于本模板另存一份，用 LIBRF_TECH_PROFILE 指过去。",
-  "_doc_layers": "角色 -> 你的 PDK 层名：spiral=螺旋主金属、underpass=下穿金属、route=走线、ground=地、via_sp=螺旋下方过孔、via_un=下穿过孔、marker=电感标记层。",
+  "_doc_layers": "角色 -> 你的 PDK 层名：spiral=螺旋主金属、underpass=下穿金属、route=走线、ground=地、via_sp=螺旋下方过孔、via_un=下穿过孔、marker=电感标记层。工艺门禁只认这份角色映射，不写死任何层名或 GDS 层号。",
   "_doc_text": "金属层 -> 文字层；缺省规则为 <层名>TXT。",
   "_doc_drc": "参数级自检阈值（不是 sign-off DRC）：min_w/max_w 金属宽、min_s 间距、min_area 按层最小面积、via 的 cut/spacing/enclosure。按你的 PDK 规则填写。",
+  "_doc_flow": "可选。显式给出叠层流程后，工艺门禁会额外校验顺序/通孔/间距/通孔电阻，默认只告警。形如 {\"metals\": [\"M1\",\"M2\",...], \"vias\": [[\"M1\",\"M2\",\"V1\"], ...], \"gaps\": [[\"M1\",\"M2\",0.35], ...], \"via_res\": {\"V1\": 1.1}, \"strict\": false}；strict 或顶层 strict_flow=true 时把 errors 升级为阻断。",
+  "_doc_proc": "layermap / proc / cds.lib 留空表示现场自动探查（*.layermap、*.proc、cds.lib）；也可用环境变量 LIBRF_LAYERMAP / LIBRF_PROC / LIBRF_CDSSETUP 指定。",
   "name": "Generic RF CMOS (template)",
   "techlib": "RFCMOS",
   "techlib_dir": "",

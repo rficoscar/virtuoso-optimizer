@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-'Virtuoso parameter optimizer.'
+'Helix: A Virtuoso Optimizer.'
+VERSION = "1.0.0"
 import argparse
 import csv
 import glob
@@ -22,12 +23,72 @@ import zlib
 import builtins
 _native_open = builtins.open
 
+# ===== 操作审计（v08c 移植）：文件读写/创建/归档 与 外部程序调用 =====
+# kind: read / write / create / append / backup / archive / exec / refuse
+_AUDIT = []
+_AUDIT_SINK = None      # GUI 注册的回调 fn(rec)
+_AUDIT_FILE = None      # 落盘路径 audit.jsonl
+
+def audit_sink(fn):
+    """GUI 注册实时回调（每条记录都会推过去）。"""
+    global _AUDIT_SINK
+    _AUDIT_SINK = fn
+
+def audit_file(path):
+    """指定审计落盘路径（输出目录确定后调用）。"""
+    global _AUDIT_FILE
+    _AUDIT_FILE = path
+
+def audit_dump():
+    return list(_AUDIT)
+
+def audit(kind, path=None, detail=""):
+    """记录一次操作。path 一律存绝对路径（相对路径当场解析）。"""
+    if path:
+        try:
+            path = os.path.abspath(os.path.expanduser(str(path)))
+        except Exception:
+            path = str(path)
+    rec = {"ts": time.strftime("%H:%M:%S"), "kind": kind,
+           "path": path or "", "detail": str(detail or "")}
+    _AUDIT.append(rec)
+    if _AUDIT_FILE:
+        try:
+            with _native_open(_AUDIT_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+    if _AUDIT_SINK:
+        try:
+            _AUDIT_SINK(rec)
+        except Exception:
+            pass
+    return rec
+
+def audit_line(rec):
+    """记录 -> GUI 日志窗口的一行文本。"""
+    return "%s  %-7s %s%s" % (rec["ts"], rec["kind"], rec["path"],
+                              ("  " + rec["detail"]) if rec["detail"] else "")
+
 def open(file, mode="r", *args, **kwargs):  # noqa: A001 - 有意覆盖内建 open
-    """UTF-8 文本打开（仅影响本模块）。二进制模式照旧。"""
-    if "b" not in mode and "encoding" not in kwargs:
-        kwargs["encoding"] = "utf-8"
-        if not any(c in mode for c in "wxa+"):
-            kwargs.setdefault("errors", "replace")
+    """UTF-8 文本打开（仅影响本模块），并记审计。二进制模式照旧。"""
+    if "b" not in mode:
+        if "encoding" not in kwargs:
+            kwargs["encoding"] = "utf-8"
+            if not any(c in mode for c in "wxa+"):
+                kwargs.setdefault("errors", "replace")
+        try:
+            if "r" in mode and "+" not in mode:
+                kind = "read"
+            elif "a" in mode:
+                kind = "append"
+            elif "x" in mode:
+                kind = "create"
+            else:
+                kind = "write"
+            audit(kind, file, "mode=" + mode)
+        except Exception:
+            pass
     return _native_open(file, mode, *args, **kwargs)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Search-engine registry lives in algorithm.py (same folder).
@@ -992,6 +1053,7 @@ class RunJournal(object):
         finally:
             f.close()
         os.replace(tmp, path)
+        audit("write", path, "atomic")
     def _numbered(self):
         """Sorted [(seq, path), ...] of snapshot-<k>.json files."""
         entries = []
@@ -1586,6 +1648,8 @@ class RealRunner:
         t0 = time.time()
         try:
             with open(os.path.join(iter_dir, "spectre.log"), "w") as slog:
+                audit("exec", spectre,
+                      "input.scs -raw psf  cwd=" + iter_dir)
                 self.sim_proc = subprocess.Popen(
                     [spectre, "input.scs", "-raw", "psf"],
                     cwd=iter_dir, env=env, start_new_session=True,
@@ -1715,6 +1779,7 @@ class RealRunner:
         ]
         cwd = self.config.get("work_dir", os.getcwd())
         try:
+            audit("exec", cmd[0], " ".join(cmd[1:])[:200])
             self.proc = subprocess.Popen(cmd, cwd=cwd, env=env,
                                          start_new_session=True)
         except OSError:
@@ -1909,6 +1974,7 @@ def _archive_aside(path):
         dst = "%s.old-%s.%d" % (path, time.strftime("%Y%m%d-%H%M%S"), n)
         n += 1
     os.rename(path, dst)
+    audit("archive", path, "-> " + os.path.basename(dst))
     return dst
 # ===== Compact iteration logging (log_mode=compact) =====
 # One shared deck_base.scs + per-iteration parameters lines rebuild
@@ -3172,6 +3238,13 @@ def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
     opt = Optimization(cfg, mock=mock, max_iter=max_iter,
                        on_event=on_event, stop_check=stop_check,
                        resume=resume)
+    # 操作审计落盘（CLI 与 GUI 都有）
+    try:
+        audit_file(os.path.join(opt.out_dir, "audit.jsonl"))
+        audit("write", os.path.join(opt.out_dir, "audit.jsonl"),
+              "审计日志开始")
+    except Exception:
+        pass
     try:
         reason = opt.run()
     finally:

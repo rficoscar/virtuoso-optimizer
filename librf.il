@@ -1,12 +1,12 @@
 ;====================================================================
-; librf.il — optimizer_v09 SKILL 合并文件（两部分，两种 Cadence 进程共用）
+; librf.il — Helix 1.0.0 SKILL 合并文件（两部分，两种 Cadence 进程共用）
 ;   A) 版图引擎 (原 librf_layout.il)：dbAccess 经 driver.il load() 后调
 ;      librfRun(...) / librfMakeViews(...) / librfEmxViews(...)
 ;   B) 求值服务 (原 eval_serve.il)：virtuoso -replay librf.il 启动，读 ADE L
 ;      outputs 定义，从 psf 提取曲线（约 0.5 秒/次）
 ; 合并依据：procedure 定义不校验未定义函数，OCEAN 与 dbAccess 函数可共处一文件，
 ; 各自只在被调用时解析；命名空间无冲突。工艺无关化：层名一律经 librfLyr(role)
-; 解析（tech_profile.json layers 段），无 profile 时用内建通用默认映射。
+; 解析（tech_profile.json layers 段），无 profile 时用内建 RFCMOS 默认映射。
 ;====================================================================
 ; eval_serve — headless ADE L output evaluator for spectre psf results.
 ; 环境变量：OPT_QUEUE（队列目录，必需）；OPT_OUTPUTS_STATE（outputs.state，必需）。
@@ -184,8 +184,8 @@ let((queueDir stateFile loaded)
       unless(vok
         myFatal(strcat("bad output entries in: " stateFile))))
     myServeEval()))
-; librf_layout.il — LIBRF SKILL 版图引擎 (IC618 经典 SKILL / dbAccess, optimizer_v09)
-; 职责: 电感/传输线/变压器/耦合线参数化绘制 + port/label + IND 标记 + via 阵列
+; librf_layout.il — LIBRF SKILL 版图引擎 (IC618 经典 SKILL / dbAccess, Helix 1.0.0)
+; 职责: 电感/传输线/变压器/耦合线参数化绘制 + port/label + MARKER 标记 + via 阵列
 ; 入口: librfRun(req) / librfMakeViews(req) / librfEmxViews(req)；req = list(nil 'type "ind"
 ;   'lib "LIBRF" ... 'result "/p")
 ; 协议: 画完写 result 行文件 STATUS/CELL/BBOX/PORT/LAYERS/WARN/ERR, 末尾 exit()
@@ -341,7 +341,11 @@ procedure(librfEndCap(cv layerSpec x y w)
   let((half)
     half = w / 2.0
     librfRect(cv layerSpec x - half y - half x + half y + half)))
-procedure(librfPathSweep(cv layerSpec pts w)
+; 【移植 v08c】librfPathSweepEx：折线扫掠（中心线 pts + 宽 w），几何与下方
+; librfPathSweep 的原实现逐位相同（snap 去重 -> dbCreatePath -> 端点补块），
+; 只多 capStart/capEnd 两个端帽开关。sym 换圈 flush 端必须两者都为 nil ——
+; 满宽 w×w 方端帽会同时撞上另一臂 45° 斜线与外圈切角（夹缝放不下方角）。
+procedure(librfPathSweepEx(cv layerSpec pts w capStart capEnd)
   prog((clean p prev n res layName half)
     ; snap + 去重 (相邻点距离 <0.5nm 视为同点)
     clean = nil
@@ -349,12 +353,15 @@ procedure(librfPathSweep(cv layerSpec pts w)
       when(clean == nil ||
            abs(librfSnap(car(p)) - car(librfLastPt(clean))) > 0.0005 ||
            abs(librfSnap(cadr(p)) - cadr(librfLastPt(clean))) > 0.0005
-        clean = cons(list(librfSnap(car(p)) librfSnap(cadr(p))) clean)))
+        clean = cons(list(librfSnap(car(p)) librfSnap(cadr(p))) clean)
+      )
+    )
     clean = reverse(clean)
     n = length(clean)
     when(n < 2
       librfErr("path 点数 <2")
-      return(nil))
+      return(nil)
+    )
     layName = if(listp(layerSpec) then car(layerSpec) else layerSpec)
     librfNoteLayer(layName)
     half = w / 2.0
@@ -362,19 +369,63 @@ procedure(librfPathSweep(cv layerSpec pts w)
     res = errset(dbCreatePath(cv layerSpec clean w) t)
     when(res && car(res)
       ; pathType=0 truncate/flush: 端点止于顶点, 由 EndCap 搭接
-      errset(car(res)->pathType = 0 t))
+      errset(car(res)->pathType = 0 t)
+    )
     when(res == nil || car(res) == nil
       librfErr(sprintf(nil "dbCreatePath 失败 layer=%s npts=%d, 退矩形扫掠" layName n))
       ; 回退: 旧 rect+diagseg 扫掠 (不应走到)
       prev = car(clean)
       foreach(p cdr(clean)
         librfDiagSeg(cv layerSpec car(prev) cadr(prev) car(p) cadr(p) w)
-        prev = p))
-    ; 端帽: 与 stub/underpass 无缝搭接
-    librfEndCap(cv layerSpec car(car(clean)) cadr(car(clean)) w)
-    librfEndCap(cv layerSpec
-      car(librfLastPt(clean)) cadr(librfLastPt(clean)) w)
-    return(t)))
+        prev = p
+      )
+    )
+    ; 端帽: 与 stub/underpass 无缝搭接。sym 换圈 flush 端必须
+    ; capStart/capEnd=nil：满宽方端帽会同时撞上另一臂 45° 斜线
+    ; 与外圈切角（45° 夹缝宽度不足以容纳 w x w 方角）。
+    when(capStart
+      librfEndCap(cv layerSpec car(car(clean)) cadr(car(clean)) w))
+    when(capEnd
+      librfEndCap(cv layerSpec
+        car(librfLastPt(clean)) cadr(librfLastPt(clean)) w))
+    return(t)
+  )
+)
+procedure(librfPathSweep(cv layerSpec pts w)
+  librfPathSweepEx(cv layerSpec pts w t t))
+
+;---------------------------------------------------------------- 端子夹角 (tangle)
+; 【移植 v08c】librfDirAngle / librfTangleDirs：给定两个端口的自然出线方向，
+; 选出夹角等于 tangle(0/90/180) 的 (dir1 dir2)；代价小者优先——改端口 2
+; 的代价(1)低于改端口 1 的代价(10)，即尽量保第一个端口自然向。
+; lri 引擎的 se / f8 拓扑用它们实现 tangle 参数。
+procedure(librfDirAngle(k1 k2)
+  if(k1 == k2
+    then 0
+    else if((k1 == 'N && k2 == 'S) || (k1 == 'S && k2 == 'N) ||
+            (k1 == 'E && k2 == 'W) || (k1 == 'W && k2 == 'E)
+      then 180
+      else 90
+    )
+  )
+)
+procedure(librfTangleDirs(tangle nat1 nat2)
+  let((best bc k1 k2 cost)
+    best = nil  bc = 999
+    foreach(k1 '(N S E W)
+      foreach(k2 '(N S E W)
+        when(librfDirAngle(k1 k2) == tangle
+          cost = 0
+          when(k1 != nat1  cost = cost + 10)
+          when(k2 != nat2  cost = cost + 1)
+          when(cost < bc  bc = cost  best = list(k1 k2))
+        )
+      )
+    )
+    unless(best  best = list(nat1 nat2))
+    best
+  )
+)
 ;---------------------------------------------------------------- via 阵列
 ; 在区域满铺 cut: 见方 cutSize, 间距 cutSp, 包覆 enclX/enclY; 行列 ≥1, 网格居中, 返回 cut 个数
 procedure(librfViaArray(cv cutLayer x1 y1 x2 y2 cutSize cutSp enclX enclY)
@@ -547,8 +598,8 @@ procedure(librfStubPort(cv metalLayer txtLayer x y dirSym w len portName)
 ;---------------------------------------------------------------- 工艺配置 (tech profile)
 ; 层名不再写死：librfLyr(role) 把「角色」解析成该工艺的真实层名。
 ; librfTech 是 ( (role . layerName) ... ) 关联表，由 driver.il 经 req 的
-; 'tech 键注入；缺省表即内建通用映射，所以不给 profile 时也能直接跑。
-; 使用者在 tech_profile.json 里改 layers.spiral 等即可换金属绘制。
+; 'tech 键注入；缺省表即内建 RFCMOS 映射，所以不给 profile 时行为与旧版
+; 逐位一致。使用者在 tech_profile.json 里改 layers.spiral 等即可换金属绘制。
 defvar(librfTech nil)
 defvar(librfTechText nil)
 procedure(librfTechDefault()
@@ -563,10 +614,11 @@ procedure(librfTechDefault()
 procedure(librfTechTextDefault()
   list(
     list("M5" "M5TXT")
-    list("M4" "M4TXT")
-    list("M3" "M3TXT")
-    list("M2" "M2TXT")
-    list("M1" "M1TXT")))
+    list("M4"  "M4TXT")
+    list("M3"  "M3TXT")
+    list("M2"  "M2TXT")
+    list("M1"  "M1TXT")
+    list("MARKER" "MARKERTXT")))
 ; role(字符串) -> 层名。查不到时按 role 原样返回（允许直接传层名）。
 procedure(librfLyr(role)
   let((p tbl)
@@ -601,7 +653,7 @@ procedure(librfDrcMinArea(metalName)
       sub = assoc(metalName cadr(p))
       when(sub && cdr(sub) && numberp(cadr(sub))
         return(cadr(sub))))
-    4.0)))
+    4.0))
 procedure(librfMetalPair(nm) list(nm "drawing"))
 procedure(librfViaPair(nm)   list(nm "drawing"))
 procedure(librfTxtPair(nm)   list(librfTxtLayerOf(nm) "drawing"))
@@ -665,7 +717,7 @@ procedure(librfBoxGap(b1 b2)
 ; 注: IC618 cv->figs 恒空, 必须用 cv->shapes; 只查 drawing 目的 (跳过 pin/label)
 procedure(librfDrcFigs(cv metalName)
   let((minW minA fig b w h boxes bb g nTouch nBox i j b1 b2 gap minGap nViol big1 big2)
-    minW = librfDrcNum("min_w" 2.5)
+    minW = librfDrcNum("min_w" 1.0)
     minA = librfDrcMinArea(metalName)
     ; 收集该层全部矩形平坦 bbox (判孤立小块/大块间距用)
     boxes = nil
@@ -879,11 +931,11 @@ procedure(librfSegLens(pts)
       prev = cur)
     reverse(out)))
 ;=============================================================================
-; underpass / IND / 库与 cellview
+; underpass / marker / 库与 cellview
 ;=============================================================================
 ; via 落点+走线+远端回穿+stub 端口 (res3 §underpass)
 ; (xIn,yIn)=螺旋内端, (xOut,yOut)=螺旋外侧回穿点(调用方按 dout 计算)
-; underName: "direct"(经 underpass 层直连) 或 "route"(默认, 经 route 层过渡)
+; underName: "direct"(underpass 直连) 或 "route"(默认, 经 route 层两级过渡)
 ; 走线用 dbCreatePath L 折线一次画出 (规整, 无拼缝)
 procedure(librfUnderpass(cv xIn yIn xOut yOut exitDir wUp spiralW underName portName stubLen)
   let((halfUp cutW routePts)
@@ -899,7 +951,7 @@ procedure(librfUnderpass(cv xIn yIn xOut yOut exitDir wUp spiralW underName port
         else routePts = list(list(xIn yIn) list(xIn yOut) list(xOut yOut))))
     if(underName == "direct" || underName == "DIRECT"
       then
-        ; 方案 A: spiral -- via_sp -- underpass 走线 -- via_sp -- spiral
+        ; 方案 A: M5 --V4-- M4 走线 --V4-- M5
         librfRect(cv librfMetalPair(librfLyr("underpass"))
           xIn - halfUp yIn - halfUp xIn + halfUp yIn + halfUp)
         librfViaArray(cv librfViaPair(librfLyr("via_sp"))
@@ -910,23 +962,23 @@ procedure(librfUnderpass(cv xIn yIn xOut yOut exitDir wUp spiralW underName port
         librfViaArray(cv librfViaPair(librfLyr("via_sp"))
           xOut - halfUp yOut - halfUp xOut + halfUp yOut + halfUp cutW 1.5 0.5 0.5)
       else
-        ; 方案 B: spiral -- via_sp -- underpass 过渡 -- via_un -- route 走线 -- via_un -- underpass -- via_sp -- spiral
+        ; 方案 B: M5 --V4-- M4 过渡 --V3-- M3 走线 --V3-- M4 --V4-- M5
         librfRect(cv librfMetalPair(librfLyr("underpass"))
           xIn - halfUp yIn - halfUp xIn + halfUp yIn + halfUp)
         librfViaArray(cv librfViaPair(librfLyr("via_sp"))
           xIn - halfUp yIn - halfUp xIn + halfUp yIn + halfUp cutW 1.5 0.5 0.5)
-        ; via_un 与 via_sp cut 网格错开半格(两级栈交错); 单孔时退化为同位栈
+        ; V3 与 V4 cut 网格错开半格(两级栈交错); 单孔时退化为同位栈(PDK 允许)
         librfViaArrayOff(cv librfViaPair(librfLyr("via_un"))
           xIn - halfUp yIn - halfUp xIn + halfUp yIn + halfUp cutW 1.5 0.5 0.5 1.5 1.5)
         librfPathSweep(cv librfMetalPair(librfLyr("route")) routePts wUp)
         librfRect(cv librfMetalPair(librfLyr("underpass"))
           xOut - halfUp yOut - halfUp xOut + halfUp yOut + halfUp)
-        ; via_un 与 via_sp cut 网格错开半格(两级栈交错); 单孔时退化为同位栈
+        ; V3 与 V4 cut 网格错开半格(两级栈交错); 单孔时退化为同位栈(PDK 允许)
         librfViaArrayOff(cv librfViaPair(librfLyr("via_un"))
           xOut - halfUp yOut - halfUp xOut + halfUp yOut + halfUp cutW 1.5 0.5 0.5 1.5 1.5)
         librfViaArray(cv librfViaPair(librfLyr("via_sp"))
           xOut - halfUp yOut - halfUp xOut + halfUp yOut + halfUp cutW 1.5 0.5 0.5))
-    ; 回 spiral 层落盘 (保证 cut 包覆) + stub 端口
+    ; 回 M5 落盘 (保证 cut 包覆) + stub 端口
     librfRect(cv librfMetalPair(librfLyr("spiral"))
       xOut - halfUp yOut - halfUp xOut + halfUp yOut + halfUp)
     librfStubPort(cv librfMetalPair(librfLyr("spiral")) librfTxtPair(librfLyr("spiral"))
@@ -976,18 +1028,18 @@ procedure(librfAssertPadGap(pts w padX padY padHalf exitDir minGap)
         "辅助焊盘与螺旋间隙 %.3f < %.3f (dir=%s pad=(%.3f,%.3f)) 短路风险"
         gap minGap exitDir padX padY)))
     gap))
-; IND 标记: bbox 外扩 margin 的正交矩形 (132/2)
+; MARKER 标记: bbox 外扩 margin 的正交矩形
 procedure(librfIndMark(cv bbox margin)
   let((x1 y1 x2 y2 w h)
     when(bbox
       x1 = car(bbox) - margin    y1 = cadr(bbox) - margin
       x2 = caddr(bbox) + margin  y2 = cadddr(bbox) + margin
       w = x2 - x1   h = y2 - y1
-      ; IND.F 环宽 30~500 语义未定, 按最小边长告警
+      ; 标记环宽 30~500 语义未定, 按最小边长告警
       when(min(w h) < 30.0
-        librfWarn(sprintf(nil "IND 标记最小边 %.1f < 30um, 请核对 IND.F 规则" min(w h))))
+        librfWarn(sprintf(nil "MARKER 标记最小边 %.1f < 30um, 请核对标记层规则" min(w h))))
       when(max(w h) > 500.0
-        librfWarn(sprintf(nil "IND 标记最大边 %.1f > 500um, 请核对 IND.F 规则" max(w h))))
+        librfWarn(sprintf(nil "MARKER 标记最大边 %.1f > 500um, 请核对标记层规则" max(w h))))
       librfRect(cv librfMetalPair(librfLyr("marker")) x1 y1 x2 y2))))
 ;---------------------------------------------------------------- 库/cellview
 ; 打开 (或创建) cellview, 清空旧图. 返回 cv; 失败返回 nil
@@ -1020,7 +1072,7 @@ procedure(librfOpenCell(libName cellName viewName libDir)
       else
         librfErr(sprintf(nil "打开 cellview 失败: %s/%s/%s" libName cellName viewName))
         return(nil))
-    ; tech 有效性探测: 按 profile 的 spiral 层名探测，而不是写死具体层名。
+    ; tech 有效性探测: 按 profile 的 spiral 层名探测，而不是写死 M5。
     ; 库可能历史绑定了别的/默认 tech —— 此时报错并给出 profile 期望的层名。
     when(techFindLayer(techGetTechFile(cv) librfLyr("spiral")) == nil
       librfErr(sprintf(nil "库 %s 的 tech 里找不到层 %s (工艺库 %s 期望)。\n可能是库绑了默认 tech 或工艺不匹配。请检查 tech_profile.json 的 layers.spiral / techlib，或删除库目录 %s 后重建"
@@ -1073,7 +1125,7 @@ procedure(librfStretchPts(pts ex ey)
       nprev = list(nx ny))
     return(reverse(out))))
 ;-----------------------------------------------------------------------------
-; 电感 ind: 方形/八角螺旋 + underpass + stub 端口 + IND 标记
+; 电感 ind: 方形/八角螺旋 + underpass + stub 端口 + MARKER 标记
 ; ct=0: p01=外端, p02=内端(underpass); ct=1: p01/p02=两半外端, ct1=中心
 ;-----------------------------------------------------------------------------
 procedure(librfBuildInd(cv req)
@@ -1159,13 +1211,13 @@ procedure(librfBuildInd(cv req)
         xOut = car(exitXY)  yOut = cadr(exitXY)
         gap = librfAssertPadGap(append(ptsA ptsB) w xOut yOut (wUp / 2.0) exitDir 2.0)
         librfUnderpass(cv x0 y0 xOut yOut exitDir wUp w under "ct1" (stubLen + w / 2.0)))
-    ; IND 标记默认不画 (用户明确不要识别层); ind_mark:1 才画
+    ; MARKER 标记默认不画 (用户明确不要识别层); ind_mark:1 才画
     when(indMark != 0 && indMark != nil
       librfIndMark(cv bodyBox 1.0))
     librfDrcFigs(cv librfLyr("spiral"))
     librfDrcFigs(cv librfLyr("underpass"))))
 ;-----------------------------------------------------------------------------
-; 传输线 tl: 微带 (spiral 层信号条 + 可选地平面 + via_un 栅栏) 或 CPW (同层地)
+; 传输线 tl: 微带 (M5 信号条 + 可选地平面 + V3 栅栏) 或 CPW (同层地)
 ;-----------------------------------------------------------------------------
 procedure(librfBuildTl(cv req)
   let((w len gnd gndLayer fence cpw gap x0 y0 stubLen m gw fy i)
@@ -1202,9 +1254,9 @@ procedure(librfBuildTl(cv req)
             x0 - m + 1.5 y0 + w / 2.0 - 1.0
             x0 - m + 3.5 y0 + w / 2.0 + 1.0 "gnd")
           when(fence != 0 && fence != nil
-            if(gndLayer == librfLyr("route")
+            if(gndLayer == "M3"
               then
-                ; 两侧 via_un 栅栏: underpass 长条 + via_un 阵列缝合到 route 地
+                ; 两侧 V3 栅栏: M4 长条 + V3 阵列缝合到 M3 地
                 for(i 0 1
                   fy = if(i == 0 then y0 - 2.5 else y0 + w + 2.5)
                   librfRect(cv librfMetalPair(librfLyr("underpass"))
@@ -1212,7 +1264,7 @@ procedure(librfBuildTl(cv req)
                   librfViaArray(cv librfViaPair(librfLyr("via_un"))
                     x0 fy - 1.25 x0 + len fy + 1.25 1.5 1.5 0.5 0.5))
               else
-                librfWarn("fence=1 仅在 gnd_layer=route 层时画 via 栅栏, 已跳过"))))
+                librfWarn("fence=1 仅在 gnd_layer=M3 时画 V3 栅栏, 已跳过"))))
       else
         ;---- CPW: 同层地, gap≥2.5
         gw = max(3.0 * w 5.0)
@@ -1239,7 +1291,7 @@ procedure(librfBuildTl(cv req)
     librfDrcFigs(cv librfLyr("spiral"))
     librfDrcFigs(cv librfLyr("underpass"))))
 ;-----------------------------------------------------------------------------
-; 变压器 xfmr: interleaved(同层双半螺旋交错) / stacked(spiral+underpass 叠层) / balun(CT)
+; 变压器 xfmr: interleaved(同层双半螺旋交错) / stacked(M5+M4 叠层) / balun(CT)
 ; 端口: p01/p02=初级, p03/p04=次级; balun 另有 ct1(次级中心抽头)
 ;-----------------------------------------------------------------------------
 procedure(librfBuildXfmr(cv req)
@@ -1260,7 +1312,7 @@ procedure(librfBuildXfmr(cv req)
     ex = librfReqNum(req 'ex 0.0)
     ey = librfReqNum(req 'ey 0.0)
     indMark = librfReqNum(req 'ind_mark 0)
-    ; stacked/balun 有 underpass 绕组, 同层跨接会短路 -> 强制 route 两级栈
+    ; stacked/balun 有 M4 绕组, M4 跨接会同层短路 -> 强制 m3 两级栈
     when(style == "stacked" || style == "balun" || style == "st" || style == "bal"
       under = "route")
     wUp = max(w 2.5)
@@ -1298,14 +1350,14 @@ procedure(librfBuildXfmr(cv req)
         xOut = car(exitXY)  yOut = cadr(exitXY)
         gapPad = librfAssertPadGap(ptsS w xOut yOut (wUp / 2.0) exitDir 2.0)
         librfUnderpass(cv p0 p1 xOut yOut exitDir wUp w under "p04" (stubLen + w / 2.0)))
-      ;---- 叠层: 初级 spiral 整螺旋, 次级 underpass 整螺旋(180° 旋转让内端错开)
+      ;---- 叠层: 初级 M5 整螺旋, 次级 M4 整螺旋(180° 旋转让内端错开)
       ((style == "stacked" || style == "st")
         ptsP = librfShiftPts(librfStretchPts(librfSpiralPts("sq" np w s dout) ex ey) x0 y0)
         ptsS = librfShiftPts(librfRot180Pts(librfStretchPts(librfSpiralPts("sq" ns w s dout) ex ey)) x0 y0)
         librfPathSweep(cv librfMetalPair(librfLyr("spiral")) ptsP w)
         librfPathSweep(cv librfMetalPair(librfLyr("underpass"))  ptsS w)
         bodyBox = librfCvBBox(cv)
-        ; p01/p02 初级 (spiral 层)
+        ; p01/p02 初级 (M5)
         p0 = car(ptsP) p1 = cadr(ptsP)
         librfStubPort(cv librfMetalPair(librfLyr("spiral")) librfTxtPair(librfLyr("spiral"))
           car(p0) cadr(p0) librfExitDir(car(p0) - x0 cadr(p0) - y0) w (stubLen + w / 2.0) "p01")
@@ -1315,7 +1367,7 @@ procedure(librfBuildXfmr(cv req)
         xOut = car(exitXY)  yOut = cadr(exitXY)
         gapPad = librfAssertPadGap(ptsP w xOut yOut (wUp / 2.0) exitDir 2.0)
         librfUnderpass(cv p0 p1 xOut yOut exitDir wUp w under "p02" (stubLen + w / 2.0))
-        ; p03/p04 次级 (underpass 螺旋): 外端直接 underpass stub, 内端下到 route
+        ; p03/p04 次级 (M4 螺旋): 外端直接 M4 stub, 内端 M4->M3 underpass
         p0 = car(ptsS) p1 = cadr(ptsS)
         librfStubPort(cv librfMetalPair(librfLyr("underpass")) librfTxtPair(librfLyr("underpass"))
           car(p0) cadr(p0) librfExitDir(car(p0) - x0 cadr(p0) - y0) w (stubLen + w / 2.0) "p03")
@@ -1324,7 +1376,7 @@ procedure(librfBuildXfmr(cv req)
         exitXY = librfExitFromPts(ptsS w wUp x0 y0 exitDir)
         xOut = car(exitXY)  yOut = cadr(exitXY)
         gapPad = librfAssertPadGap(ptsS w xOut yOut (wUp / 2.0) exitDir 2.0)
-        ; 次级内端: underpass 走线 + via_un 到 route + 回 underpass 做 stub (端口在 underpass 文字层)
+        ; 次级内端: M4 走线 + V3 到 M3 + 回 M4 做 stub (端口在 M4TXT)
         librfRect(cv librfMetalPair(librfLyr("underpass"))
           p0 - wUp/2.0 p1 - wUp/2.0 p0 + wUp/2.0 p1 + wUp/2.0)
         librfViaArray(cv librfViaPair(librfLyr("via_un"))
@@ -1337,8 +1389,8 @@ procedure(librfBuildXfmr(cv req)
           xOut - wUp/2.0 yOut - wUp/2.0 xOut + wUp/2.0 yOut + wUp/2.0 1.5 1.5 0.5 0.5)
         librfStubPort(cv librfMetalPair(librfLyr("underpass")) librfTxtPair(librfLyr("underpass"))
           xOut yOut exitDir w (stubLen + w / 2.0) "p04")
-        librfWarn("stacked: 次级走 underpass, 端口 p03/p04 在 underpass 文字层; 建议 EMX 端口核对"))
-      ;---- balun: 次级=CT 对称双半(spiral 层), 初级=underpass 整螺旋
+        librfWarn("stacked: 次级走 M4, 端口 p03/p04 在 M4TXT; 建议 EMX 端口核对"))
+      ;---- balun: 次级=CT 对称双半(M5), 初级=M4 整螺旋
       ((style == "balun")
         halfP = car(librfHalfSpiralPts(ns w s dout))
         halfP = librfStretchPts(halfP ex ey)
@@ -1364,7 +1416,7 @@ procedure(librfBuildXfmr(cv req)
         xOut = car(exitXY)  yOut = cadr(exitXY)
         gapPad = librfAssertPadGap(append(ptsP ptsS) w xOut yOut (wUp / 2.0) exitDir 2.0)
         librfUnderpass(cv x0 y0 xOut yOut exitDir wUp w under "ct1" (stubLen + w / 2.0))
-        ; 初级 underpass 整螺旋
+        ; 初级 M4 整螺旋
         ptsP = librfShiftPts(librfStretchPts(librfSpiralPts("sq" np w s dout) ex ey) x0 y0)
         librfPathSweep(cv librfMetalPair(librfLyr("underpass")) ptsP w)
         bodyBox = librfCvBBox(cv)
@@ -1384,7 +1436,7 @@ procedure(librfBuildXfmr(cv req)
           list(list(p0 p1) list(xOut p1) list(xOut yOut)) wUp)
         librfStubPort(cv librfMetalPair(librfLyr("route")) librfTxtPair(librfLyr("route"))
           xOut yOut exitDir w (stubLen + w / 2.0) "p02")
-        librfWarn("balun: 次级 p03/p04/ct1 在 spiral 层, 初级 p01/p02 在 underpass/route 层"))
+        librfWarn("balun: 次级 p03/p04/ct1 在 M5, 初级 p01/p02 在 M4/M3"))
       (t
         librfErr(sprintf(nil "未知 xfmr style: %s" style))))
     when(indMark != 0 && indMark != nil
@@ -1457,7 +1509,7 @@ procedure(librfRun(req)
       cv = librfOpenCell(libName cellName viewName libDir)
       when(cv
         cond(
-          (typ == "ind"              librfBuildInd(cv req))
+          (typ == "ind"              lriDispatch(cv req))
           (typ == "tl"               librfBuildTl(cv req))
           (typ == "xfmr"             librfBuildXfmr(cv req))
           (typ == "cpl"              librfBuildCpl(cv req))
@@ -2334,3 +2386,1027 @@ procedure(librfEmxViews(req)
       librfEmxErr("SKILL 运行异常 (见 stdout 报错)"))
     librfEmxWriteResult(librf__eok)
     exit()))
+
+;===== lri engine (inductor v2) =====
+;=============================================================================
+; librf_ind2.il  --  电感版图引擎 (替换 librfBuildInd / 变压器电感部分)
+;
+; 内核：ring0 = 带 45° 切角的矩形；ring k = ring0 的精确内缩 offset(k*pitch)
+;       => 间距恒 = s，bbox 恒 = W x H，段角恒 ∈ {0,45,90}
+;
+; 拓扑：kind="se"   单端
+;       kind="diff" 差分（两臂嵌套，原点下层桥接）
+;       kind="f8"   八字形（两镜像环，中心桥接）
+;       ct=1        加中心抽头 ct1
+;       shape="rect" 矩形（W≠H，拐角仍 45°）
+;       shape="oct"  正八角（corner 自动 (2-√2)·min(a,b)）
+;
+; 依赖（沿用原工程）：librfRect librfPathSweep librfStubPort librfViaArray
+;   librfLyr librfMetalPair librfTxtPair librfNotePort librfWarn librfErr
+;   librfReqNum librfReqStr librfDrcParams librfCvBBox
+;=============================================================================
+
+defvar(lriReport nil)
+defvar(lriStepList nil)      ; 跨过程状态：lriSpiralBottom 产出的圈间步进段
+
+;------------------------------------------------------------------ 基础
+procedure(lriSegLen(p q)
+  sqrt((car(q)-car(p))*(car(q)-car(p)) + (cadr(q)-cadr(p))*(cadr(q)-cadr(p)))
+)
+procedure(lriLast(lst) car(reverse(lst)))
+procedure(lriDedup(pts)
+  let((out)
+    out = nil
+    foreach(p pts
+      when(out == nil || lriSegLen(lriLast(out) p) > 1.0e-6
+        out = append(out list(p))))
+    out)
+)
+procedure(lriPLen(pts)
+  let((s)
+    s = 0.0
+    for(i 1 length(pts)-1  s = s + lriSegLen(nth(i-1 pts) nth(i pts)))
+    s
+  )
+)
+procedure(lriShift(pts dx dy)
+  let((out) out=nil
+    foreach(p pts out = cons(list(car(p)+dx cadr(p)+dy) out))
+    reverse(out)))
+procedure(lriRot180(pts)
+  let((out) out=nil
+    foreach(p pts out = cons(list(0.0-car(p) 0.0-cadr(p)) out))
+    reverse(out)))
+procedure(lriMirrorX(pts)
+  let((out) out=nil
+    foreach(p pts out = cons(list(0.0-car(p) cadr(p)) out))
+    reverse(out)))
+procedure(lriMirrorY(pts)
+  let((out) out=nil
+    foreach(p pts out = cons(list(car(p) 0.0-cadr(p)) out))
+    reverse(out)))
+procedure(lriMirrorStepsY(steps)
+  let((out s)
+    out = nil
+    foreach(s steps
+      out = cons(list(list(car(car(s)) 0.0-cadr(car(s)))
+                      list(car(cadr(s)) 0.0-cadr(cadr(s)))) out))
+    reverse(out)))
+
+; 所有段必须是 0/45/90
+procedure(lriAngleOK(pts)
+  let((dx dy ok)
+    ok = t
+    for(i 1 length(pts)-1
+      dx = car(nth(i pts)) - car(nth(i-1 pts))
+      dy = cadr(nth(i pts)) - cadr(nth(i-1 pts))
+      when(lriSegLen(nth(i-1 pts) nth(i pts)) > 1.0e-9
+        unless(abs(dx) < 1.0e-6 || abs(dy) < 1.0e-6
+               || abs(abs(dx) - abs(dy)) < 1.0e-6
+          ok = nil)))
+    ok))
+
+procedure(lriInterX(p1 p2 q1 q2)
+  let((d1x d1y d2x d2y det rx ry tt)
+    d1x = car(p2)-car(p1)  d1y = cadr(p2)-cadr(p1)
+    d2x = car(q2)-car(q1)  d2y = cadr(q2)-cadr(q1)
+    det = d1x*(0.0-d2y) - d1y*(0.0-d2x)
+    if(abs(det) < 1.0e-12  then nil
+      else
+        rx = car(q1)-car(p1)  ry = cadr(q1)-cadr(p1)
+        tt = (rx*(0.0-d2y) - ry*(0.0-d2x))/det
+        list(car(p1)+tt*d1x cadr(p1)+tt*d1y))))
+
+;------------------------------------------------------------------ ring0
+; a,b = 中心线半宽/半高, c = 45° 切角腿长, seam = "bottom"/"top"/"left"/"right"
+procedure(lriRing(a b c seam)
+  let((r)
+    ; 旧版 0.49*min 会把 (2-sqrt(2))=0.586 的标准 45° 切角截短，
+    ; 使各圈切角边不再平行等距（连接点会跑出边外）。这里只防退化。
+    c = max(0.0 min(c 0.999*min(a b)))
+    cond(
+      ((seam == "top")
+        r = list(list(0.0 b) list(c-a b) list(-a b-c) list(-a c-b)
+                 list(c-a -b) list(a-c -b) list(a c-b) list(a b-c)
+                 list(a-c b)))
+      ((seam == "left")
+        r = list(list(-a 0.0) list(-a c-b) list(c-a -b) list(a-c -b)
+                 list(a c-b) list(a b-c) list(a-c b) list(c-a b)
+                 list(-a b-c)))
+      ((seam == "right")
+        r = list(list(a 0.0) list(a b-c) list(a-c b) list(c-a b)
+                 list(-a b-c) list(-a c-b) list(c-a -b) list(a-c -b)
+                 list(a c-b)))
+      (t
+        r = list(list(0.0 -b) list(a-c -b) list(a c-b) list(a b-c)
+                 list(a-c b) list(c-a b) list(-a b-c) list(-a c-b)
+                 list(c-a -b))))
+    lriDedup(r)))
+
+;------------------------------------------------------------------ offset
+procedure(lriOffset(poly d)
+  let((n out p0 p1 p2 d1x d1y d2x d2y L1 L2 n1x n1y n2x n2y q)
+    n = length(poly)
+    out = nil
+    for(i 0 n-1
+      p0 = nth(mod(i+n-1 n) poly)  p1 = nth(i poly)
+      p2 = nth(mod(i+1 n) poly)
+      d1x = car(p1)-car(p0)  d1y = cadr(p1)-cadr(p0)
+      L1 = sqrt(d1x*d1x + d1y*d1y)
+      d2x = car(p2)-car(p1)  d2y = cadr(p2)-cadr(p1)
+      L2 = sqrt(d2x*d2x + d2y*d2y)
+      n1x = (0.0-d1y)/L1  n1y = d1x/L1
+      n2x = (0.0-d2y)/L2  n2y = d2x/L2
+      q = lriInterX(
+            list(car(p0)+d*n1x cadr(p0)+d*n1y)
+            list(car(p1)+d*n1x cadr(p1)+d*n1y)
+            list(car(p1)+d*n2x cadr(p1)+d*n2y)
+            list(car(p2)+d*n2x cadr(p2)+d*n2y))
+      unless(q  q = list(car(p1)+d*n1x cadr(p1)+d*n1y))
+      out = cons(q out))
+    reverse(out)))
+
+;------------------------------------------------------------------ ring 族
+; 自相似切角 => 每圈都是 ring0 的精确 offset => 间距恒 = pitch
+procedure(lriRings(W H w s n corner seam pitch)
+  let((p a0 b0 ratio nr rs k a b stop)
+    ; pitch 覆盖: diff 交错双臂需要 2*(w+s) 的环间距;
+    ; 旧实现忽略 pitchOv, 导致 B 臂与 A 臂落在相同半径上 (短路/重叠).
+    p = if(pitch then pitch else w + s)
+    a0 = (W - w)/2.0  b0 = (H - w)/2.0
+    ratio = if(min(a0 b0) > 0.0 then corner/min(a0 b0) else 0.0)
+    nr = fix(round(n)) + 2
+    rs = list(lriRing(a0 b0 ratio*min(a0 b0) seam))
+    stop = nil
+    for(k 1 nr-1
+      unless(stop
+        a = a0 - k*p  b = b0 - k*p
+        if(min(a b) <= w/2.0
+          then
+            progn(stop = t
+                  ; 只有确实容纳不下请求匝数时才告警；nr 本就多预留 2 圈，
+                  ; 多预留的那几圈无法生成是正常现象。
+                  when(length(rs) < fix(n + 1.0e-7) + 1
+                    librfWarn(sprintf(nil "lri: 内孔已闭合, 最多 %.2f 圈 < 请求 %.2f 圈" (length(rs)-1)*1.0 n))))
+          else rs = cons(lriRing(a b ratio*min(a b) seam) rs))))
+    list(reverse(rs) p)))
+
+procedure(lriCutRing(r frac)
+  prog((tot want acc out a b L)
+    when(frac >= 0.9999  return(append(r list(car(r)))))
+    tot = lriPLen(append(r list(car(r))))
+    want = tot*frac
+    acc = 0.0
+    out = list(car(r))
+    for(i 0 length(r)-1
+      a = nth(i r)
+      b = if(i+1 < length(r) then nth(i+1 r) else car(r))
+      L = lriSegLen(a b)
+      when(L < 1.0e-9  return(out))
+      if(acc + L >= want - 1.0e-9
+        then return(append(out list(list(
+               car(a)+(car(b)-car(a))*(want-acc)/L
+               cadr(a)+(cadr(b)-cadr(a))*(want-acc)/L))))
+        else out = append(out list(b)))
+      acc = acc + L)
+    return(out)))
+
+;------------------------------------------------------------------ 螺旋
+; 单位方向
+procedure(lriUnit(a b)
+  let((dx dy L)
+    dx = car(b)-car(a)  dy = cadr(b)-cadr(a)
+    L = sqrt(dx*dx + dy*dy)
+    if(L < 1.0e-12 then list(0.0 0.0) else list(dx/L dy/L))))
+
+; 开放折线按弧长比例截断（不做闭合，不回起点）
+procedure(lriCutOpen(pts frac)
+  prog((tot want acc out a b L)
+    when(frac >= 0.9999  return(pts))
+    tot = lriPLen(pts)
+    when(tot < 1.0e-9  return(pts))
+    want = tot*frac
+    acc = 0.0
+    out = list(car(pts))
+    for(i 0 length(pts)-2
+      a = nth(i pts)  b = nth(i+1 pts)
+      L = lriSegLen(a b)
+      ; 重合点直接跳过，不能因此丢掉整段剩余路径
+      when(L >= 1.0e-9
+        if(acc + L >= want - 1.0e-9
+          then return(append(out list(list(
+                 car(a)+(car(b)-car(a))*(want-acc)/L
+                 cadr(a)+(cadr(b)-cadr(a))*(want-acc)/L))))
+          else progn(
+            out = append(out list(b))
+            acc = acc + L))))
+    return(out)))
+
+; 列表循环移位：从索引 i 起取一周（nth 0 基）
+procedure(lriRotList(l i)
+  let((n k out j)
+    n = length(l)
+    k = mod(mod(i n) + n n)
+    out = nil
+    for(j 0 n-1
+      out = append(out list(nth(mod(k+j n) l))))
+    out))
+
+; 取列表前 k 个元素
+procedure(lriTake(l k)
+  let((out j)
+    out = nil
+    for(j 0 min(k length(l))-1
+      out = append(out list(nth(j l))))
+    out))
+
+; 精确 90/180/270 旋转（避免 cos/sin 误差破坏 0/45/90 角度）
+procedure(lriRotExact(pts ang)
+  let((out p x y)
+    out = nil
+    foreach(p pts
+      x = car(p)  y = cadr(p)
+      cond(
+        ((ang == 90)  out = cons(list(0.0-y x) out))
+        ((ang == 180) out = cons(list(0.0-x 0.0-y) out))
+        ((ang == 270) out = cons(list(y 0.0-x) out))
+        (t out = cons(p out))))
+    reverse(out)))
+
+; seam=bottom 环的左竖直边（CCW 向下）索引
+procedure(lriStepEdge(r)
+  prog((m a b)
+    m = length(r)
+    for(i 0 m-1
+      a = nth(i r)
+      b = nth(mod(i+1 m) r)
+      when(abs(car(b)-car(a)) < 1.0e-9 && abs(cadr(b)-cadr(a)) > 1.0e-9
+           && car(a) < 0.0 && cadr(b) < cadr(a)
+        return(i)))
+    librfErr("lri: 环上没有可用的左侧竖直边，无法构造螺旋")))
+
+; 第 k 圈左竖直边上高度 y 处的点；越界直接报错（提示减小 n）
+procedure(lriOnLeft(rs i k y)
+  prog((r a b tt)
+    r = nth(k rs)
+    a = nth(i r)
+    b = nth(mod(i+1 length(r)) r)
+    tt = (y - cadr(a))/(cadr(b) - cadr(a))
+    when(tt < -1.0e-9 || tt > 1.0 + 1.0e-9
+      librfErr(sprintf(nil
+        "lri: 第 %d 圈左侧边长度不足，无法容纳螺旋台阶 (y=%.3f, 边范围 %.3f..%.3f)；请减小 n 或 s/w"
+        k y min(cadr(a) cadr(b)) max(cadr(a) cadr(b)))))
+    return(list(car(a) y))))
+
+; seam=bottom 的标准螺旋：单一连续路径，无自交。
+; 每圈从左侧竖直边上的 L 出发，向下绕整圈后回到该边上的 D 结束，
+; D 比 L 高一个 pitch；再沿内法向(+x)平移 pitch 到下一圈的 L。
+; 同圈起止端缺口 = pitch => 金属净距 s；相邻过渡段相距 pitch，不重叠。
+procedure(lriSpiralBottom(W H w s n corner pitchOv)
+  prog((rp rs p r0 i m bIdx nfull frac L1 D0 Lk pts r rot dk nxt
+        closed part k)
+    ; 圈间“径向步进”段 (dk->nxt)。单臂螺旋里它与下一圈边共线，无影响；
+    ; 交错双臂 (diff) 时这段会横穿另一臂 -> 必须能识别出来改走下穿层。
+    lriStepList = nil
+    rp = lriRings(W H w s n corner "bottom" pitchOv)
+    rs = car(rp)
+    p = cadr(rp)
+    r0 = car(rs)
+    i = lriStepEdge(r0)
+    m = length(r0)
+    bIdx = mod(i+1 m)
+    nfull = fix(n + 1.0e-7)
+    frac = n - nfull
+    if(nfull == 0
+      then
+        closed = append(lriRotList(r0 0) list(car(r0)))
+        return(list(lriDedup(lriCutOpen(closed frac)) p)))
+    unless(length(rs) >= 2
+      librfErr("lri: 内孔已闭合，无法构造螺旋；请减小 n 或 s/w"))
+    when(nfull > length(rs)-1
+      librfErr(sprintf(nil "lri: 内孔已闭合，只能容纳 %.2f 圈 < 请求 %.2f 圈；请减小 n 或 s/w" (length(rs)-1)*1.0 n)))
+    L1 = nth(bIdx nth(1 rs))
+    D0 = lriOnLeft(rs i 0 cadr(L1))
+    pts = append(lriTake(lriRotList(r0 0) i+1) list(D0))
+    ; 首圈->第二圈的径向步进：先补上“第二圈左边缘”的中间点，
+    ; 才能把径向步进单独切出来（否则它与第二圈底边共线、混成一段）。
+    let((mid0)
+      mid0 = list(car(nth(i nth(1 rs))) cadr(D0))
+      when(lriSegLen(D0 mid0) > 1.0e-6
+        lriStepList = cons(list(D0 mid0) lriStepList)
+        pts = append(pts list(mid0))))
+    Lk = L1
+    pts = append(pts list(Lk))
+    for(k 1 nfull-1
+      r = nth(k rs)
+      rot = lriRotList(r bIdx)
+      pts = append(pts list(nth(bIdx r)))
+      pts = append(pts cdr(rot))
+      when(k+1 < length(rs)
+        dk = lriOnLeft(rs i k cadr(Lk)+p)
+        pts = append(pts list(dk))
+        when(k < nfull-1 || frac > 1.0e-9
+          nxt = list(car(nth(i nth(k+1 rs))) cadr(dk))
+          lriStepList = cons(list(dk nxt) lriStepList)
+          pts = append(pts list(nxt))
+          Lk = nxt)))
+    when(frac > 1.0e-9 && nfull < length(rs)
+      r = nth(nfull rs)
+      closed = lriDedup(append(cons(Lk lriRotList(r bIdx)) list(Lk)))
+      part = lriCutOpen(closed frac)
+      pts = append(pts cdr(part)))
+    lriStepList = reverse(lriStepList)
+    return(list(lriDedup(pts) p))))
+
+; 点集/步进段按角度精确旋转
+procedure(lriSamePt(a b)
+  (abs(car(a)-car(b)) < 1.0e-6 && abs(cadr(a)-cadr(b)) < 1.0e-6))
+
+procedure(lriRotPt(p ang)
+  car(lriRotExact(list(p) ang)))
+
+procedure(lriRotSteps(steps ang)
+  let((out s)
+    out = nil
+    foreach(s steps
+      out = cons(list(lriRotPt(car(s) ang) lriRotPt(cadr(s) ang)) out))
+    reverse(out)))
+
+; 连续螺旋（无自交），seam 只决定端口边：统一用 bottom 版本生成再精确旋转。
+; 同时把圈间步进段随点集一起旋转，供 diff 的下穿处理使用。
+procedure(lriSpiral(W H w s n corner seam pitchOv)
+  let((q pts st)
+    cond(
+      ((seam == "top")
+        q = lriSpiralBottom(W H w s n corner pitchOv)
+        pts = lriRotExact(car(q) 180)
+        st = lriRotSteps(lriStepList 180))
+      ((seam == "right")
+        q = lriSpiralBottom(H W w s n corner pitchOv)
+        pts = lriRotExact(car(q) 90)
+        st = lriRotSteps(lriStepList 90))
+      ((seam == "left")
+        q = lriSpiralBottom(H W w s n corner pitchOv)
+        pts = lriRotExact(car(q) 270)
+        st = lriRotSteps(lriStepList 270))
+      (t
+        q = lriSpiralBottom(W H w s n corner pitchOv)
+        pts = car(q)
+        st = lriStepList))
+    lriStepList = st
+    pts))
+
+; 弧长比例取点
+procedure(lriPointAt(pts frac)
+  prog((tot want acc L fr)
+    tot = lriPLen(pts)  want = tot*frac  acc = 0.0
+    for(i 1 length(pts)-1
+      L = lriSegLen(nth(i-1 pts) nth(i pts))
+      when(acc + L >= want - 1.0e-9
+        fr = if(L > 0.0 then (want-acc)/L else 0.0)
+        return(list(car(nth(i-1 pts))+(car(nth(i pts))-car(nth(i-1 pts)))*fr
+                    cadr(nth(i-1 pts))+(cadr(nth(i pts))-cadr(nth(i-1 pts)))*fr)))
+      acc = acc + L)
+    return(lriLast(pts))))
+
+;------------------------------------------------------------------ 绘制
+procedure(lriDraw(cv pts w)
+  when(length(pts) >= 2
+    librfPathSweep(cv librfMetalPair(librfLyr("spiral")) pts w)))
+
+procedure(lriDrawEx(cv pts w capStart capEnd)
+  when(length(pts) >= 2
+    librfPathSweepEx(cv librfMetalPair(librfLyr("spiral"))
+      pts w capStart capEnd)))
+
+; 带下穿步进的画法：steps 里的段改走 M4（underpass）并两端打孔。
+; 单臂螺旋里圈间步进与下一圈边共线，放哪层都一样；但 diff 的两臂
+; 交错时，径向步进会横穿另一臂，同层画就是短路。
+procedure(lriDrawSteps(cv pts w steps)
+  let((run a b isStep i s)
+    run = list(car(pts))
+    for(i 1 length(pts)-1
+      a = nth(i-1 pts)
+      b = nth(i pts)
+      isStep = nil
+      foreach(s steps
+        when(lriSamePt(a car(s)) && lriSamePt(b cadr(s))
+          isStep = t))
+      if(isStep
+        then
+          when(length(run) >= 2  lriDraw(cv run w))
+          lriBridge(cv list(a b) w)
+          run = list(b)
+        else
+          run = append(run list(b))))
+    when(length(run) >= 2  lriDraw(cv run w))))
+
+; 四个正交方向的端口
+procedure(lriPortDir(cv x y dir w len name)
+  let((m tl)
+    m  = librfMetalPair(librfLyr("spiral"))
+    tl = librfTxtPair(librfLyr("spiral"))
+    librfStubPort(cv m tl x y dir w len name)))
+
+; 任意方向端口（中心抽头用）：沿 (dx,dy) 画短走线 + label
+procedure(lriPortVec(cv x y dx dy w len name)
+  let((L nx ny ex ey m tl lx ly off)
+    L = sqrt(dx*dx + dy*dy)
+    when(L < 1.0e-9  L = 1.0)
+    nx = dx/L  ny = dy/L
+    ex = x + nx*len  ey = y + ny*len
+    m  = librfMetalPair(librfLyr("spiral"))
+    tl = librfTxtPair(librfLyr("spiral"))
+    librfPathSweep(cv m list(list(x y) list(ex ey)) w)
+    ; librfPathSweep 在端点加 w x w 端帽, 金属真实尖端还要再外伸 w/2.
+    ; EMX label-snap 要求标签贴近金属外缘: 放在尖端内侧 1.5um,
+    ; 放在端帽中心会距边 5um, EMX 报 label not close to any edge.
+    off = max(0.0 w/2.0 - 1.5)
+    lx = ex + nx*off  ly = ey + ny*off
+    librfPortPin(cv car(m) car(tl) lx ly name)
+    librfNotePort(name lx ly car(tl))))
+
+; 下穿/桥接：underpass 层走线 + 两端 landing + via
+procedure(lriBridge(cv pts w)
+  let((mU mS cut x1 y1 x2 y2 p)
+    mU  = librfMetalPair(librfLyr("underpass"))
+    mS  = librfMetalPair(librfLyr("spiral"))
+    cut = librfViaPair(librfLyr("via_sp"))
+    librfPathSweep(cv mU pts w)
+    foreach(p list(car(pts) lriLast(pts))
+      x1 = car(p)-w/2.0  y1 = cadr(p)-w/2.0
+      x2 = car(p)+w/2.0  y2 = cadr(p)+w/2.0
+      librfRect(cv mU x1 y1 x2 y2)
+      librfRect(cv mS x1 y1 x2 y2)
+      librfViaArray(cv cut x1 y1 x2 y2 1.5 1.5 0.5 0.5))))
+
+; 仅末端 landing/via 的桥：起点已经在下层网络中心 (diff ct),
+; 起点再放 metal landing 会与最内圈短路.
+procedure(lriBridgeTap(cv pts w)
+  let((mU mS cut p x1 y1 x2 y2)
+    mU  = librfMetalPair(librfLyr("underpass"))
+    mS  = librfMetalPair(librfLyr("spiral"))
+    cut = librfViaPair(librfLyr("via_sp"))
+    librfPathSweep(cv mU pts w)
+    p = lriLast(pts)
+    x1 = car(p)-w/2.0  y1 = cadr(p)-w/2.0
+    x2 = car(p)+w/2.0  y2 = cadr(p)+w/2.0
+    librfRect(cv mU x1 y1 x2 y2)
+    librfRect(cv mS x1 y1 x2 y2)
+    librfViaArray(cv cut x1 y1 x2 y2 1.5 1.5 0.5 0.5)))
+
+;------------------------------------------------------------------ 断言
+procedure(lriAssert(tag ok msg)
+  lriReport = cons(list(tag ok msg) lriReport)
+  unless(ok  librfErr(sprintf(nil "lri[%s] %s" tag msg)))
+  t)
+
+procedure(lriCheck(pts w W H s tag)
+  let((x1 y1 x2 y2 bw bh)
+    x1 = 1.0e30 y1 = 1.0e30 x2 = -1.0e30 y2 = -1.0e30
+    foreach(p pts
+      x1 = min(x1 car(p))  y1 = min(y1 cadr(p))
+      x2 = max(x2 car(p))  y2 = max(y2 cadr(p)))
+    bw = x2-x1+w  bh = y2-y1+w
+    lriAssert(sprintf(nil "%s.bbox" tag) (abs(bw-W) < 0.02)
+      sprintf(nil "bbox %.3f != %.3f" bw W))
+    lriAssert(sprintf(nil "%s.bboxY" tag) (abs(bh-H) < 0.02)
+      sprintf(nil "bboxY %.3f != %.3f" bh H))
+    lriAssert(sprintf(nil "%s.angle" tag) (lriAngleOK(pts) != nil)
+      "存在非 0/45/90 段")
+    t))
+
+;------------------------------------------------------------------ SE
+procedure(lriBuildSE(cv req W H w s n corner seam stubLen ct)
+  let((body p0 p1 ex ey L dx dy dir tangle dirs nat2 vx vy bb)
+    body = lriSpiral(W H w s n corner seam nil)
+    lriCheck(body w W H s "se")
+    lriDraw(cv body w)
+    p0 = car(body)
+    dir = cond(
+            ((seam == "top")    'N)
+            ((seam == "left")   'W)
+            ((seam == "right")  'E)
+            (t                  'S))
+    p1 = lriLast(body)
+    dx = car(p1)  dy = cadr(p1)
+    L = sqrt(dx*dx + dy*dy)
+    if(L < 1.0e-6  then progn(dx = 0.0  dy = 1.0  L = 1.0))
+    nat2 = librfExitDir(dx dy)
+    ; 端子夹角 tangle: 0/90/180 (-1=自然向, 旧行为)
+    tangle = librfReqNum(req 'tangle -1)
+    when(tangle >= 0
+      dirs = librfTangleDirs(tangle dir nat2)
+      dir = car(dirs)  nat2 = cadr(dirs)
+      cond(
+        ((nat2 == 'N)  vx = 0.0   vy = 1.0)
+        ((nat2 == 'S)  vx = 0.0   vy = -1.0)
+        ((nat2 == 'E)  vx = 1.0   vy = 0.0)
+        (t             vx = -1.0  vy = 0.0)
+      )
+      ex = car(p1) + vx*40.0
+      ey = cadr(p1) + vy*40.0
+    )
+    when(tangle < 0
+      vx = dx/L  vy = dy/L
+      ex = car(p1) + vx*40.0
+      ey = cadr(p1) + vy*40.0
+    )
+    ; 无论 tangle 与否, 出口点都必须在包围盒外:
+    ; 否则 p02 的同层 stub 会从内部穿过绕组, 造成短路.
+    when(vy > 0.5 && ey < H/2.0 + w + 20.0  ey = H/2.0 + w + 40.0)
+    when(vy < -0.5 && ey > 0.0 - H/2.0 - w - 20.0  ey = 0.0 - H/2.0 - w - 40.0)
+    when(vx > 0.5 && ex < W/2.0 + w + 20.0  ex = W/2.0 + w + 40.0)
+    when(vx < -0.5 && ex > 0.0 - W/2.0 - w - 20.0  ex = 0.0 - W/2.0 - w - 40.0)
+    lriPortDir(cv car(p0) cadr(p0) dir w stubLen "p01")
+    lriBridge(cv list(p1 list(ex ey)) w)
+    lriPortVec(cv ex ey vx vy w stubLen "p02")
+    when(ct != 0 && ct != nil
+      let((cut tx ty ctDir vx2 vy2 ex2 ey2)
+        cut = lriPointAt(body 0.5)
+        tx = car(cut)  ty = cadr(cut)
+        ; 抽头出线必须保持正交（0/90），径向出线会产生任意角度；
+        ; p01 为 S 时向北引出，否则向南；出口在包围盒外。
+        ctDir = if(dir == 'S then 'N else 'S)
+        if(ctDir == 'N
+          then vx2 = 0.0  vy2 = 1.0
+               ex2 = tx  ey2 = H/2.0 + w + 40.0
+          else vx2 = 0.0  vy2 = -1.0
+               ex2 = tx  ey2 = 0.0 - H/2.0 - w - 40.0)
+        lriBridge(cv list(cut list(ex2 ey2)) w)
+        lriPortVec(cv ex2 ey2 vx2 vy2 w stubLen "ct1")))
+    body))
+
+;------------------------------------------------------------------ DIFF
+; 对称交错双臂：A/B 交错填充 (union 间距恒 s)，180° 旋转对称；
+; 中心桥 A内端->原点->B内端；tangle 控两端出线向
+procedure(lriBuildDiff(cv req W H w s n corner seam stubLen ct)
+  let((p A B stepsA stepsB tangle dirs d1 d2)
+    p = w + s
+    A = lriSpiral(W H w s n corner "bottom" 2.0*p)
+    stepsA = lriStepList
+    ; B 必须是 A 的镜像，不能是 180° 旋转拷贝。
+    ; 两臂内端对接后：旋转拷贝会让 B 臂电流绕中心的旋向与 A 相反，
+    ; 同心交错结构的互感为负，EMX 实测 L 只有 ~0.5nH（单臂 ~1.2nH）；
+    ; 镜像后两臂电流同向，磁场相加（正确差分电感）。
+    B = lriMirrorY(lriSpiral(W-2.0*p H-2.0*p w s n corner "bottom" 2.0*p))
+    lriStepList = lriMirrorStepsY(lriStepList)
+    stepsB = lriStepList
+    lriCheck(A w W H s "diff.A")
+    lriCheck(B w (W-2.0*p) (H-2.0*p) s "diff.B")
+    ; 两臂交错：A/B 的圈间步进都会横穿另一臂，必须走 underpass，
+    ; 否则同层 M5 直接短路（对差分电感等于失效）。
+    lriDrawSteps(cv A w stepsA)
+    lriDrawSteps(cv B w stepsB)
+    ; A 外端在下方外缘, 直接 S 出线安全.
+    d1 = 'S
+    tangle = librfReqNum(req 'tangle -1)
+    when(tangle >= 0 && tangle != 180
+      librfWarn(sprintf(nil "lri[diff]: tangle=%g 会使 B 端口同层穿过 A 外圈, 已改用自然 180 度出线 (p01=S, p02=N)" tangle)))
+    lriPortDir(cv car(car(A)) cadr(car(A)) d1 w stubLen "p01")
+    ; B 外端在上方, 但 B 外圈位于 A 外圈之内; 必须先用 underpass
+    ; 逃到 A 包围盒外, 再在 spiral 层做 p02 端口. 旧版直接 N 出线
+    ; 会横穿 A 外圈 (同层短路).
+    let((pB ex ey)
+      pB = car(B)
+      ex = car(pB)
+      ey = H/2.0 + w + 40.0 + stubLen
+      lriBridge(cv list(pB list(ex ey)) w)
+      lriPortVec(cv ex ey 0.0 1.0 w stubLen "p02"))
+    ; 中心桥：A内端 -> (B内端x, A内端y) -> B内端。
+    ; 不能走直线对角线：两臂内端对称时该线恰好穿过另一臂“部分圈起点”
+    ; 的 via landing（圈间步进已改 M4），等于把中心节点接到绕组中间，
+    ; 会短路掉半匝。改走中心空区：先沿 A 内端所在水平线到 B 内端 x，
+    ; 再垂直落到 B 内端；该走廊距 B 步进/landing、A 步进均 >= s。
+    lriBridge(cv list(lriLast(A) list(car(lriLast(B)) cadr(lriLast(A)))
+                      lriLast(B)) w)
+    when(ct != 0 && ct != nil
+      let((ctEnd)
+        ; 抽头直接从中心节点 (B 内端, 已有桥 landing+via) 垂直向下引出。
+        ; 旧版从 (0,0) 引出，起点 10x10 端帽会压到 B 步进 (7,7) 的
+        ; via landing（相距 7 < w），同样短路半匝。
+        ctEnd = list(car(lriLast(B)) 0.0-H/2.0-w-40.0-stubLen)
+        lriBridgeTap(cv list(lriLast(B) ctEnd) w)
+        lriPortVec(cv car(ctEnd) cadr(ctEnd) 0.0 -1.0 w stubLen "ct1")))
+    list(A B)))
+
+;------------------------------------------------------------------ F8
+; 8 字双环：左右两环、内端经原点(腰)交叉 underpass，外端东西出线；tangle 可调
+procedure(lriBuildF8(cv req W H w s n corner gap stubLen)
+  let((d nA Lft Rgt dx tangle dirs d1 d2 cf8)
+    when(gap == nil || gap < 1.0  gap = 8.0)
+    ; 内端 landing 是 w x w; 两环内端间距若 < w+s, landing 会直接短路.
+    when(gap < w + s
+      librfWarn(sprintf(nil "lri[f8]: gap=%g 小于 w+s=%g, 已放大到 w+s" gap (w+s)))
+      gap = w + s)
+    d = (W - gap)/2.0
+    nA = n/2.0
+    when(abs(nA - round(nA)) < 1.0e-6  nA = nA + 0.5)
+    dx = d/2.0 + gap/2.0
+    ; 子环外径 d < W：45° 切角按比例缩小，避免 oct 子环切角过大退化自交
+    cf8 = corner
+    when(min((W-w)/2.0 (H-w)/2.0) > 0.0
+      cf8 = corner*min((d-w)/2.0 (H-w)/2.0)/min((W-w)/2.0 (H-w)/2.0))
+    Lft = lriShift(lriSpiral(d H w s nA cf8 "left" nil) (0.0-dx) 0.0)
+    Rgt = lriShift(lriMirrorX(lriSpiral(d H w s nA cf8 "left" nil)) dx 0.0)
+    lriCheck(Lft w d H s "f8.L")
+    lriDraw(cv Lft w)
+    lriDraw(cv Rgt w)
+    d1 = 'W  d2 = 'E
+    tangle = librfReqNum(req 'tangle -1)
+    when(tangle >= 0
+      dirs = librfTangleDirs(tangle d1 d2)
+      d1 = car(dirs)  d2 = cadr(dirs)
+    )
+    lriPortDir(cv car(car(Lft)) cadr(car(Lft)) d1 w stubLen "p01")
+    lriPortDir(cv car(car(Rgt)) cadr(car(Rgt)) d2 w stubLen "p02")
+    ; 腰：两内端经原点交叉（8 字的中心），下层桥。
+    ; 先垂直走到 y=0 再横穿，保证 underpass 全为 0/90 段。
+    lriBridge(cv list(lriLast(Lft)
+                      list(car(lriLast(Lft)) 0.0)
+                      list(0.0 0.0)
+                      list(car(lriLast(Rgt)) 0.0)
+                      lriLast(Rgt)) w)
+    list(Lft Rgt)))
+
+;------------------------------------------------------------------ SYM
+; RFIC-GPT 对称型（4 参数：dout/n/w/s）
+; 每臂 = 交替左右半圈：偶数 k 右半圈、奇数 k 左半圈；
+; 换圈在上下对称轴处跨过轴线（x=+-xj），两臂在同一轴心交叉，
+; 层互补：一臂走顶层、另一臂走 underpass，避免同层短路。
+; N = 2*fix(n/2)+1（就近奇数）：总圈数必须为奇数，两内端才能
+; 同时落在下方对称轴并用一段顶层短桥相连。
+
+; 右半圈：从 (xj,R) 顺时针经右侧到 (xj,-R)
+procedure(lriHalfOctR(R xj)
+  let((c)
+    c = (2.0 - sqrt(2.0)) * R
+    list(list(xj R) list(R-c R) list(R R-c)
+         list(R 0.0-(R-c)) list(R-c 0.0-R) list(xj 0.0-R))))
+
+; 左半圈：从 (-xj,-R) 顺时针经左侧到 (-xj,R)
+procedure(lriHalfOctL(R xj)
+  lriMirrorX(reverse(lriHalfOctR(R xj))))
+
+; 最后一个 cons cell（rplaca 用）
+procedure(lriLastCell(lst)
+  if(null(cdr(lst)) lst lriLastCell(cdr(lst))))
+
+; pt 是否在点表中（坐标容差 1nm）
+procedure(lriPtTrimmed(pt pts)
+  let((hit)
+    hit = nil
+    foreach(q pts  when(lriSamePt(pt q)  hit = t))
+    hit))
+
+; 换圈 flush 端的外移窗口 (dmin dmax)：端点 (xj,R-p) 外移 delta 后，
+; 危险角点到两条 45 度斜线的净距都 >= 2.5um：
+;   1) 另一臂换圈斜线 u-v=xj-R  (u=|x|, v=|y|)
+;   2) 半径 R 外圈切角   u+v=sqrt(2)*R
+; dmax < dmin 表示该半径的夹缝放不下 w 宽端头。
+procedure(lriSymWindow(w s R p)
+  let((a)
+    a = sqrt(2.0) * (w / 2.0 + 2.5)
+    list(a - p + w / 2.0
+         (sqrt(2.0) - 1.0) * R + p / 2.0 - w / 2.0 - a)))
+
+; 返回 (tops unders vias topCaps N R0 Rlast xj)
+;   tops    = 顶层金属连续折线列表（半圈 + 本臂顶层换圈段）
+;   unders  = 下层 M4 折线列表；两端水平包住通孔，再斜穿到另一臂
+;   vias    = 通孔阵列中心与 y 向宽度（(x y viaW) 列表）
+;   topCaps = 每条 tops 的 (起点端帽 终点端帽)，nil 表示 flush 平头
+; 换圈 flush 端不得加 w x w 满宽方端帽：该方角在 45 度夹缝里既撞
+; 另一臂换圈斜线又撞外圈切角。外移量取夹缝窗口中点；通孔直接放在
+; 外移后的宽端下方，M4 从通孔继续向中心延伸，M5 不再向中心伸窄颈。
+; PDK 规则：V4 cut 1.5um、space 1.5um、
+; M4/M5 enclosure 0.5um；通孔放在宽端下方后 y 向可放 1/2/3 个 cut。
+procedure(lriSymArm(dout n w s side)
+  let((p xj R0 N Rlast k R seg halfs tops unders vias trimPts topCaps
+      run nxt underHere dmin dmax delta Rin tmMax viaW viaEdge stub back
+      a b sa sb at bt av bv ae be cc)
+    when(dout <= 0.0 || w <= 0.0 || s <= 0.0
+      librfErr("lri[sym]: dout/w/s 必须 > 0"))
+    p = w + s
+    xj = p / 2.0
+    R0 = dout / 2.0 - w / 2.0
+    when(R0 <= 0.0
+      librfErr(sprintf(nil "lri[sym]: dout=%.3f 太小（需 > w=%.3f）" dout w)))
+    N = 2 * fix(n / 2.0) + 1
+    when(N < 1  N = 1)
+    Rlast = R0 - (N - 1) * p
+    when(Rlast <= 0.0
+      librfErr(sprintf(nil
+        "lri[sym]: dout=%.3f 放不下 %d 圈；请增大 dout 或减小 n/w/s"
+        dout N)))
+    when(Rlast * (sqrt(2.0) - 1.0) < xj
+      librfErr(sprintf(nil
+        "lri[sym]: 最内半圈 R=%.3f 直边太短，放不下 xj=%.3f；请增大 dout"
+        Rlast xj)))
+    halfs = nil
+    for(k 0 N-1
+      R = R0 - k * p
+      seg = if(mod(k 2) == 0 then lriHalfOctR(R xj) else lriHalfOctL(R xj))
+      when(side < 0  seg = lriMirrorX(seg))
+      halfs = append(halfs list(seg)))
+    unders = nil
+    vias = nil
+    trimPts = nil
+    viaEdge = 1.5 / 2.0 + 0.5
+    ; 宽端下方 y 向可放 1/2/3 个 cut（两侧各留 0.5 包覆）
+    viaW = if(w >= 8.5 then 7.5 else if(w >= 5.5 then 4.5 else 1.5))
+    ; 端头水平短段长度：端头外侧顶边 = stub + h(sqrt2-1)，
+    ; PDK 开口楔规则要求 >= 2.5，取 2.6 留余量。
+    back = w / 2.0 * (sqrt(2.0) - 1.0)
+    stub = max(viaEdge 2.6 - back)
+    for(k 0 N-2
+      underHere = if(side < 0
+                     then mod(k 2) == 0
+                     else mod(k 2) == 1)
+      when(underHere
+        R = R0 - k * p
+        dmin = car(lriSymWindow(w s R p))
+        dmax = cadr(lriSymWindow(w s R p))
+        when(dmax < dmin - 1.0e-9
+          librfErr(sprintf(nil
+            "lri[sym]: 换圈 R=%.3f 的 45 度夹缝放不下 w=%.2f 端头（窗口 %.2f..%.2f）；请增大 dout 或减小 w/s"
+            R w dmin dmax)))
+        Rin = R - p
+        ; flush 面必须落在内圈水平边内边线以内（否则切角内边在
+        ; flush 面处收成斜楔，宽端外角掉出本圈金属 -> 顶层金属缺口）。
+        chordMax = (sqrt(2.0) - 1.0) * (Rin - w / 2.0) - xj
+        ; M4 从宽端下方再向外包住通孔，端点不能越过对应 M5 的直边
+        ; R-c；否则通孔外侧包覆不足，M4 也会伸出这一圈。
+        tmMax = (sqrt(2.0) - 1.0) * R - xj - (viaEdge + stub)
+        upper = min(dmax chordMax tmMax)
+        when(upper < dmin - 1.0e-9
+          librfErr(sprintf(nil
+            "lri[sym]: 换圈 R=%.3f（内圈 %.3f）的 45 度夹缝放不下 w=%.2f 端头（下界 %.2f，上界 min(%.2f 直边 %.2f M4端 %.2f)=%.2f）；请增大 dout 或减小 w/s"
+            R Rin w dmin dmax chordMax tmMax upper)))
+        delta = max(0.0 (dmin + upper) / 2.0)
+        a = lriLast(nth(k halfs))
+        b = car(nth(k+1 halfs))
+        sa = if(car(a) >= 0.0 then 1.0 else -1.0)
+        sb = if(car(b) >= 0.0 then 1.0 else -1.0)
+        at = list(car(a) + sa * delta cadr(a))
+        bt = list(car(b) + sb * delta cadr(b))
+        rplaca(lriLastCell(nth(k halfs)) at)
+        rplaca(nth(k+1 halfs) bt)
+        ; 通孔放在外移后的宽端下方；M4 两端水平包住通孔，
+        ; 再沿两孔连线斜穿到另一臂（比原 45 度直线更长）。
+        av = list(car(at) + sa * viaEdge cadr(at))
+        bv = list(car(bt) + sb * viaEdge cadr(bt))
+        ae = list(car(av) + sa * stub cadr(av))
+        be = list(car(bv) + sb * stub cadr(bv))
+        ; 45° 斜段 + 水平段：避免水平包覆段与细长斜线之间出现
+        ; 锐角 miter（w=10 时会甩出很长的尖角）。
+        cc = list(car(av) - sa * p cadr(bv))
+        unders = append(unders list(list(ae av cc bv be)))
+        vias = append(vias list(
+          list(car(av) cadr(av) viaW)
+          list(car(bv) cadr(bv) viaW)))
+        trimPts = append(trimPts list(at bt))))
+    tops = nil
+    run = car(halfs)
+    for(k 0 N-2
+      underHere = if(side < 0
+                     then mod(k 2) == 0
+                     else mod(k 2) == 1)
+      nxt = car(nth(k+1 halfs))
+      if(underHere
+        then
+          tops = append(tops list(run))
+          run = nth(k+1 halfs)
+        else
+          run = append(run cons(nxt cdr(nth(k+1 halfs))))))
+    tops = append(tops list(run))
+    ; flush 端点（等于任一 trimPt）不加满宽端帽
+    topCaps = nil
+    foreach(run tops
+      topCaps = append(topCaps list(list(
+        if(lriPtTrimmed(car(run) trimPts) then nil else t)
+        if(lriPtTrimmed(lriLast(run) trimPts) then nil else t)))))
+    list(tops unders vias topCaps N R0 Rlast xj)))
+
+; 换圈 underpass 多边形。端头 1.25um 水平短段后紧跟 45° 弯；若按
+; miter 扫掠，弯折侧端头竖边与 45° 边之间会留下 1.25-h(√2-1) 的尖楔
+; （w=4/6 时 <2.5um，PDK 开口楔 INT 规则报错）。这里把端头竖边延长到
+; 与 45° 边直接相交，两段边共点，尖楔消失；另一端两段共线，仍为整宽平头。
+procedure(lriUnderPolyPts(pts w)
+  let((x0 y0 x1 x2 y2 x4 h back sg ya yb)
+    x0 = car(car(pts))   y0 = cadr(car(pts))
+    x1 = car(nth(1 pts))
+    x2 = car(nth(2 pts)) y2 = cadr(nth(2 pts))
+    x4 = car(nth(4 pts))
+    h = w / 2.0
+    back = h * (sqrt(2.0) - 1.0)
+    sg = if(y2 >= cadr(nth(1 pts)) then 1.0 else -1.0)
+    ya = y0 - sg * h
+    yb = y2 + sg * h
+    list(
+      list(x0 ya)
+      list((x1 + back) ya)
+      list((x2 + back) (y2 - sg * h))
+      list(x4 (y2 - sg * h))
+      list(x4 yb)
+      list((x2 - back) yb)
+      list(x0 (y0 + sg * (h + back - (x1 - x0)))))))
+
+; 换圈 underpass：只画下层 M4 多边形（端点已含通孔包覆）。
+; 通孔阵列由 lriViaAt 单独放置，宽度随 w 取 1/2/3 个 cut。
+procedure(lriBridgeVia(cv pts w)
+  when(length(pts) == 5
+    librfNoteLayer(librfLyr("underpass"))
+    dbCreatePolygon(cv librfMetalPair(librfLyr("underpass"))
+      lriUnderPolyPts(pts w))))
+
+; 宽端下方的通孔阵列：x 向 1 个 cut，y 向 1/2/3 个 cut。
+procedure(lriViaAt(cv x y vw)
+  let((cut)
+    cut = librfViaPair(librfLyr("via_sp"))
+    librfViaArray(cv cut
+      x - 1.25 y - (vw / 2.0 + 0.5)
+      x + 1.25 y + (vw / 2.0 + 0.5)
+      1.5 1.5 0.5 0.5)))
+
+procedure(lriBuildSym(cv req dout n w s)
+  let((qa qb ta ua va ca tb ub vb cb N R0 Rlast xj i
+      lead angOK x1 y1 x2 y2)
+    qa = lriSymArm(dout n w s 1)
+    qb = lriSymArm(dout n w s -1)
+    ta = nth(0 qa)  ua = nth(1 qa)  va = nth(2 qa)  ca = nth(3 qa)
+    N = nth(4 qa)  R0 = nth(5 qa)  Rlast = nth(6 qa)  xj = nth(7 qa)
+    tb = nth(0 qb)  ub = nth(1 qb)  vb = nth(2 qb)  cb = nth(3 qb)
+    lead = 20.0
+    ; 两臂内端同在下方对称轴：短桥并入 A 臂最后一条顶层路径，
+    ; 避免把同一块连续金属当成两段独立金属做间距检查。
+    ta = append(reverse(cdr(reverse(ta)))
+                list(append(lriLast(ta)
+                            list(list(0.0-xj 0.0-Rlast)))))
+    ; 主线圈：两臂全部顶层金属段（含本臂的顶层换圈段）；
+    ; 换圈 flush 端用 capStart/capEnd=nil 画平头，避免满宽方端帽
+    ; 同时撞另一臂换圈斜线和外圈切角。
+    for(i 0 length(ta)-1
+      lriDrawEx(cv nth(i ta) w car(nth(i ca)) cadr(nth(i ca))))
+    for(i 0 length(tb)-1
+      lriDrawEx(cv nth(i tb) w car(nth(i cb)) cadr(nth(i cb))))
+    ; 换圈 underpass（层与另一臂互补，交叉处不会同层短路）
+    foreach(p append(ua ub)  lriBridgeVia(cv p w))
+    ; 通孔阵列放在外移后的宽端下方，y 向 1/2/3 个 cut
+    foreach(v append(va vb)
+      lriViaAt(cv car(v) cadr(v) caddr(v)))
+    ; 两端口同在顶部，垂直向上引出
+    lriPortDir(cv xj R0 'N w lead "p01")
+    lriPortDir(cv 0.0-xj R0 'N w lead "p02")
+    ; N=1 没有换圈 via，M5.P（顶层金属必须接触 V4 与焊盘层）会报错；
+    ; 在两条端口引线下方各加一块 M4 landing + 一颗 V4。
+    when(N == 1
+      let((mU cut sx vy)
+        mU = librfMetalPair(librfLyr("underpass"))
+        cut = librfViaPair(librfLyr("via_sp"))
+        foreach(sx list(xj 0.0-xj)
+          librfPathSweep(cv mU list(list(sx R0) list(sx R0 + lead)) w)
+          vy = R0 + lead / 2.0
+          librfViaArray(cv cut
+            sx - 1.25  vy - 1.25  sx + 1.25  vy + 1.25
+            1.5 1.5 0.5 0.5))))
+    ; 底部中心结点已并入 A 臂最后一段，不再单独画桥
+    ; 断言
+    lriAssert("sym.N" (mod(N 2) == 1) "每臂半圈数必须为奇数")
+    angOK = t
+    foreach(p append(ta tb)
+      unless(lriAngleOK(p)  angOK = nil))
+    lriAssert("sym.angle" angOK "存在非 0/45/90 段")
+    x1 = 1.0e30  y1 = 1.0e30  x2 = -1.0e30  y2 = -1.0e30
+    foreach(pl append(ta tb)
+      foreach(p pl
+        x1 = min(x1 car(p))  y1 = min(y1 cadr(p))
+        x2 = max(x2 car(p))  y2 = max(y2 cadr(p))))
+    lriAssert("sym.bbox" (abs((x2-x1+w) - dout) < 0.02)
+      sprintf(nil "bbox %.3f != %.3f" (x2-x1+w) dout))
+    lriAssert("sym.bboxY" (abs((y2-y1+w) - dout) < 0.02)
+      sprintf(nil "bboxY %.3f != %.3f" (y2-y1+w) dout))
+    lriReport))
+
+;------------------------------------------------------------------ 入口
+procedure(lriBuildInd(cv req)
+  let((kind ct shape W H w s n corner seam stubLen gap doutDef)
+    kind = librfReqStr(req 'kind "se")
+    ct   = librfReqNum(req 'ct 0)
+    shape = librfReqStr(req 'shape "rect")
+    doutDef = librfReqNum(req 'dout 160.0)
+    W = librfReqNum(req 'W doutDef)
+    H = librfReqNum(req 'H doutDef)
+    w = librfReqNum(req 'w 10.0)
+    s = librfReqNum(req 's 3.2)
+    n = librfReqNum(req 'n 3.0)
+    corner = librfReqNum(req 'corner 0.0)
+    when(shape == "oct" || shape == "octagon"
+      corner = (2.0 - sqrt(2.0)) * min((W-w)/2.0 (H-w)/2.0))
+    seam = librfReqStr(req 'seam "bottom")
+    ; 表单用 S/N/E/W，内核用 bottom/top/left/right；两种写法都接受，
+    ; 否则直接调 API 传 "N"/"E"/"W" 会静默退化成 bottom。
+    cond(
+      ((seam == "S" || seam == "s") seam = "bottom")
+      ((seam == "N" || seam == "n") seam = "top")
+      ((seam == "E" || seam == "e") seam = "right")
+      ((seam == "W" || seam == "w") seam = "left"))
+    stubLen = librfReqNum(req 'stub max(2.0*w 5.0))
+    gap = librfReqNum(req 'gap 8.0)
+    librfDrcParams(w s t (w > 15.0))
+    lriReport = nil
+    cond(
+      ((kind == "sym" || kind == "symmetric" || kind == "wiki")
+        lriBuildSym(cv req doutDef n w s))
+      ((kind == "se")
+        lriBuildSE(cv req W H w s n corner seam stubLen ct))
+      ((kind == "diff")
+        lriBuildDiff(cv req W H w s n corner seam stubLen ct))
+      ((kind == "f8" || kind == "fig8" || kind == "figure8")
+        lriBuildF8(cv req W H w s n corner gap stubLen))
+      (t
+        librfErr(sprintf(nil "lri: 未知 kind=%s (sym/se/diff/f8)" kind))))
+    ; 统一落 marker 标记 + DRC
+    when(librfReqNum(req 'ind_mark 0) != 0
+      librfIndMark(cv librfCvBBox(cv) 1.0))
+    lriReport))
+
+;------------------------------------------------------------------ 自测
+procedure(lriSelfTest2()
+  let((pts bb w s W H n corner ok nf)
+    w = 10.0  s = 2.6  W = 150.0  H = 150.0  n = 2.5
+    nf = 0
+    foreach(corner list(0.0 10.0 25.0 41.0 60.0)
+      pts = lriSpiral(W H w s n corner "bottom" nil)
+      bb = list(1.0e30 1.0e30 -1.0e30 -1.0e30)
+      foreach(p pts
+        bb = list(min(car(bb) car(p)) min(cadr(bb) cadr(p))
+                  max(caddr(bb) car(p)) max(cadddr(bb) cadr(p))))
+      ok = (abs((caddr(bb)-car(bb)+w) - W) < 0.01) &&
+           (abs((cadddr(bb)-cadr(bb)+w) - H) < 0.01) &&
+           lriAngleOK(pts)
+      if(ok then nf = nf + 1
+        else printf("FAIL se c=%.1f bbox=%.3fx%.3f angOK=%L\n"
+               corner (caddr(bb)-car(bb)+w) (cadddr(bb)-cadr(bb)+w)
+               lriAngleOK(pts)))
+    )
+    ; 矩形
+    pts = lriSpiral(300.0 150.0 w s 2.5 20.0 "bottom" nil)
+    bb = list(1.0e30 1.0e30 -1.0e30 -1.0e30)
+    foreach(p pts
+      bb = list(min(car(bb) car(p)) min(cadr(bb) cadr(p))
+                max(caddr(bb) car(p)) max(cadddr(bb) cadr(p))))
+    if(abs((caddr(bb)-car(bb)+w)-300.0) < 0.01 && lriAngleOK(pts)
+      then nf = nf + 1
+      else printf("FAIL rect bbox=%.3f\n" (caddr(bb)-car(bb)+w)))
+    printf("=== lri selftest: %d/6 pass ===\n" nf)
+    nf == 6))
+
+;=============================================================================
+; lriDispatch -- 电感入口：按 kind 选拓扑，未知则回退旧实现
+;=============================================================================
+procedure(lriDispatch(cv req)
+  let((kind)
+    kind = librfReqStr(req 'kind "se")
+    if(kind == "se" || kind == "diff" || kind == "f8"
+       || kind == "fig8" || kind == "figure8" || kind == "sym"
+       || kind == "symmetric" || kind == "wiki"
+      then
+        lriBuildInd(cv req)
+      else
+        librfWarn(sprintf(nil "lri: 未知 kind=%s, 回退旧 librfBuildInd" kind))
+        librfBuildInd(cv req)
+    )
+  )
+)
+
+;------------------------------------------------------------------ 量测工具
+procedure(lriPtsBBoxRaw(pts)
+  let((x1 y1 x2 y2)
+    x1 = 1.0e30  y1 = 1.0e30  x2 = -1.0e30  y2 = -1.0e30
+    foreach(p pts
+      x1 = min(x1 car(p))  y1 = min(y1 cadr(p))
+      x2 = max(x2 car(p))  y2 = max(y2 cadr(p)))
+    list(x1 y1 x2 y2)))
+
+; 平行段最小间距（同走向分组后取相邻差）——用于 DRC 自检
+procedure(lriPitchOf(pts)
+  let((gW gN gE gS best prev cur dx dy lst)
+    gW = nil  gN = nil  gE = nil  gS = nil
+    when(length(pts) >= 2
+      prev = car(pts)
+      foreach(cur cdr(pts)
+        dx = car(cur) - car(prev)
+        dy = cadr(cur) - cadr(prev)
+        cond(((dx < -1.0e-9)  gW = cons(cadr(prev) gW))
+             ((dx > 1.0e-9)   gE = cons(cadr(prev) gE))
+             ((dy > 1.0e-9)   gN = cons(car(prev) gN))
+             ((dy < -1.0e-9)  gS = cons(car(prev) gS)))
+        prev = cur))
+    best = 1.0e30
+    foreach(lst list(gW gN gE gS)
+      when(length(lst) >= 2
+        lst = sort(lst 'lessp)
+        for(i 1 length(lst)-1
+          when(abs(nth(i lst) - nth(i-1 lst)) > 1.0e-6   ; 跳过共线点
+            best = min(best abs(nth(i lst) - nth(i-1 lst)))))))
+    list(t best)))
