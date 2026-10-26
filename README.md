@@ -23,8 +23,8 @@ spectre 迭代仿真 → 实时观察收敛、曲线与变量 → 输出最优�
 | `em_opt.py` | 774 | 电磁优化器：几何搜索 → EMX → 指纹 → 入库 |
 | `librf.il` | 2,336 | SKILL 合并文件：版图引擎 + 求值服务 |
 | `tech_profile.json` | 43 | 工艺配置模板：工艺库、层角色、文字层、DRC 阈值 |
-| `README.md` | 313 | 本手册 |
-| **合计** | **18,791** | 十个部署文件 |
+| `README.md` | 317 | 本手册 |
+| **合计** | **18,795** | 十个部署文件 |
 
 ## 快速开始
 
@@ -310,4 +310,8 @@ stop_reason、最优变量与数值）与部署行数。自行使用时建议同
 | `em_bridge` 与 `layout_em` 同时开 | 两者互斥，关掉其中一个 |
 | EM 设备配置报错 | `f_op`、`tech` 必填；`step_rel` 不得大于 2×tol；缺 `em_bridge.py` 时不静默降级 |
 | selftest 返回码 1 | 只允许上述已知 Windows 失败；其他按 traceback 修复 |
-| gate 报 missing test | 在 `allowed_test_changes.json` 登记或恢复测试，不要删除测试凑数 |
+| 回归测试数量变少 | 别删测试凑覆盖率；确需删除/改名就在自己的基线清单里登记理由 |
+
+## 许可证
+
+MIT License，见 [LICENSE](LICENSE)。
