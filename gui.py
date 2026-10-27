@@ -11,6 +11,7 @@ import threading
 import time
 from optimizer import (  # noqa: E402
     EXAMPLE_CFG,
+    VERSION,
     RealRunner,
     Settings,
     Target,
@@ -1226,6 +1227,10 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
                 continue
             em = rec.get("em_actual")
             if not isinstance(em, dict):
+                # LogWriter stores EM data under record.extra.
+                extra = rec.get("extra")
+                em = extra.get("em_actual") if isinstance(extra, dict) else None
+            if not isinstance(em, dict):
                 continue
             if "status" in em and ("delivered" in em or "actual_fingerprint" in em or "target" in em):
                 queries.append({"name": rec.get("device") or "em", "em_actual": dict(em),
@@ -1645,7 +1650,7 @@ class OptimizerGui:
                      "Helix: A Virtuoso Optimizer\n"
                      "Version %s · MIT\n"
                      "spectre 直连快速引擎 (engine: fast)\n"
-                     "ADE L 状态驱动, 无 Maestro 依赖" % _opt.VERSION)
+                     "ADE L 状态驱动, 无 Maestro 依赖" % VERSION)
     def _build_tabs(self):
         self.notebook = self.ttk.Notebook(self.root)
         self.notebook.pack(side="top", fill="both", expand=True, padx=4, pady=4)
@@ -2539,6 +2544,15 @@ class OptimizerGui:
         self._set_text(self.env_extra_text, chr(10).join(extras))
         for iid in self.var_tree.get_children():
             self.var_tree.delete(iid)
+        # The table only shows four columns; keep scale/integer (and any
+        # future per-variable key) so a GUI round trip does not silently
+        # turn an integer/log variable into a continuous/linear one.
+        self.var_extra = {}
+        for v in cfg.get("variables", []):
+            extra = {k: v[k] for k in v
+                     if k not in ("name", "init", "min", "max")}
+            if extra:
+                self.var_extra[str(v.get("name", ""))] = extra
         for v in cfg.get("variables", []):
             self.var_tree.insert("", "end", values=(v.get("name", ""), v.get("init", ""), v.get("min", ""), v.get("max", "")))
         for iid in self.fix_tree.get_children():
@@ -2603,9 +2617,13 @@ class OptimizerGui:
             if tech is not None:
                 cfg.update(tech.tech_cfg_keys())
             variables = []
+            extra_map = getattr(self, "var_extra", {}) or {}
             for iid in self.var_tree.get_children():
                 vals = self.var_tree.item(iid, "values")
-                variables.append({"name": vals[0], "init": vals[1], "min": vals[2], "max": vals[3]})
+                spec = {"name": vals[0], "init": vals[1],
+                        "min": vals[2], "max": vals[3]}
+                spec.update(extra_map.get(vals[0], {}))
+                variables.append(spec)
             cfg["variables"] = variables
             fixed = []
             opt_names = {v["name"] for v in variables}

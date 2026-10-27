@@ -4,7 +4,7 @@
 
 *Parameter optimization and layout-aware EM for Cadence Virtuoso / spectre.*
 
-`Version 1.1.0 · MIT · Python 3.6+`
+`Version 1.2.0 · MIT · Python 3.6+`
 
 ## Overview
 
@@ -210,6 +210,26 @@ views 模式 `emx`（推荐）/ `skill`（回退）/ `none`。层名不写死在
 `librfSelfTest` 相应增加黄金断言（`din` 闭合式、八角 bbox/中心/无自重叠、
 抽头点落在线中心、三路引出方位互异）。
 
+### 1.2.0 changes
+
+- **SKILL 注入真正生效**：`tech_to_skill` 不再给 `drc.via` / `drc.min_area`
+  的数值加引号，`librfDrcViaNum` / `librfDrcMinArea` 读到数字；via 缺省回落
+  改为示教模板 `0.5/0.5/0.2`。此前 1.1.0 的 via 查表在真实运行中是死代码。
+- **via 描画**：underpass、传输线栅栏、lri 桥接/landing 的 via 阵列统一走
+  `librfDrcViaNum`；两级栈错位量随 `(cut+spacing)/2` 推导。
+- **DRC**：阈值补 `1.0 *` 浮点强转；`librfDrcFigs` 增加 path 线宽检查；
+  单根微带不再被假间距判死；新增 `librfAssertSpiralBox` 生成期外形断言。
+- **`librfPickRoutes`**：三路 M3 引出取 `cadddr`（最小间距）而非 `cadr`
+  （走线点表），修复 balun 生成与 SKILL 自测第 7 组的崩溃。
+- **引擎**：`spec`/`pareto` 按每个目标判定 `met`（违反约束不再报
+  `targets_met`）；续跑校验 `config_sha1`，拒绝沿用别的配置的历史；归档目录
+  不再计入历史；Windows 停止路径不再抛 `AttributeError`；`summary.failures`
+  按真实失败计数，全失败会话报 `sim_failures`。
+- **GUI**：修复「关于」的 `NameError`、EM 页读不到 `extra.em_actual`、变量
+  `scale`/`integer` 在打开/另存时丢失。
+- `librfSelfTest()` 在 IC618 实机 24 PASS / 0 FAIL（新增八角/方形孔径、via
+  规则、DRC 阈值三组断言）。
+
 ### EMX simulation
 
 EM 仿真子页提供 cell、GDS、频率与 EMX 精度设置（edge-width、3d、sidewalls、
@@ -280,7 +300,8 @@ delivered / grid / distance。`grid_key` 只是库索引，交付以 `delivered`
 `proc`、`layers`（角色 → 层名，默认 `spiral=M5`、`underpass=M4`、
 `route/ground=M3`、`via_sp=V4`、`via_un=V3`、`marker=MARKER`）、`text`（金属 →
 文字层，缺省 `<层名>TXT`）、`drc`（`min_w` / `max_w` / `min_s` / `min_area` /
-`via` 参数级自检阈值，不是 sign-off）。
+`via` 参数级自检阈值；其中 `drc.via` 同时驱动 SKILL 的 via 描画尺寸，
+不是 sign-off）。
 
 工艺页用 `build_tech` 构建工艺对象、用 `require_tech_ready` 在出图与 EM 前预检。
 门禁是**工艺无关**的：只按 `layers` 的角色映射核对 layermap 中是否存在对应层、
@@ -332,12 +353,14 @@ cell 拒绝重画。
 
 ## Testing
 
-当前测试规模：`optimizer.py --selftest` 73 个用例；`librf_opt.py --selftest`
-102 ok / 1 fail；`em_opt.py --selftest` 3 组 mock 场景；`--gui-smoke` 跑 3 轮
+当前测试规模：`optimizer.py --selftest` 82 个用例；`librf_opt.py --selftest`
+106 ok / 0 fail；`em_opt.py --selftest` 3 组 mock 场景；`--gui-smoke` 跑 3 轮
 mock 并检查进度、仿真设置与 EM 融合页；`proc_cross_section` 自带 31 个 unittest。
+`librf.il` 另带 `librfSelfTest()`（SKILL 侧黄金断言，需在 Virtuoso 内执行；
+1.2.0 实测 24 PASS / 0 FAIL），不计入上述 Python 用例数。
 
-已知 Windows 失败两项（其余用例必须全绿）：`TestToolDiscovery.test_find_prog_env_override`
-（selftest，rc=1 属预期）与 `run_cmd 中文输出不崩`（librf_opt selftest）。
+Windows 上两项历史失败（`test_find_prog_env_override`、`run_cmd 中文输出不崩`）
+已改为跨平台写法，Windows 也应全绿。
 
 ## Troubleshooting
 
@@ -357,7 +380,7 @@ mock 并检查进度、仿真设置与 EM 融合页；`proc_cross_section` 自�
 | EMX 卡住或报锁 | 关闭 Virtuoso 中打开的 cellview；检查 `*.cdslck*` |
 | `em_bridge` 与 `layout_em` 同时开 | 两者互斥，关掉其中一个 |
 | EM 设备配置报错 | `f_op`、`tech` 必填；`step_rel` 不得大于 2×tol；缺 `em_bridge.py` 时不静默降级 |
-| selftest 返回码 1 | 只允许上述已知 Windows 失败；其他按 traceback 修复 |
+| selftest 返回码 1 | 已无已知失败；按 traceback 修复到全绿 |
 
 ## License
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Helix: A Virtuoso Optimizer.'
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 import argparse
 import csv
 import glob
@@ -792,12 +792,16 @@ def evaluate_roles(targets, curves, mode="scalar"):
     errors = {}
     if mode == "scalar":
         total = 0.0
+        met = True
         for i, t in enumerate(targets):
             e = _safe_error(t, curves)
+            if e > 0.0:
+                met = False
             clamped = max(e, 0.0)
             errors[_key_of(t, i)] = clamped
             total += clamped * _weight_of(t)
-        return {"total": float(total), "F": [], "G": [], "errors": errors}
+        return {"total": float(total), "F": [], "G": [], "errors": errors,
+                "met": met}
     F, G = [], []
     obj_vals = []
     for i, t in enumerate(targets):
@@ -810,9 +814,14 @@ def evaluate_roles(targets, curves, mode="scalar"):
         else:
             # constraint and error roles both act as constraints
             G.append(e)
+    # "met" is a property of every target, not of the scalarized total:
+    # in spec/pareto the total only sums the objectives, so a violated
+    # constraint must not read as targets_met.
+    met = all(e <= 0.0 for e in errors.values())
     if mode == "pareto":
         total = sum(e * w for e, w in obj_vals) if obj_vals else 0.0
-        return {"total": float(total), "F": F, "G": G, "errors": errors}
+        return {"total": float(total), "F": F, "G": G, "errors": errors,
+                "met": met}
     # mode == "spec"
     if obj_vals:
         total = sum(e * w for e, w in obj_vals)
@@ -820,7 +829,8 @@ def evaluate_roles(targets, curves, mode="scalar"):
         worst = max([0.0] + G) if G else 0.0
         F = [worst]
         total = worst
-    return {"total": float(total), "F": F, "G": G, "errors": errors}
+    return {"total": float(total), "F": F, "G": G, "errors": errors,
+            "met": met}
 # ===== Engine: failure classification and penalties =====
 # Outcomes map to INFRA (tooling, retry free), DNC (simulator refused,
 # penalize) or TIMEOUT (budget blow).
@@ -1573,10 +1583,13 @@ class RealRunner:
             return
         pgid = None
         try:
-            pgid = os.getpgid(proc.pid)
+            # Windows has no process groups/SIGKILL; fall back to the
+            # portable terminate()/kill() calls below.
+            if hasattr(os, "getpgid"):
+                pgid = os.getpgid(proc.pid)
         except OSError:
             pass
-        sig = signal.SIGKILL if force else signal.SIGTERM
+        sig = getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
         try:
             if pgid is not None:
                 os.killpg(pgid, sig)
@@ -1894,6 +1907,86 @@ def circuit_id(cfg):
     if not cid:
         cid = str(cfg.get("name") or "").strip()
     return _safe_segment(cid)
+
+def _fp_number(value):
+    'Normalize a number-ish config value for the resume fingerprint.'
+    try:
+        return round(float(parse_eng(value)), 12)
+    except Exception:
+        return str(value)
+
+def _fp_target(spec):
+    'Identity view of one target, tolerant of "6" vs 6 round trips.'
+    if not isinstance(spec, dict):
+        return str(spec)
+    out = dict(spec)
+    for key in ("goal", "goal2", "tol", "weight", "freq"):
+        if key in out:
+            out[key] = _fp_number(out[key])
+    if isinstance(out.get("band"), list):
+        out["band"] = [_fp_number(x) for x in out["band"]]
+    limit = out.get("limit")
+    if isinstance(limit, dict):
+        out["limit"] = {
+            k: ([_fp_number(x) for x in v] if isinstance(v, list) else v)
+            for k, v in limit.items()}
+    return out
+
+def config_fingerprint(cfg):
+    """Identity hash of one run; resume may only continue the same job.
+
+    Settings users legitimately change between sessions (max_iter,
+    patience, seed, improve_rel, strategy) are deliberately excluded.
+    """
+    cfg = cfg or {}
+    settings = cfg.get("settings") or {}
+    variables = []
+    for v in cfg.get("variables") or []:
+        if not isinstance(v, dict):
+            continue
+        variables.append({
+            "name": str(v.get("name") or ""),
+            "init": _fp_number(v.get("init")),
+            "min": _fp_number(v.get("min")),
+            "max": _fp_number(v.get("max")),
+            "scale": str(v.get("scale") or ""),
+            "integer": bool(v.get("integer")),
+        })
+    fixed = [{"name": str(v.get("name") or ""),
+              "value": _fp_number(v.get("value"))}
+             for v in (cfg.get("fixed_variables") or [])
+             if isinstance(v, dict)]
+    def _abs(key):
+        value = cfg.get(key)
+        return (os.path.abspath(os.path.expanduser(str(value)))
+                if value else "")
+    payload = {
+        "circuit": circuit_id(cfg),
+        "library": str(cfg.get("library") or ""),
+        "cell": str(cfg.get("cell") or ""),
+        "view": str(cfg.get("view") or ""),
+        "state": str(cfg.get("state") or ""),
+        "state_dir": _abs("state_dir"),
+        "netlist": _abs("netlist"),
+        "analyses": cfg.get("analyses"),
+        "variables": variables,
+        "fixed_variables": fixed,
+        "targets": [_fp_target(t) for t in (cfg.get("targets") or [])],
+        "mode": str(settings.get("mode") or "scalar"),
+        "em_bridge": cfg.get("em_bridge"),
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                      default=str).encode("utf-8")
+    return hashlib.sha1(blob).hexdigest()
+
+def _read_json_dict(path):
+    'Read a JSON object; return {} when missing or broken.'
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 def make_run_dir(root, circuit):
     'Create <root>/<circuit>/run_<timestamp> and return its path.'
@@ -2570,11 +2663,15 @@ class Best:
         self.vars = None
         self.errors = None
 
-    def update(self, total, values, errors):
-        """Store a new strict best. Return True when it is a new best."""
+    def update(self, total, values, errors, force=False):
+        """Store a new strict best. Return True when it is a new best.
+
+        force=True replaces an infeasible best with a feasible point whose
+        scalarized total happens to be larger (spec/pareto modes).
+        """
         if not math.isfinite(total):
             return False
-        if self.total is not None and total >= self.total:
+        if not force and self.total is not None and total >= self.total:
             return False
         self.total = total
         self.vars = dict(values)
@@ -2688,8 +2785,24 @@ class Optimization:
         # resume=False: a brand new run. No old records, no old best
         # point, iteration index of history.csv and record.json = 0.
         history = load_previous(self.out_dir) if resume is not False else []
+        # A resume may only continue the same job. Without this guard a
+        # folder left by another circuit/targets is silently adopted and
+        # its best point is reported as this run's result.
+        fingerprint = config_fingerprint(cfg)
+        if history:
+            old_fp = _read_json_dict(
+                os.path.join(self.out_dir, "run_meta.json")).get("config_sha1")
+            if old_fp and old_fp != fingerprint:
+                raise ValueError(
+                    "续跑目录 %s 属于另一份配置（circuit/targets/variables/"
+                    "netlist 已变）；请换一个 output_dir，或设 "
+                    "\"resume\": false 新开一轮。" % self.out_dir)
+            if not old_fp:
+                print("resume: 旧目录没有配置指纹，按旧行为继续。",
+                      file=sys.stderr)
         self.logger = RunLogger(self.out_dir, fresh=(resume is False),
                                 meta={"circuit": circuit_id(cfg),
+                                      "config_sha1": fingerprint,
                                       "name": str(cfg.get("name") or ""),
                                       "created": time.strftime(
                                           "%Y-%m-%d %H:%M:%S"),
@@ -2913,8 +3026,8 @@ class Optimization:
                                              self.logger.iter_dir(it))
                     if result.status == "ok":
                         fails = 0
-                        total = self._log_success(it, values, result)
-                        if total <= 0.0:
+                        total, met = self._log_success(it, values, result)
+                        if met:
                             return "targets_met"
                         reason = self._stall_action(it)
                         if reason:
@@ -2929,14 +3042,22 @@ class Optimization:
                     return "sim_failures"
                 continue
             fails = 0
-            total = self._log_success(it, values, result)
+            total, met = self._log_success(it, values, result)
             if it % 10 == 9 or it == self.max_iter - 1:
                 self._write_snapshot()
-            if total <= 0.0:
+            if met:
                 return "targets_met"
             reason = self._stall_action(it)
             if reason:
                 return reason
+        # All iterations of this session failed (bad netlist/state dir,
+        # missing simulator, ...): max_iterations would read as a normal
+        # completion. Report the failure instead.
+        if self.logger.iterations:
+            statuses = [str(rec.get("status") or "")
+                        for rec in self.logger.iterations]
+            if all(st and st != "ok" for st in statuses):
+                return "sim_failures"
         return "max_iterations"
     def _emit(self, event):
         'Send one progress event to the host callback.'
@@ -3052,9 +3173,10 @@ class Optimization:
         except Exception as exc:
             print(f"journal write failed: {exc}")
     def _log_success(self, it, values, result):
-        """Log one good simulation. Learn from it. Return total error."""
+        """Log one good simulation. Return (total error, targets met)."""
         res = evaluate_roles(self.targets, result.curves, self.settings.mode)
-        objective = {"total": res["total"], "errors": res["errors"]}
+        objective = {"total": res["total"], "errors": res["errors"],
+                     "met": bool(res.get("met", res["total"] <= 0.0))}
         f_vec, g_vec = res["F"], res["G"]
         if self.settings.mode == "scalar":
             f_vec, g_vec = None, None
@@ -3071,19 +3193,39 @@ class Optimization:
         print(f"[{it:03d}] total={total:.6g} 耗时{result.wall:.2f}s "
               f"({det}) vars=" +
               " ".join(f"{n}={format_eng(values[n])}" for n in self.names))
-        self._track_best(total, values, objective)
+        self._track_best(total, values, objective, objective["met"])
         self._emit({"type": "iteration", "index": it, "status": "ok",
                     "total": total, "vars": values,
                     "errors": objective["errors"],
+                    "met": objective["met"],
                     "wall": result.wall, "timing": dict(result.timing or {}),
                     "best_total": self.best.total,
                     "best_vars": (dict(self.best.vars)
                                   if self.best.vars else None)})
-        return total
-    def _track_best(self, total, values, objective):
-        """Update the best point and the stall counter."""
+        return total, objective["met"]
+    def _track_best(self, total, values, objective, met=True):
+        """Update the best point and the stall counter.
+
+        A feasible point beats an infeasible one even when the scalarized
+        total says otherwise; previously best could be an infeasible point
+        whose objective-only total looked smaller.
+        """
         best = self.best.total
-        if best is not None and total >= best * (1.0 - self.settings.improve_rel):
+        if best is None:
+            self.best.update(total, values, objective)
+            self.no_improve = 0
+            return
+        best_met = True
+        if isinstance(self.best.errors, dict):
+            best_met = bool(self.best.errors.get("met", True))
+        if met and not best_met:
+            self.best.update(total, values, objective, force=True)
+            self.no_improve = 0
+            return
+        if best_met and not met:
+            self.no_improve += 1
+            return
+        if total >= best * (1.0 - self.settings.improve_rel):
             self.no_improve += 1
             return
         self.best.update(total, values, objective)
@@ -3142,6 +3284,8 @@ class Optimization:
             "best_variables": _fmt_vars(self.best.vars) if self.best.vars else None,
             "best_variables_raw": self.best.vars,
             "best_errors": self.best.errors,
+            "best_met": ((self.best.errors or {}).get("met")
+                         if isinstance(self.best.errors, dict) else None),
             "iterations": len(self.logger.iterations),
             "restarts": self.restarts,
         }
@@ -3163,7 +3307,8 @@ class Optimization:
                  "init_vars": self.start_values,
                  "bounds": dict(zip(self.names, self.bounds)),
                  "restarts": self.restarts,
-                 "evals": len(hist_vals)},
+                 "evals": len(hist_vals),
+                 "failures": self._failure_counts()},
                 self.best.vars or {},
                 extra={"strategy": self.settings.strategy,
                        "mode": self.settings.mode,
@@ -3171,6 +3316,15 @@ class Optimization:
         except Exception as exc:
             rep["summary_error"] = str(exc)
         return rep
+    def _failure_counts(self):
+        """Count non-ok iteration statuses, e.g. {"fail": 3, "timeout": 1}."""
+        counts = {}
+        for rec in self.logger.iterations:
+            status = str(rec.get("status") or "")
+            if status and status != "ok":
+                kind = status.split(":", 1)[0].strip() or "fail"
+                counts[kind] = counts.get(kind, 0) + 1
+        return counts
 
 def load_config(path):
     with open(path, encoding="utf-8") as f:
@@ -3209,7 +3363,13 @@ def _iter_order(path):
 def load_previous(out_dir):
     """Load records of earlier sessions. Return list of records."""
     records = []
-    paths = glob.glob(os.path.join(out_dir, "iter_*", "record.json"))
+    paths = []
+    for path in glob.glob(os.path.join(out_dir, "iter_*", "record.json")):
+        # _archive_aside renames old rounds to iter_0000.old-<stamp>;
+        # those are not part of the current history.
+        name = os.path.basename(os.path.dirname(path))
+        if name.startswith("iter_") and name[5:].isdigit():
+            paths.append(path)
     # Numeric order. Text order puts iter_10000 before iter_9999.
     paths.sort(key=_iter_order)
     for path in paths:

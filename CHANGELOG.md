@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.2.0 — 2026-10-28
+
+版图引擎与优化引擎的审查修复：SKILL 侧让 `tech_profile.json` 的 DRC/via 真正
+生效，修掉 balun 三路引出的必崩点；Python 侧修正 spec/pareto 的达标语义、续跑
+配置校验与 Windows 停止路径；GUI 修掉三处数据/显示缺陷。
+
+### 版图 / SKILL
+
+- **via / min_area 注入是死代码（1.1.0 起）**：`tech_to_skill` 的嵌套子表用
+  `_alist` 渲染，把 `drc.via` / `drc.min_area` 的数值也加了引号（`list("cut" "1.5")`）。
+  SKILL 侧 `numberp` 判假，`librfDrcViaNum` / `librfDrcMinArea` 永远走回落值。
+  改用 `_skill_val`：字符串才加引号，数值/布尔按字面量输出。via 缺省回落改为
+  示教模板 `0.5/0.5/0.2`，与 Python 侧 `SYM_VIA_*` 一致。
+- **via 描画尺寸**：underpass、传输线栅栏、lri 桥接/landing 共 7 个函数 21 个
+  调用点改由 `librfDrcViaNum` 读 `drc.via`；两级栈错位量随 `(cut+spacing)/2`
+  推导。
+- **`librfPickRoutes` 必崩**：`librfRoutes3` 返回 `(rCT rP02 rP04 minGap)`，
+  旧代码 `m = cadr(r)` 取到 p02 走线点表，`min(点表, 浮点)` 直接抛错——balun
+  变压器与 `librfSelfTest` 第 7 组都无法执行。改取 `cadddr(r)`。
+- **微带被自己的 DRC 判死**：`librfBuildTl` 对单根微带传假 `s=2.5`，`w>15` 时
+  `wideSp` 分支报间距错；单根线无邻线，改为不参与间距判定。
+- **DRC 补强**：`librfDrcNum` / `librfDrcMinArea` / `librfDrcViaNum` 返回值补
+  `1.0 *` 强转；`librfDrcFigs` 增加 path 线宽检查（`fig->width`，errset 保护）；
+  新增 `librfAssertSpiralBox`，电感与变压器生成后断言中心线 bbox =
+  `(dout-w+ex) × (dout-w+ey)`。
+- **整数进 `%.2f` 崩溃**：匝数 `n` 与 `fig->width` 进 `sprintf` 前统一强转。
+- `librfSelfTest()` 新增三组断言（八角/方形孔径 80/55/80、via 规则注入与缺省、
+  DRC 阈值注入与缺省）；IC618 实机 24 PASS / 0 FAIL。
+
+### 引擎
+
+- **spec/pareto 假达标**：`evaluate_roles` 新增逐目标 `met`。这两个模式的
+  `total` 只汇总 objective，约束违反不进 total；pareto 无 objective 时 total
+  恒 0，旧代码第 0 轮必报 `targets_met`。`run()` 改按 `met` 停止，`_track_best`
+  让可行点优先，报告新增 `best_met`。
+- **续跑配置校验**：`run_meta.json` 写入 `config_sha1`（circuit / variables /
+  targets / mode / netlist / state / em_bridge）。续跑指纹不符直接报错，不再
+  把别的 run 的最优解当本轮结果；旧目录无指纹时告警后按旧行为继续。
+- **归档目录**：`load_previous` 只收 `iter_<digits>/record.json`，不再把
+  `iter_*.old-*` 计入历史。
+- **Windows 停止路径**：`_kill_group` 在无 `os.getpgid` / 无 `SIGKILL` 的平台
+  回落到 `terminate()`/`kill()`。
+- `summary.failures` 改为真实失败计数；整轮全失败返回 `sim_failures`。
+
+### GUI
+
+- 「帮助 → 关于」引用未定义的 `_opt`，点击必 `NameError`；改为导入 `VERSION`。
+- EM 融合页读 `record["em_actual"]`，实际写入在 `record["extra"]["em_actual"]`，
+  「当前查询」恒为空；补 `extra` 回退。
+- 变量表的 `scale` / `integer` 在打开→开始/另存时丢失；载入时保存额外键，
+  回写时合并，CLI 与 GUI 搜索空间一致。
+
+### 自测
+
+`optimizer.py --selftest` 82（新增 spec/pareto 停止、续跑指纹、归档过滤）；
+`librf_opt.py --selftest` 106 ok / 0 fail（新增 via/min_area 数值注入断言）；
+`proc_cross_section` 31；`em_opt.py --selftest` PASS；`--gui-smoke` OK；mock CLI
+6 轮。Windows 两项历史失败改为跨平台写法，不再计入已知失败。
+
+### 脱敏
+
+仍为通用示教工艺：层角色 M1–M5/AP、V1–V4/PA、MARKER 199/0；仓库不含真实
+工艺名、层号或绝对路径。测试用 techlib 名改为 `DEMO65`。
+
 ## 1.1.0 — 2026-10-27
 
 版图 PCell 几何修正，全部落在 `librf.il`。共同特征是"画出来的版图与参数/注释

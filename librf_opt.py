@@ -925,13 +925,27 @@ def tech_text(prof, metal):
 def tech_drc(prof):
     """DRC 阈值 dict（与内建默认合并后）。"""
     return (prof or {}).get("drc") or DEFAULT_TECH["drc"]
+def _skill_val(v):
+    """Python 值 -> SKILL 字面量：字符串加引号，数值/布尔不加引号。
+
+    旧实现把嵌套子表(drc.via/min_area)的值也加了引号，SKILL 侧
+    numberp 判假后一直走回落值，profile 的 via/min_area 实际从未生效。
+    """
+    if isinstance(v, bool):
+        return "t" if v else "nil"
+    if v is None:
+        return "nil"
+    if isinstance(v, str):
+        return '"%s"' % v.replace("\\", "\\\\").replace('"', '\\"')
+    return str(v)
+
 def tech_to_skill(prof):
     """把 profile 的 layers/text/drc 摊平成 SKILL driver.il 的注入块。"""
     lay = (prof or {}).get("layers") or {}
     txt = (prof or {}).get("text") or {}
     drc = (prof or {}).get("drc") or {}
     def _alist(d):
-        return "list(" + " ".join( 'list("%s" "%s")' % (k, v) for k, v in sorted(d.items())) + ")"
+        return "list(" + " ".join( 'list("%s" %s)' % (k, _skill_val(v)) for k, v in sorted(d.items())) + ")"
     def _drc_alist(d):
         parts = []
         for k in sorted(d.keys()):
@@ -939,7 +953,7 @@ def tech_to_skill(prof):
             if isinstance(v, dict):
                 parts.append('list("%s" %s)' % (k, _alist(v)))
             else:
-                parts.append('list("%s" %s)' % (k, v))
+                parts.append('list("%s" %s)' % (k, _skill_val(v)))
         return "list(" + " ".join(parts) + ")"
     techlib = (prof or {}).get("techlib") or ""
     return ("; librf_opt 注入的工艺配置（勿手改）\n"
@@ -4771,12 +4785,12 @@ def _selftest():
               and rcjk["errs"] and "M5" in rcjk["errs"][0], str(rcjk["errs"]))
     except UnicodeDecodeError as e:
         check("skill result 中文不崩", False, str(e))
-    sh = os.path.join(tmp, "cjk.sh")
-    with _native_open(sh, "wb") as f:
-        f.write(b"#!/bin/sh\necho 'ERR \xe7\x94\xbb\xe7\x9f\xa9\xe5\xbd\xa2'\n")
-    os.chmod(sh, 0o755)
     try:
-        ro = run_cmd([sh])
+        # Cross-platform: a shell script would need /bin/sh (absent on
+        # Windows), so let this interpreter print the CJK text instead.
+        ro = run_cmd([sys.executable, "-c",
+                      "import sys;sys.stdout.buffer.write("
+                      "'ERR \\u753b\\u77e9\\u5f62\\n'.encode('utf-8'))"])
         check("run_cmd 中文输出不崩", ro["ok"] and "画" in ro["stdout"], repr(ro.get("stdout", "")))
     except UnicodeDecodeError as e:
         check("run_cmd 中文输出不崩", False, str(e))
@@ -4801,13 +4815,13 @@ def _selftest():
         fh.write("layermap placeholder\n")
     with open(_pr_real, "w") as fh:
         fh.write("# proc placeholder\n")
-    atomic_write_json(tp, { "techlib": "TSMC65",
+    atomic_write_json(tp, { "techlib": "DEMO65",
         "layers": {"spiral": "M6", "underpass": "M5", "route": "M4",
                    "ground": "M4", "via_sp": "V5", "via_un": "V4", "marker": "MARKER"},
         "text": {"M6": "M6TXT"}, "drc": {"min_w": 0.2, "min_area": {"M6": 0.1}},
         "layermap": _lm_real, "proc": _pr_real})
     d1 = load_tech_profile(path=tp, use_cache=False)
-    check("tech 自定义 techlib", d1["techlib"] == "TSMC65")
+    check("tech 自定义 techlib", d1["techlib"] == "DEMO65")
     check("tech 自定义 spiral=M6", tech_layer(d1, "spiral") == "M6")
     check("tech 自定义 via_sp=V5", tech_layer(d1, "via_sp") == "V5")
     check("tech 自定义文字层", tech_text(d1, "M6") == "M6TXT")
@@ -4819,18 +4833,24 @@ def _selftest():
     sk = tech_to_skill(d1)
     check("skill 注入含 librfTech", "librfTech = list(" in sk)
     check("skill 注入 spiral", 'list("spiral" "M6")' in sk)
-    check("skill 注入 techlib", 'librfTechLib = "TSMC65"' in sk)
+    check("skill 注入 techlib", 'librfTechLib = "DEMO65"' in sk)
     check("skill 注入 DRC", "librfDrc = list(" in sk)
+    # Nested drc tables must inject numbers, not strings: SKILL's
+    # numberp() guards in librfDrcViaNum/librfDrcMinArea would otherwise
+    # reject them and silently use the built-in fallbacks.
+    check("skill 注入 DRC 数值不加引号", 'list("min_w" 0.2)' in sk, sk)
+    check("skill 注入 min_area 数值不加引号", 'list("M6" 0.1)' in sk, sk)
+    check("skill 注入 via 数值不加引号", 'list("cut" 0.5)' in sk, sk)
     d2 = gen_driver_il({"type": "ind", "cell": "c_tech", "n": 2.5, "w": 10,
                         "s": 2.5, "dout": 100, "result": os.path.join(tmp, "r.txt"),
                         "libdir": os.path.join(tmp, "L")}, tech=d1)
     check("driver 含 librf.il", "librf.il" in d2)
     check("driver 含工艺注入", 'list("spiral" "M6")' in d2)
-    check("driver 含 techLibName", "TSMC65" in d2)
+    check("driver 含 techLibName", "DEMO65" in d2)
     t3 = find_tools(tech=d1, work=tmp)
     check("find_tools layermap=profile", (t3["layermap"]["path"] == _lm_real), str(t3["layermap"]))
     check("find_tools proc=profile", (t3["proc"]["path"] == _pr_real), str(t3["proc"]))
-    check("find_tools techlib=profile", t3["techlib"]["path"] == "TSMC65")
+    check("find_tools techlib=profile", t3["techlib"]["path"] == "DEMO65")
     # cds.lib 必须追加，不能像旧版那样 open(...,"w") 整个截断
     wdir = os.path.join(tmp, "ws_protect")
     os.makedirs(wdir)

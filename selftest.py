@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Helix 1.1.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Helix 1.2.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
-code is the failure count. Known Windows failure: test_find_prog_env_override.
+code is the failure count. Windows failures: none.
 """
 from __future__ import print_function
 
@@ -26,9 +26,10 @@ from optimizer import (  # noqa: F401
     RunLogger, Settings, Target, Transform, build_optimizer, circuit_id,
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
-    parse_eng, parse_netlist_parameters, read_manifest, reconstruct_input_scs,
-    resolve_prog, resolve_run_dir, rewrite_netlist_parameters,
-    run_optimization, stop_all_runners, suggest_bounds, tool_report,
+    config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
+    read_manifest, reconstruct_input_scs, resolve_prog, resolve_run_dir,
+    rewrite_netlist_parameters, run_optimization, stop_all_runners,
+    suggest_bounds, tool_report,
 )
 from optimizer import (  # private helpers referenced by the suite
     _TOOL_CACHE, _archive_aside, _log_mode_of, _native_open, _read_text,
@@ -263,6 +264,20 @@ class TestPipeline(unittest.TestCase):
         report = run_optimization(cfg, mock=False)
         self.assertEqual(report["stop_reason"], "sim_failures")
         self.assertEqual(report["iterations"], 3)
+    def test_all_failed_iterations_report_sim_failures(self):
+        # A bad netlist fails every iteration. With fail_limit above
+        # max_iter the loop simply runs out of budget; that must not be
+        # reported as a normal max_iterations completion.
+        work = tempfile.mkdtemp()
+        cfg = mock_config(os.path.join(work, "out"), 2)
+        cfg["netlist"] = os.path.join(work, "missing.scs")
+        cfg["state_dir"] = os.path.join(work, "missing_state")
+        cfg["settings"]["fail_limit"] = 5
+        report = run_optimization(cfg, mock=False)
+        self.assertEqual(report["stop_reason"], "sim_failures")
+        self.assertEqual(report["iterations"], 2)
+        self.assertIsNone(report["best_total_error"])
+        self.assertEqual(report["summary"]["failures"], {"fail": 2})
     def test_stall_stops_the_run(self):
         # A goal the mock model can not meet forces a stall stop.
         work = tempfile.mkdtemp()
@@ -274,6 +289,92 @@ class TestPipeline(unittest.TestCase):
         report = run_optimization(cfg, mock=True)
         self.assertIn(report["stop_reason"], ("no_feasible_solution", "no_improvement"))
         self.assertLess(report["iterations"], 200)
+
+
+class TestStopSemantics(unittest.TestCase):
+    """targets_met must cover every target, not only the scalarized total."""
+
+    def _cfg(self, out, mode, objective):
+        cfg = mock_config(out, 3)
+        cfg["settings"]["mode"] = mode
+        cfg["targets"] = [{
+            "output": "S21 dB20", "metric": "band_min",
+            "band": ["24G", "44G"], "op": ">=", "goal": 1000,
+            "tol": 1, "role": "constraint"}]
+        if objective:
+            cfg["targets"].insert(0, {
+                "output": "S21 dB20", "metric": "band_min",
+                "band": ["24G", "44G"], "op": ">=", "goal": -1000,
+                "tol": 1, "role": "objective"})
+        return cfg
+
+    def test_spec_violated_constraint_not_targets_met(self):
+        work = tempfile.mkdtemp()
+        report = run_optimization(
+            self._cfg(os.path.join(work, "out"), "spec", True), mock=True)
+        self.assertNotEqual(report["stop_reason"], "targets_met")
+        self.assertEqual(report["iterations"], 3)
+        self.assertFalse(report["best_met"])
+
+    def test_pareto_violated_constraint_not_targets_met(self):
+        work = tempfile.mkdtemp()
+        report = run_optimization(
+            self._cfg(os.path.join(work, "out"), "pareto", True), mock=True)
+        self.assertNotEqual(report["stop_reason"], "targets_met")
+        self.assertEqual(report["iterations"], 3)
+
+    def test_pareto_without_objective_does_not_auto_pass(self):
+        # total is 0.0 when pareto has no objective; that used to make
+        # every first iteration look like a success.
+        work = tempfile.mkdtemp()
+        report = run_optimization(
+            self._cfg(os.path.join(work, "out"), "pareto", False), mock=True)
+        self.assertNotEqual(report["stop_reason"], "targets_met")
+        self.assertEqual(report["iterations"], 3)
+
+    def test_spec_all_satisfied_still_stops(self):
+        work = tempfile.mkdtemp()
+        cfg = self._cfg(os.path.join(work, "out"), "spec", True)
+        for target in cfg["targets"]:
+            target["goal"] = -1000
+        report = run_optimization(cfg, mock=True)
+        self.assertEqual(report["stop_reason"], "targets_met")
+        self.assertEqual(report["iterations"], 1)
+
+
+class TestResumeIdentity(unittest.TestCase):
+    """A resume must not adopt another config's history."""
+
+    def test_settings_change_still_resumes(self):
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        run_optimization(mock_config(out, 4), mock=True)
+        report = run_optimization(mock_config(out, 7), mock=True)
+        self.assertEqual(report["iterations"], 3)
+
+    def test_changed_targets_cannot_resume(self):
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        run_optimization(mock_config(out, 4), mock=True)
+        changed = mock_config(out, 4)
+        changed["targets"][0]["goal"] = 50
+        with self.assertRaises(ValueError):
+            run_optimization(changed, mock=True)
+
+    def test_fingerprint_ignores_run_settings(self):
+        cfg = mock_config("x", 1)
+        same = mock_config("x", 1)
+        same["settings"]["max_iter"] = 99
+        same["settings"]["seed"] = 7
+        self.assertEqual(config_fingerprint(cfg), config_fingerprint(same))
+
+    def test_archived_dirs_are_not_history(self):
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        run_optimization(mock_config(out, 1), mock=True, resume=False)
+        os.rename(os.path.join(out, "iter_0000"),
+                  os.path.join(out, "iter_0000.old-20260101"))
+        self.assertEqual(load_previous(out), [])
 
 
 class TestFixes(unittest.TestCase):
@@ -582,11 +683,16 @@ class TestV06Hooks(unittest.TestCase):
 class TestToolDiscovery(unittest.TestCase):
     """Tool paths probed at run time; no absolute paths in the config."""
     def test_find_prog_env_override(self):
-        os.environ["OPT_TEST_PROG"] = "/bin/sh"
+        # Cross-platform: /bin/sh does not exist on Windows. The env
+        # override contract is what is under test, not that shell path.
+        exe = sys.executable
+        name = os.path.basename(exe)
+        os.environ["OPT_TEST_PROG"] = exe
         try:
-            path, src = find_prog("sh", ("OPT_TEST_PROG",))
+            path, src = find_prog(name, ("OPT_TEST_PROG",))
             self.assertEqual(src, "env")
-            self.assertTrue(path.endswith("sh"))
+            self.assertEqual(os.path.normcase(os.path.abspath(path)),
+                             os.path.normcase(os.path.abspath(exe)))
         finally:
             del os.environ["OPT_TEST_PROG"]
     def test_find_prog_fallbacks(self):
@@ -1284,6 +1390,7 @@ class TestS3EmBridge(unittest.TestCase):
 
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
+    TestStopSemantics, TestResumeIdentity,
     TestFixes, TestCurvesTabRemoved, TestRunDirs, TestHistorySeedV05,
     TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
