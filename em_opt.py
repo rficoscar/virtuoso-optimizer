@@ -770,5 +770,5 @@ def _selftest():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         sys.exit(1 if _selftest() else 0)
-    print("em_opt.py — EmOptimizer (Helix 1.0.0)")
+    print("em_opt.py — EmOptimizer (Helix 1.1.0)")
     print("用法: python em_opt.py --selftest")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Helix: A Virtuoso Optimizer.'
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 import argparse
 import csv
 import glob

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Helix 1.0.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Helix 1.1.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Known Windows failure: test_find_prog_env_override.

@@ -4,7 +4,7 @@
 
 *Parameter optimization and layout-aware EM for Cadence Virtuoso / spectre.*
 
-`Version 1.0.0 · MIT · Python 3.6+`
+`Version 1.1.0 · MIT · Python 3.6+`
 
 ## Overview
 
@@ -193,6 +193,22 @@ v2 修复了三个实际缺陷：差分双臂圈间短路、差分中心桥/抽�
 展开动态几何表单与预设；按钮「仅出图」/「出图 + EM + views」/「渲染截图」；
 views 模式 `emx`（推荐）/ `skill`（回退）/ `none`。层名不写死在代码里，全部
 按 `tech_profile.json` 的角色解析。
+
+### PCell geometry fixes (1.1.0)
+
+`librf.il` 的螺旋/变压器几何逐项自查后修了七处（详见 `CHANGELOG.md`）：
+
+- 八角螺旋每圈内缩量按 8 条边递减（原按 4 条），否则同圈金属自重叠、bbox 失真；
+- 内径闭合式按向上取整的匝数计算，与实画绕线一致；
+- 中心抽头电感与 balun 改用**整螺旋 + 绕线中点抽头**，单层对称半螺旋在几何上
+  不存在（两半拐角逐点重合、包围面积为 0）；
+- 叠层/交指变压器：上绕组内端沿内孔引到中心、从中心穿孔下到下层引出，消除
+  上下绕组重叠；交指次级 `dout` 做半间距偏移，两绕组真正交错；
+- balun 三路下层引出线穷举互异方位、按最小同层间距选优，间距不足时报错；
+- 下穿孔/抽头焊盘与相邻绕组的净空、引出落点相对拉长后轮廓的计算补上断言。
+
+`librfSelfTest` 相应增加黄金断言（`din` 闭合式、八角 bbox/中心/无自重叠、
+抽头点落在线中心、三路引出方位互异）。
 
 ### EMX simulation
 
