@@ -1569,6 +1569,12 @@ class OptimizerGui:
             kw["font"] = self.ui_font
         elif self.mono_font is not None:
             kw["font"] = self.mono_font
+        # CJK 字形的实际高度常等于字体的 linespace，X11 上的 song ti 等
+        # 甚至更紧；不给换行与逻辑行留行距时中文会上下压叠（实测 16px 字
+        # 压 16px 行）。给所有文本区补行距：spacing2 管自动换行，1/3 管段。
+        kw.setdefault("spacing1", 2)
+        kw.setdefault("spacing2", 4)
+        kw.setdefault("spacing3", 2)
         return self.tk.Text(parent, **kw)
     def _scrolled_text(self, parent, **kw):
         box = self._make_text(parent, **kw)

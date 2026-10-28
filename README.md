@@ -4,7 +4,7 @@
 
 *Parameter optimization, netlist generation and EM alignment for Cadence Virtuoso / spectre.*
 
-`Version 1.3.0 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
+`Version 1.3.1 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
 
 把 Virtuoso / spectre 的参数优化、网表生成与 EM 对齐串成一条命令链：
 改原理图或变量 → 自动重生成网表（含 config / 层次设计）→ 直连 spectre 迭代 → 收敛报告。
