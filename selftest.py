@@ -1403,6 +1403,45 @@ class TestV12Modules(unittest.TestCase):
         "X1 n1 n2 ind L1=210p k0=0.55\n"
     )
 
+    def test_max_iter_must_be_positive(self):
+        """settings.max_iter <= 0 is a config error, not 'run nothing quietly'."""
+        with self.assertRaises(ValueError):
+            Settings({"max_iter": 0})
+        with self.assertRaises(ValueError):
+            Settings({"max_iter": -3})
+
+    def test_fixed_and_optimized_variable_conflict(self):
+        """A name in both variables and fixed_variables is rejected."""
+        from optimizer import build_variables
+        cfg = example_config()
+        cfg["fixed_variables"] = [{"name": "L1", "value": "250p"}]
+        with self.assertRaises(ValueError) as ctx:
+            build_variables(cfg)
+        self.assertIn("L1", str(ctx.exception))
+
+    def test_resume_finished_run_keeps_targets_met(self):
+        """Re-running a finished run with no new budget keeps its verdict."""
+        tmp = tempfile.mkdtemp(prefix="v12_resume_")
+        cfg = example_config()
+        cfg["output_dir"] = os.path.join(tmp, "run")
+        # Goals the mock model always meets on the first evaluation.
+        cfg["targets"] = [
+            {"output": "S21 dB20", "metric": "band_min", "band": ["24G", "44G"],
+             "op": ">=", "goal": -100, "tol": 0.5},
+            {"output": "S21 dB20", "metric": "band_flatness", "band": ["24G", "44G"],
+             "op": "<=", "goal": 100, "tol": 0.5},
+        ]
+        cfg["settings"] = {"max_iter": 3, "patience": 100, "seed": 0}
+        first = run_optimization(cfg, mock=True)
+        self.assertEqual(first["stop_reason"], "targets_met")
+        # Budget is already spent: start == max_iter, no new simulation.
+        cfg["settings"]["max_iter"] = 1
+        again = run_optimization(cfg, mock=True)
+        self.assertEqual(again["stop_reason"], "targets_met")
+        self.assertEqual(again["best_variables"], first["best_variables"])
+        self.assertEqual(again["iterations"], 0)
+        self.assertEqual(again["iterations_total"], 1)
+
     def test_coordinate_search_converges(self):
         """Coordinate strategy walks down each axis from x0."""
         import algorithm

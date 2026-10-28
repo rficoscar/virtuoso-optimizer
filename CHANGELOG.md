@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.2 — 2026-10-29
+
+三处状态/校验语义修复，均带回归测试。
+
+- **续跑已达标 run 被改判**：预算已耗尽时续跑，循环一次都不进，直接把
+  `targets_met` 改写成 `max_iterations`、`iterations=0`。现在循环结束后先看恢复出的
+  `best.errors.met`，已达标即返回 `targets_met`；报告新增 `iterations_total`。
+- **`max_iter <= 0` 被静默改成 1**：`Settings` 与 `Optimization` 改为报
+  `ValueError`（`settings.max_iter must be >= 1`）。
+- **固定变量与优化变量重名**：`build_variables` 报
+  `variable is both optimized and fixed: <名>`，不再让固定值静默覆盖搜索变量。
+- 自测 97 用例全绿；实机验证成功 run 续跑保持 `targets_met`、`iterations_total=6`。
+
 ## 1.3.1 — 2026-10-29
 
 只修一处 GUI 可读性缺陷，不改引擎与配置语义。

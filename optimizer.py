@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Helix: A Virtuoso Optimizer.'
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 import argparse
 import csv
 import glob
@@ -2701,7 +2701,12 @@ class Settings:
         return strategy_names()
     def __init__(self, cfg):
         cfg = cfg or {}
-        self.max_iter = max(1, int(cfg.get("max_iter", 100)))
+        try:
+            self.max_iter = int(cfg.get("max_iter", 100))
+        except (TypeError, ValueError):
+            raise ValueError("settings.max_iter must be an integer >= 1")
+        if self.max_iter < 1:
+            raise ValueError("settings.max_iter must be >= 1")
         self.patience = max(1, int(cfg.get("patience", 10)))
         self.improve_rel = float(cfg.get("improve_rel", 0.001))
         self.fail_limit = max(1, int(cfg.get("fail_limit", 5)))
@@ -2848,7 +2853,9 @@ class Optimization:
         self.stop_check = stop_check
         self.settings = Settings(cfg.get("settings", {}))
         self.max_iter = (self.settings.max_iter if max_iter is None
-                         else max(1, int(max_iter)))
+                         else int(max_iter))
+        if self.max_iter < 1:
+            raise ValueError("max_iter must be >= 1")
         self.names, x0, self.bounds = build_variables(cfg)
         self.targets = [Target(t) for t in cfg["targets"]]
         # S3: em_bridge 段解析；None = 关闭/缺段（隔离铁律）
@@ -3127,6 +3134,12 @@ class Optimization:
             reason = self._stall_action(it)
             if reason:
                 return reason
+        # A resume with no new budget must not rewrite a finished run's
+        # verdict: if the restored best already met the targets, say so.
+        met = (isinstance(self.best.errors, dict)
+               and bool(self.best.errors.get("met")))
+        if met:
+            return "targets_met"
         # All iterations of this session failed (bad netlist/state dir,
         # missing simulator, ...): max_iterations would read as a normal
         # completion. Report the failure instead.
@@ -3370,6 +3383,7 @@ class Optimization:
             "best_met": ((self.best.errors or {}).get("met")
                          if isinstance(self.best.errors, dict) else None),
             "iterations": len(self.logger.iterations),
+            "iterations_total": self.start + len(self.logger.iterations),
             "best_iter": self.best_it,
             "restarts": self.restarts,
         }
@@ -3436,6 +3450,13 @@ def build_variables(cfg):
         bounds.append((lo, hi))
     if not names:
         raise ValueError("config needs at least one variable")
+    fixed_names = [str(v.get("name") or "")
+                   for v in (cfg.get("fixed_variables") or [])
+                   if isinstance(v, dict)]
+    dup = [n for n in names if n in fixed_names]
+    if dup:
+        raise ValueError("variable is both optimized and fixed: %s"
+                         % ", ".join(dup))
     return names, x0, bounds
 
 def _iter_order(path):
