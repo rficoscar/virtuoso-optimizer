@@ -11,6 +11,7 @@ history.csv
 *.log
 *.log.gz
 convergence.png
+netlist_create/
 
 # 归档副本（工具只改名不删除）
 *.old-*

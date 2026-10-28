@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.3.0 — 2026-10-29
+
+迭代前自动重生成网表，config / 层次网表的参数改写真正落到仿真，EM 两阶段对齐
+（以实测曲线为目标反求理想参数并给出 EM 模型修正方向）；新增 `coordinate`
+坐标模式搜索并作为对齐阶段默认；README 按主次精简。
+
+### 自动网表（`netlist_create.py`）
+
+- 首轮之前调用 Virtuoso `createNetlist(?recreateAll t)`，view 可为 `schematic` 或
+  `config`，以 SKILL 返回路径为准。`auto_netlist`：`false`/`"off"` 关，
+  `"auto"`（默认）有状态或 library+cell 才跑，`true`/`"always"` 强制。
+- 旧网表先备份 `<名>.bak-<时间戳>`；新网表须存在、>100 字节、含
+  `simulator lang=spectre`，否则恢复备份并报 `fallback`；`netlist_strict: true`
+  时硬失败。错误行抽 `OSSHNL-*` / `ADE-*`，不再把 INFO 当错误。
+- **纯设计网表补全**：config 视图重生成的网表常缺测试台。`merge_testbench()` 从旧
+  网表合并模型 `include`（排除 `pex.netlist`）、分析与 `save`；`carry_over_parameters()`
+  把旧网表里 ADE 变量的有效值回填到裸声明（如 `parameters Ls2 Lp2`），修 spectre
+  `SFE-1997` 与缺模型 `SFE-23`。
+- 工作目录向上回溯至含 `cds.lib` 的目录，避免 state_dir 父目录没有 `cds.lib` 时
+  Virtuoso 打不开 library/config。
+
+### config / 层次参数改写（`netlist_params.py`）
+
+- `patch_netlist()` 解析顶层 `parameters`（含续行）、子电路形参与默认值、实例参数
+  字面量，按 `scope_map` 决定改写目标；覆盖子电路默认值被实例覆盖的 `shadowed`，
+  记录 `instance_overrides`。
+- 变量在全网表找不到即该轮失败，`iter_XXXX/netlist_patch.json` 列出 `missing`；
+  旧实现只改顶层一行，config 层次下实际仿真参数不变。
+- 紧凑日志在层次改写轮次强制保留全文（`fallback=full_input_kept`）。
+
+### EM 两阶段对齐（`em_align.py`）
+
+- `--em-align STAGE1_DIR [--em-curve FILE | --em-netlist FILE] [--em-out DIR]
+  [--em-tol T] [--max-iter N]`：第一阶段产出 `x_opt` / `y_opt_ideal`，第二阶段把
+  `y_em` 当目标重跑同一理想网表，输出 `x_em_ideal` / `y_em_ideal`。
+- 曲线输入支持 `result.txt(.gz)`、run 目录、CSV/TSV、JSON、Touchstone；
+  `build_match_targets` 生成 `curve_op: "match"` 目标（默认容差 0.1、每曲线 81 点），
+  同名输出去重。
+- `correction_report` 逐变量给出偏差与 `increase`/`decrease` 方向，按 L/C/R/k/W/Lg
+  族给建议；曲线侧给 rms / max_abs 与 `aligned`。输出 `em_align_report.json` / `.md`。
+- `--em-netlist` 可用 EM 网表 + `x_opt` 单次仿真取 `y_em`。
+
+### 算法 / GUI
+
+- 新增 `CoordinateSearch`（`strategy: "coordinate"`）：首问返回 `x0` 基线，逐轴
+  ±步长，成对失败减半步长；适合“起点已不错、只需小幅修正”的场景。注册策略 14 个。
+- GUI 新增「开始前自动生成网表」、`netlist_view` 与「立即生成网表」；新增「EM 对齐」
+  页（第一阶段目录、曲线/网表、容差、策略），配置往返不丢。
+
+### 自测
+
+`optimizer.py --selftest` 94；`netlist_create.py` 16；`netlist_params.py` 103；
+`em_align.py` 108；`librf_opt.py --selftest` 106 ok / 0 fail；
+`test_proc_cross_section` 31；`em_opt.py --selftest` PASS；`--gui-smoke` OK。
+实机（IC618 + Spectre 18.1）：config 视图网表重生成后 spectre 0 错误，参数改写
+使 S21 rms 差 9.0463 dB（证明改动进入仿真）；EM 对齐 20 轮 `aligned=true`、
+S21 rms 0.0461，反解参数与设计真值 2.5% 以内。
+
 ## 1.2.0 — 2026-10-28
 
 版图引擎与优化引擎的审查修复：SKILL 侧让 `tech_profile.json` 的 DRC/via 真正

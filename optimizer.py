@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Helix: A Virtuoso Optimizer.'
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 import argparse
 import csv
 import glob
@@ -1453,7 +1453,7 @@ class MockRunner:
 def _is_netlist_comment(line):
     return line.startswith(("//", "*", ";", "#"))
 
-def _parameters_spans(text):
+def _legacy_parameters_spans(text):
     'Line spans (first, last) of every top level `parameters` line.'
     lines = text.splitlines()
     spans = []
@@ -1484,7 +1484,7 @@ def _parameters_spans(text):
         i += 1
     return spans
 
-def _parameters_payload(lines, span):
+def _legacy_parameters_payload(lines, span):
     """Whitespace joined tokens of one parameters statement."""
     first, last = span
     parts = []
@@ -1500,20 +1500,20 @@ def _parameters_payload(lines, span):
             parts.append(s)
     return " ".join(parts)
 
-def parse_netlist_parameters(text):
+def _legacy_parse_netlist_parameters(text):
     """name -> value of the top level parameters line(s)."""
     lines = text.splitlines()
     params = {}
-    for span in _parameters_spans(text):
-        for tok in _parameters_payload(lines, span).split():
+    for span in _legacy_parameters_spans(text):
+        for tok in _legacy_parameters_payload(lines, span).split():
             key, _eq, val = tok.partition("=")
             if key:
                 params[key] = val
     return params
 
-def rewrite_netlist_parameters(text, line):
+def _legacy_rewrite_netlist_parameters(text, line):
     'Replace the top level parameters statement(s) with one `line`.'
-    spans = _parameters_spans(text)
+    spans = _legacy_parameters_spans(text)
     if not spans:
         return text, 0
     lines = text.splitlines(keepends=True)
@@ -1529,6 +1529,28 @@ def rewrite_netlist_parameters(text, line):
     if text.endswith("\n") and not new_text.endswith("\n"):
         new_text += "\n"
     return new_text, len(spans)
+
+def _netlist_params_module():
+    """The hierarchy-aware patcher, or None on an old installation."""
+    try:
+        import netlist_params
+        return netlist_params
+    except Exception:
+        return None
+
+def parse_netlist_parameters(text):
+    """Top level parameters (hierarchy-aware module when present)."""
+    mod = _netlist_params_module()
+    if mod is not None:
+        return mod.parse_netlist_parameters(text)
+    return _legacy_parse_netlist_parameters(text)
+
+def rewrite_netlist_parameters(text, line):
+    """Replace top level parameters statements; compact logs rely on this."""
+    mod = _netlist_params_module()
+    if mod is not None:
+        return mod.rewrite_netlist_parameters(text, line)
+    return _legacy_rewrite_netlist_parameters(text, line)
 
 class RealRunner:
     'Run one iteration: spectre direct + eval serve.'
@@ -1638,12 +1660,36 @@ class RealRunner:
         for name, val in values.items():
             merged[name] = format_eng(val)
         line = "parameters " + " ".join(f"{k}={v}" for k, v in merged.items())
-        new_text, replaced = rewrite_netlist_parameters(text, line)
-        if not replaced:
-            return SimResult(status="fail",
-                             message="网表顶层没有 parameters 行, 无法写入变量"
-                                     "（检查网表; 子电路内的 parameters 行"
-                                     "不会被改写）")
+        patch_report = None
+        mod = _netlist_params_module()
+        if mod is not None and hasattr(mod, "patch_netlist"):
+            # Scope aware: top level, shadowing subckt defaults and literal
+            # instance overrides (config view netlists). Values stay numeric
+            # so the module formats them; fixed values may be expressions.
+            new_text, patch_report = mod.patch_netlist(
+                text, dict(values), fixed=dict(self.fixed),
+                options=self.config.get("netlist_patch") or {})
+            try:
+                with open(os.path.join(iter_dir, "netlist_patch.json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump(patch_report, f, indent=2, ensure_ascii=False)
+            except OSError:
+                pass
+            if not patch_report.get("ok"):
+                missing = ", ".join(patch_report.get("missing") or []) \
+                    or "未知变量"
+                return SimResult(
+                    status="fail",
+                    message="网表里找不到变量 %s；已检查顶层 parameters、"
+                            "子电路 parameters 与实例参数。详见 "
+                            "netlist_patch.json" % missing)
+        else:
+            new_text, replaced = rewrite_netlist_parameters(text, line)
+            if not replaced:
+                return SimResult(status="fail",
+                                 message="网表顶层没有 parameters 行, 无法写入变量"
+                                         "（检查网表; 子电路内的 parameters 行"
+                                         "不会被改写）")
         # 清掉旧 result 以免误判完成；铁律下改为归档不删除
         try:
             _archive_aside(os.path.join(iter_dir, "result.txt"))
@@ -1668,7 +1714,7 @@ class RealRunner:
                     cwd=iter_dir, env=env, start_new_session=True,
                     stdout=slog, stderr=subprocess.STDOUT)
         except OSError as exc:
-            self._compact_after_spectre(iter_dir, new_text, line)
+            self._compact_after_spectre(iter_dir, new_text, line, patch_report)
             return SimResult(status="fail",
                              message=f"cannot start spectre: {exc}")
         try:
@@ -1677,13 +1723,13 @@ class RealRunner:
             self._kill_group(self.sim_proc, force=True)
             self.sim_proc.wait()
             self.sim_proc = None
-            self._compact_after_spectre(iter_dir, new_text, line)
+            self._compact_after_spectre(iter_dir, new_text, line, patch_report)
             return SimResult(status="fail", message="spectre timeout")
         sim_wall = time.time() - t0
         proc = self.sim_proc
         self.sim_proc = None
         self._cleanup_helpers(proc.pid)
-        self._compact_after_spectre(iter_dir, new_text, line)
+        self._compact_after_spectre(iter_dir, new_text, line, patch_report)
         # Ideal transformer decks fail the DC operating point on
         # purpose. spectre exits non-zero but still writes the SP
         # results. Trust the psf data, not the exit code.
@@ -1724,12 +1770,14 @@ class RealRunner:
             time.sleep(0.1)
         self.terminate()
         return SimResult(status="fail", message="eval timeout")
-    def _compact_after_spectre(self, iter_dir, full_text, params_line):
+    def _compact_after_spectre(self, iter_dir, full_text, params_line,
+                               patch_report=None):
         'log_mode=compact: dedup netlist and gzip spectre.log.'
         if _log_mode_of(self.config) != LOG_MODE_COMPACT:
             return
         try:
-            compact_netlist_file(iter_dir, full_text, params_line)
+            compact_netlist_file(iter_dir, full_text, params_line,
+                                 patch_report)
         except Exception as exc:
             print("compact netlist skipped: %s" % exc, file=sys.stderr)
         try:
@@ -1747,11 +1795,16 @@ class RealRunner:
         params = parse_netlist_parameters(text)
         self.deck = (text, params)
         print("网表快照 %s" % path)
-        print("运行机制: 网表只读取一次; 每轮迭代仅改写 parameters 行后"
-              "直跑 spectre, 不重新生成网表")
+        print("运行机制: 网表一次读入; 每轮改写参数后直跑 spectre; "
+              "启动前按 auto_netlist 决定是否从原理图/config 重新生成")
         return self.deck
     def _find_deck(self):
-        """Newest input.scs under the simulation tree of the cell."""
+        """Newest input.scs under the simulation tree of the cell.
+
+        With a config/hierarchical run the same cell has both
+        spectre/schematic and spectre/config decks. Prefer the view the
+        user asked for instead of whichever file happens to be newest.
+        """
         cfg = self.config
         root = os.path.expanduser(cfg.get("sim_root", "~/simulation"))
         cell_dir = os.path.join(root, cfg.get("library", ""),
@@ -1760,6 +1813,12 @@ class RealRunner:
                          recursive=True)
         if not hits:
             return None
+        view = str(cfg.get("netlist_view") or cfg.get("view") or "").strip()
+        if view:
+            marker = os.sep + "spectre" + os.sep + view + os.sep
+            preferred = [p for p in hits if marker in p]
+            if preferred:
+                hits = preferred
         hits.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         return hits[0]
     def _ensure_eval(self):
@@ -1968,6 +2027,8 @@ def config_fingerprint(cfg):
         "state": str(cfg.get("state") or ""),
         "state_dir": _abs("state_dir"),
         "netlist": _abs("netlist"),
+        "netlist_view": str(cfg.get("netlist_view") or ""),
+        "auto_netlist": str(cfg.get("auto_netlist", "auto")),
         "analyses": cfg.get("analyses"),
         "variables": variables,
         "fixed_variables": fixed,
@@ -2113,7 +2174,7 @@ def _save_raw_of(cfg):
     except (TypeError, ValueError):
         return 1
 
-def compact_netlist_file(iter_dir, full_text, params_line):
+def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
     'Store one input.scs as deck_base.scs + one parameters line.'
     iter_dir = os.path.abspath(iter_dir)
     run_dir = os.path.dirname(iter_dir)
@@ -2127,6 +2188,18 @@ def compact_netlist_file(iter_dir, full_text, params_line):
         "sha1": sha,
         "bytes_full": len(full_text.encode("utf-8")),
     }
+    # Config/hierarchy netlists also patch subckt defaults or instance
+    # overrides. A single top parameters line cannot reproduce that, so
+    # keep the full input.scs instead of a lossy compact record.
+    counts = (patch_report or {}).get("counts") or {}
+    if counts.get("subckt") or counts.get("instance"):
+        meta["base"] = None
+        meta["fallback"] = "full_input_kept"
+        meta["patch_counts"] = dict(counts)
+        with open(os.path.join(iter_dir, NETLIST_META_NAME), "w",
+                  encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        return meta
     if os.path.isfile(base_path):
         try:
             rebuilt, replaced = rewrite_netlist_parameters(
@@ -2812,6 +2885,9 @@ class Optimization:
                                 save_raw=_save_raw_of(cfg))
         self.runner = self._build_runner(mock)
         self.best = Best()
+        self.best_it = None
+        self.best_curves = None
+        self.best_result = None
         self.restarts = 0
         self.no_improve = 0
         self.start = ((max(rec.get("index", -1) for rec in history) + 1)
@@ -2946,7 +3022,8 @@ class Optimization:
             if rec.get("status") == "ok" and total is not None:
                 values = {n: parse_eng(rec["variables"][n]) for n in self.names
                           if n in rec["variables"]}
-                self.best.update(total, values, rec["objective"])
+                if self.best.update(total, values, rec["objective"]):
+                    self.best_it = rec.get("index")
         # A zero patience must not slice the full history.
         tail = (history[-self.settings.patience:]
                 if self.settings.patience > 0 else [])
@@ -3193,7 +3270,10 @@ class Optimization:
         print(f"[{it:03d}] total={total:.6g} 耗时{result.wall:.2f}s "
               f"({det}) vars=" +
               " ".join(f"{n}={format_eng(values[n])}" for n in self.names))
-        self._track_best(total, values, objective, objective["met"])
+        self._track_best(total, values, objective, objective["met"], it)
+        if self.best_it == it:
+            self.best_curves = result.curves
+            self.best_result = result.raw_path
         self._emit({"type": "iteration", "index": it, "status": "ok",
                     "total": total, "vars": values,
                     "errors": objective["errors"],
@@ -3203,7 +3283,7 @@ class Optimization:
                     "best_vars": (dict(self.best.vars)
                                   if self.best.vars else None)})
         return total, objective["met"]
-    def _track_best(self, total, values, objective, met=True):
+    def _track_best(self, total, values, objective, met=True, it=None):
         """Update the best point and the stall counter.
 
         A feasible point beats an infeasible one even when the scalarized
@@ -3213,6 +3293,7 @@ class Optimization:
         best = self.best.total
         if best is None:
             self.best.update(total, values, objective)
+            self.best_it = it
             self.no_improve = 0
             return
         best_met = True
@@ -3220,6 +3301,7 @@ class Optimization:
             best_met = bool(self.best.errors.get("met", True))
         if met and not best_met:
             self.best.update(total, values, objective, force=True)
+            self.best_it = it
             self.no_improve = 0
             return
         if best_met and not met:
@@ -3229,6 +3311,7 @@ class Optimization:
             self.no_improve += 1
             return
         self.best.update(total, values, objective)
+        self.best_it = it
         self.no_improve = 0
     def _stall_action(self, it):
         """Apply the stall policy. Return a stop reason or None."""
@@ -3287,6 +3370,7 @@ class Optimization:
             "best_met": ((self.best.errors or {}).get("met")
                          if isinstance(self.best.errors, dict) else None),
             "iterations": len(self.logger.iterations),
+            "best_iter": self.best_it,
             "restarts": self.restarts,
         }
         # 报告摘要：敏感度排序、参数移动表与运行统计。
@@ -3392,9 +3476,69 @@ def stop_all_runners():
     except Exception:
         pass
 
+def _auto_netlist_mode(cfg):
+    """'off', 'always' or 'auto' from cfg['auto_netlist']."""
+    raw = (cfg or {}).get("auto_netlist", "auto")
+    if raw is False or raw is None:
+        return "off"
+    if isinstance(raw, str):
+        val = raw.strip().lower()
+        if val in ("off", "false", "no", "manual", "never"):
+            return "off"
+        if val in ("on", "true", "yes", "always", "force"):
+            return "always"
+    if raw is True:
+        return "always"
+    return "auto"
+
+def prepare_netlist(cfg, mock=False):
+    """Regenerate the deck from the schematic/config before iteration 0.
+
+    Returns the netlist_create report. A failure never kills an existing
+    deck; cfg['netlist_strict'] turns it into an error instead.
+    """
+    mode = _auto_netlist_mode(cfg)
+    if mock:
+        return {"status": "skipped", "reason": "mock runner"}
+    if mode == "off":
+        return {"status": "skipped", "reason": "auto_netlist=false"}
+    if cfg.get("_skip_auto_netlist"):
+        return {"status": "skipped", "reason": "stage already prepared"}
+    try:
+        import netlist_create
+    except ImportError as exc:
+        report = {"status": "skipped",
+                  "reason": "netlist_create.py 不可用: %s" % exc}
+        if mode == "always":
+            if cfg.get("netlist_strict"):
+                raise RuntimeError(report["reason"])
+            print("自动网表跳过: %s" % exc, file=sys.stderr)
+        return report
+    try:
+        report = netlist_create.ensure_netlist(cfg)
+    except Exception as exc:
+        report = {"status": "fail", "message": str(exc), "errors": [str(exc)]}
+    status = report.get("status")
+    if status == "ok":
+        cfg["netlist"] = report.get("path") or cfg.get("netlist")
+        if report.get("design", {}).get("view"):
+            cfg["netlist_view"] = report["design"]["view"]
+        print("自动网表: %s (%.2fs)" %
+              (cfg.get("netlist"), float(report.get("wall") or 0.0)))
+    elif status in ("fail", "fallback"):
+        msg = report.get("message") or "网表重新生成失败"
+        if cfg.get("netlist_strict"):
+            raise RuntimeError("自动网表失败: %s" % msg)
+        print("自动网表失败，沿用现有网表: %s" % msg, file=sys.stderr)
+    else:
+        print("自动网表跳过: %s" % (report.get("reason") or status or ""),
+              file=sys.stderr)
+    return report
+
 def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
                      stop_check=None, resume=None):
     'Run one optimization session.'
+    netlist_report = prepare_netlist(cfg, mock=mock)
     opt = Optimization(cfg, mock=mock, max_iter=max_iter,
                        on_event=on_event, stop_check=stop_check,
                        resume=resume)
@@ -3417,12 +3561,229 @@ def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
         except Exception as exc:
             print("log finalize skipped: %s" % exc, file=sys.stderr)
     report = opt.report(reason)
+    report["netlist_create"] = netlist_report
+    try:
+        curve_path = save_best_curves(opt)
+        if curve_path:
+            report["best_curves"] = curve_path
+    except Exception as exc:
+        print("best_curves skipped: %s" % exc, file=sys.stderr)
     plot = opt.logger.plot_convergence()
     if plot:
         report["convergence_plot"] = plot
     # Save after the plot key so file and return value match.
     opt.logger.save_report(report)
     return report
+
+def save_best_curves(opt):
+    """Write the best point's curves next to report.json (EM alignment)."""
+    curves = getattr(opt, "best_curves", None)
+    if not curves:
+        return None
+    payload = {"iter": getattr(opt, "best_it", None),
+               "variables": _fmt_vars(opt.best.vars) if opt.best.vars else None,
+               "result": getattr(opt, "best_result", None),
+               "curves": {}}
+    for name, data in curves.items():
+        try:
+            xs, ys = data
+        except (TypeError, ValueError):
+            continue
+        payload["curves"][name] = {"x": [float(v) for v in xs],
+                                   "y": [float(v) for v in ys]}
+    if not payload["curves"]:
+        return None
+    path = os.path.join(opt.out_dir, "best_curves.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
+
+def _load_em_align():
+    try:
+        import em_align
+        return em_align
+    except ImportError as exc:
+        raise RuntimeError("EM 对齐需要 em_align.py: %s" % exc)
+
+def _simulate_once(cfg, netlist, values, out_dir):
+    """Simulate one netlist at fixed values and return its curves."""
+    import copy
+    cfg2 = copy.deepcopy(cfg)
+    cfg2["netlist"] = netlist
+    cfg2["_skip_auto_netlist"] = True
+    cfg2["auto_netlist"] = False
+    os.makedirs(out_dir, exist_ok=True)
+    skill_dir = cfg2.get("skill_dir") or os.path.dirname(os.path.abspath(__file__))
+    runner = RealRunner(cfg2, skill_dir)
+    try:
+        result = runner.run(values, out_dir)
+    finally:
+        runner.terminate()
+        RealRunner.live.discard(runner)
+    if not result.curves:
+        raise RuntimeError("EM 网表单次仿真失败: %s" % result.message)
+    return result.curves, result
+
+def _curves_from_best_json(run_dir):
+    path = os.path.join(run_dir, "best_curves.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    curves = {}
+    for name, pair in (data.get("curves") or {}).items():
+        if isinstance(pair, dict) and "x" in pair and "y" in pair:
+            curves[name] = (list(pair["x"]), list(pair["y"]))
+    return curves or None
+
+def _ideal_netlist_for_stage2(cfg, stage1_dir):
+    path = cfg.get("netlist")
+    if path and os.path.isfile(os.path.expanduser(path)):
+        return os.path.expanduser(path)
+    for name in ("deck_base.scs",):
+        hit = os.path.join(stage1_dir, name)
+        if os.path.isfile(hit):
+            return hit
+    hit = os.path.join(stage1_dir, "iter_0000", "input.scs")
+    if os.path.isfile(hit):
+        return hit
+    raise ValueError("找不到第一阶段的理想网表；请在任务 JSON 里保留 netlist 字段")
+
+def run_em_align(cfg, stage1_dir, em_curve=None, em_netlist=None,
+                 output_dir=None, max_iter=None, tol=None, mock=False,
+                 on_event=None):
+    """Two-stage EM alignment.
+
+    1. Load x_opt / y_opt_ideal from the finished ideal run.
+    2. Get y_em from a curve file, or by simulating the EM (config) netlist
+       once at x_opt.
+    3. Re-optimize the ideal netlist against y_em, then report the variable
+       and curve deltas as EM model correction directions.
+    """
+    import copy
+    mod = _load_em_align()
+    stage1_dir = os.path.abspath(os.path.expanduser(str(stage1_dir)))
+    if not os.path.isdir(stage1_dir):
+        raise ValueError("第一阶段 run 目录不存在: %s" % stage1_dir)
+    stage1 = mod.load_run_best(stage1_dir)
+    x_opt = stage1.get("variables") or {}
+    y_opt = stage1.get("curves") or {}
+    if not x_opt:
+        raise ValueError("第一阶段没有可用的最优变量: %s" % stage1_dir)
+    em_cfg = cfg.get("em_align") or {}
+    em_curve = em_curve or em_cfg.get("em_curve")
+    em_netlist = em_netlist or em_cfg.get("em_netlist")
+    stage2_out = os.path.abspath(os.path.expanduser(
+        output_dir or em_cfg.get("output_dir")
+        or os.path.join(stage1_dir, "em_align")))
+    if stage2_out == stage1_dir:
+        stage2_out = os.path.join(stage1_dir, "em_align")
+    if os.path.isdir(stage2_out) and os.listdir(stage2_out) \
+            and not em_cfg.get("reuse_output"):
+        stage2_out = "%s_%s" % (stage2_out, time.strftime("%Y%m%d-%H%M%S"))
+    source = None
+    if em_curve:
+        em_curve = os.path.abspath(os.path.expanduser(str(em_curve)))
+        y_em = mod.load_curves(
+            em_curve,
+            outputs_state=(os.path.join(
+                os.path.expanduser(cfg.get("state_dir") or ""),
+                "outputs.state")
+                if cfg.get("state_dir") else None))
+        source = {"kind": "file", "path": em_curve}
+    elif em_netlist:
+        if mock:
+            raise ValueError("mock 模式不能仿真 EM 网表；请用 em_curve 或去掉 --mock")
+        em_netlist = os.path.abspath(os.path.expanduser(str(em_netlist)))
+        y_em, _res = _simulate_once(
+            cfg, em_netlist, x_opt,
+            os.path.join(stage2_out, "_em_once"))
+        source = {"kind": "netlist", "path": em_netlist}
+    else:
+        raise ValueError("EM 对齐需要 em_curve 或 em_netlist 之一")
+    names = em_cfg.get("outputs")
+    if not names:
+        wanted = [t.get("output") for t in (cfg.get("targets") or [])]
+        names = []
+        for name in wanted:
+            if name in y_em and name not in names:
+                names.append(name)
+        names = names or None
+    else:
+        if isinstance(names, str):
+            names = [names]
+        names = [n for n in names if n in y_em]
+    targets = mod.build_match_targets(
+        y_em, names=names,
+        max_points=int(em_cfg.get("max_points", 81)),
+        tol=float(tol if tol is not None else em_cfg.get("tol", 0.1)),
+        band=em_cfg.get("band"))
+    if not targets:
+        raise ValueError("EM 曲线里没有可匹配的曲线（至少 2 个频点）: %s"
+                         % ", ".join(sorted(y_em)))
+    matched = []
+    for t in targets:
+        if t.get("output") not in matched:
+            matched.append(t.get("output"))
+    stage2 = copy.deepcopy(cfg)
+    stage2.pop("em_align", None)
+    stage2["name"] = "%s [EM 对齐]" % (cfg.get("name") or "run")
+    stage2["targets"] = targets
+    stage2["auto_netlist"] = False
+    stage2["_skip_auto_netlist"] = True
+    stage2["resume"] = False
+    stage2["output_dir"] = stage2_out
+    stage2["netlist"] = _ideal_netlist_for_stage2(cfg, stage1_dir)
+    settings = dict(stage2.get("settings") or {})
+    settings["max_iter"] = int(max_iter or em_cfg.get("max_iter")
+                               or settings.get("max_iter") or 80)
+    settings["patience"] = int(em_cfg.get("patience",
+                                          settings.get("patience", 15)))
+    if em_cfg.get("strategy"):
+        settings["strategy"] = str(em_cfg["strategy"])
+    else:
+        settings["strategy"] = "coordinate"
+    stage2["settings"] = settings
+    bounds = {}
+    for v in stage2.get("variables") or []:
+        name = v.get("name")
+        bounds[name] = (parse_eng(v["min"]), parse_eng(v["max"]))
+        if name in x_opt:
+            val = float(x_opt[name])
+            lo, hi = bounds[name]
+            v["init"] = format_eng(min(max(val, lo), hi))
+    stage2_report = run_optimization(
+        stage2, mock=mock, max_iter=settings["max_iter"],
+        on_event=on_event, resume=False)
+    y_ideal = (_curves_from_best_json(stage2_out)
+               or (mod.load_run_best(stage2_out).get("curves") if
+                   os.path.isdir(stage2_out) else {}) or {})
+    var_specs = {v.get("name"): v for v in (cfg.get("variables") or [])}
+    def _only(curves):
+        return {n: curves[n] for n in matched if n in (curves or {})}
+    correction = mod.correction_report(
+        x_opt, stage2_report.get("best_variables_raw") or {},
+        _only(y_opt), _only(y_em), _only(y_ideal), var_specs=var_specs,
+        rms_tol=float(em_cfg.get("rms_tol", 0.1)),
+        max_tol=float(em_cfg.get("max_tol", 0.5)))
+    payload = {
+        "stage1_run": stage1_dir,
+        "stage2_run": stage2_out,
+        "stage1_iter": stage1.get("iter"),
+        "stage1_variables": {k: format_eng(v) for k, v in x_opt.items()},
+        "em_source": source,
+        "targets": targets,
+        "stage2_stop_reason": stage2_report.get("stop_reason"),
+        "stage2_variables": stage2_report.get("best_variables"),
+        "correction": correction,
+        "aligned": correction.get("aligned"),
+        "stage2_report_path": os.path.join(stage2_out, "report.json"),
+    }
+    json_path, md_path = mod.write_report(payload, stage2_out)
+    payload["report_json"] = json_path
+    payload["report_md"] = md_path
+    stage2_report["em_align"] = payload
+    return stage2_report
 
 def _fmt_vars(values):
     if not values:
@@ -3457,6 +3818,7 @@ EXAMPLE_CFG = {
     # state_dir/work_dir/virtuoso_bin 留空或相对：目标机自动探测填入。
     'state_dir': '', 'view': 'schematic', 'virtuoso_bin': '',
     'work_dir': '.', 'use_config': False,
+    'auto_netlist': True, 'netlist_view': '',
     'settings': {'fail_limit': 5, 'improve_rel': 0.001, 'max_iter': 100,
                  'patience': 10, 'seed': 0},
     'targets': [
@@ -3566,6 +3928,16 @@ def main():
                     help="open the graphical interface")
     ap.add_argument("--gui-smoke", action="store_true",
                     help="run the GUI smoke test and exit")
+    ap.add_argument("--em-align", metavar="STAGE1_DIR",
+                    help="two-stage EM alignment: ideal run dir to align from")
+    ap.add_argument("--em-curve", metavar="PATH",
+                    help="measured EM curve (result.txt/csv/json/touchstone)")
+    ap.add_argument("--em-netlist", metavar="PATH",
+                    help="EM/config netlist simulated once at x_opt")
+    ap.add_argument("--em-out", metavar="DIR",
+                    help="stage-2 output dir (default <stage1>/em_align)")
+    ap.add_argument("--em-tol", type=float, default=None,
+                    help="curve match tolerance (default 0.1)")
     args = ap.parse_args()
     if args.selftest:
         sys.exit(1 if run_selftests() else 0)
@@ -3579,6 +3951,13 @@ def main():
     cfg = load_config(args.config)
     if args.dump_state:
         dump_state(cfg)
+        return
+    if args.em_align:
+        report = run_em_align(
+            cfg, args.em_align, em_curve=args.em_curve,
+            em_netlist=args.em_netlist, output_dir=args.em_out,
+            max_iter=args.max_iter, tol=args.em_tol, mock=args.mock)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
         return
     report = run_optimization(cfg, mock=args.mock, max_iter=args.max_iter)
     print(json.dumps(report, indent=2))

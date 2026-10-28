@@ -2,337 +2,203 @@
 
 ### A Virtuoso Optimizer
 
-*Parameter optimization and layout-aware EM for Cadence Virtuoso / spectre.*
+*Parameter optimization, netlist generation and EM alignment for Cadence Virtuoso / spectre.*
 
-`Version 1.2.0 · MIT · Python 3.6+`
+`Version 1.3.0 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
 
-## Overview
+把 Virtuoso / spectre 的参数优化、网表生成与 EM 对齐串成一条命令链：
+改原理图或变量 → 自动重生成网表（含 config / 层次设计）→ 直连 spectre 迭代 → 收敛报告。
+版图侧按工艺角色生成电感 / 传输线 / 变压器 / 耦合线，可接 EMX 做几何迭代。
 
-Helix: A Virtuoso Optimizer 把电路参数优化与版图电磁验证放进同一条迭代链：编辑
-变量与目标 → 直连 spectre 迭代仿真 → 实时观察收敛、曲线与变量 → 输出最优组合。
-版图侧按工艺角色解析层名，生成电感、传输线、变压器与耦合线，可接 EMX 做电磁提取
-与几何迭代。运行由 ADE L 状态驱动，不依赖 Maestro；核心为纯 Python 3.6+ 标准库，
-`matplotlib` 仅用于可选的收敛图。电路侧（optimizer / algorithm / gui /
-selftest）、版图侧（librf_opt / librf.il）、EM 融合（em_bridge / em_opt）与
-工艺配置（tech_profile）共用一套 run 目录与日志格式。
+三条核心能力：
 
-## Highlights
-
-- 直连 spectre 迭代，只改写网表顶层 `parameters` 行，无 Maestro 依赖。
-- 13 个注册搜索策略，覆盖局部、全局、贝叶斯与多目标。
-- 标量 / 规格 / Pareto 三种目标模式，可混用曲线目标与带内指标。
-- lri 电感几何内核 v2：每圈为 ring0 的精确内缩，间距恒为 `s`、bbox 恒为 `W×H`。
-- 版图与电路联合迭代：几何 → 版图 → strmout → EMX → 电路仿真，同几何点复用缓存。
-- 工艺剖面解析 `.proc` + layermap，生成金属/介质/VIA 横截面并做堆叠校验。
+- **开始前自动生成网表**：迭代第 0 轮前调用 Virtuoso `createNetlist(?recreateAll t)`，
+  view 可为 `schematic` 或 `config`，以返回路径为准；失败回退旧网表，不静默改设计。
+- **config / 层次网表参数改写**：不只改顶层 `parameters` 行，还按作用域处理子电路显式
+  默认值与被实例覆盖的参数；变量在全网表找不到时报错，不“改了没用”。
+- **EM 两阶段对齐**：以实测 / EM 曲线为目标重跑同一理想网表，输出逐变量修正方向、
+  曲线偏差与 `aligned` 结论。
 
 ## Quick start
 
 ```sh
-# 图形界面
-python3 optimizer.py --gui
-
-# 真实运行（需 Cadence / spectre license）；mock 运行无需 license
-python3 optimizer.py task.json
-python3 optimizer.py task.json --mock --max-iter 20
+python3 optimizer.py --gui                      # 图形界面
+python3 optimizer.py task.json                  # 真实运行（需 Cadence / spectre）
+python3 optimizer.py task.json --mock --max-iter 20   # 无 license 的流程验证
 python3 optimizer.py task.json --dump-state     # 只解析 ADE 状态，不仿真
-
-# 回归测试、GUI 无头冒烟与模块自测
-python3 optimizer.py --selftest
-python3 optimizer.py --gui-smoke
-python3 librf_opt.py --selftest                 # 版图 / EM / 工艺配置
-python3 em_opt.py --selftest                    # EM 优化器 mock 自测
+python3 optimizer.py --selftest                 # 回归测试
+python3 optimizer.py --gui-smoke                # GUI 无头冒烟
+python3 netlist_create.py --selftest            # 自动网表
+python3 netlist_params.py --selftest            # 层次/config 参数改写
+python3 em_align.py --selftest                  # EM 两阶段对齐
+python3 librf_opt.py --selftest                 # 版图 / EMX / 工艺
 python3 -m unittest test_proc_cross_section     # 工艺剖面解析与校验
-
-# 从 compact run 目录重建完整网表（index 从 0 起）
-python3 optimizer.py --reconstruct RUN_DIR [INDEX [DEST]]
+python3 optimizer.py --reconstruct RUN_DIR [INDEX [DEST]]   # 从 compact run 重建网表
 ```
 
-GUI 流程：设计页导入 ADE L 变量与输出 → 变量页区分优化变量与固定变量 → 目标页
-定义规格 → 设置页选策略与预算 → 菜单「运行-开始」→ 进度页看收敛、变量柱状图与
-动态曲线 → 结果页读最终报告。工具栏「续跑」勾选即沿用输出目录；不勾则新建 run
-目录，旧数据原地保留。「版图 EM」页负责版图生成、EMX 仿真与几何迭代，「EM 融合」
-页实时展示库命中情况，工艺页负责工艺库的构建与预检。
+GUI 流程：设计页填 library / cell / view，按需勾「开始前自动生成网表」或点「立即生成网表」
+→ 变量 → 目标 → 设置 → 运行 → 结果页；「版图 EM」「EM 融合」「EM 对齐」分别负责几何、EM 库与修正。
+工具栏「续跑」勾选即沿用输出目录，不勾则新建 run 目录（旧数据原地保留）。
 
-## Configuration
+## 标准工作流
 
-任务为 UTF-8 JSON；GUI 可新建/保存，CLI 直接读取。示例：
+1. **自动网表**（默认 `auto`）。成功后写入 `cfg["netlist"]`，报告在 `report.json` 的
+   `netlist_create` 节点。旧网表先备份 `<名>.bak-<时间戳>`；新网表须存在、>100 字节且含
+   `simulator lang=spectre`，否则恢复备份报 `fallback`；错误行抽取 `OSSHNL-*` / `ADE-*`。
+   config 视图重生成的常是“纯设计网表”：旧网表的模型 `include`、`sp/dcOp/tran/...`
+   分析、`save` 会合并回来（`testbench_merge`）；ADE 变量在原理图里没有默认值而被写成
+   裸声明（如 `Ls2 Lp2`）时，用旧网表的有效值回填（`carry_over`），避免 spectre SFE-1997。
+2. **迭代**。每轮只改参数、直跑 spectre，再经 SKILL 求值服务提取输出；层次改写结果写
+   `iter_XXXX/netlist_patch.json`，缺变量即该轮失败并列出变量名。
+3. **EM 对齐**。第一阶段跑完后，用 `--em-align` 以 EM 结果为目标做第二阶段：
+
+```sh
+# 第一阶段 run 目录 + EM 曲线（result.txt / run 目录 / csv / json / sNp 均可）
+python3 optimizer.py task.json --em-align runs/stage1 --em-curve em/ind.s2p --em-out runs/stage2
+# 也可以给 EM 网表：用该网表 + x_opt 单次仿真取 y_em
+python3 optimizer.py task.json --em-align runs/stage1 --em-netlist em/ind.scs
+```
+
+第二阶段默认落在 `<stage1>/em_align`（非空目录自动加时间戳，`reuse_output` 可复用），
+targets 由 `curve_op: "match"` 生成（默认容差 0.1，`--em-tol` 覆盖；每曲线最多 81 点），
+默认用 `coordinate` 坐标模式搜索从 `x_opt` 出发（`em_align.strategy` 可换 `global` /
+`simplex` / `cmaes` 等），只对 `targets` 用到的输出判定对齐。
+输出 `em_align_report.json` / `.md`，report 增加 `em_align`（含 stage2 路径与 correction）。报告含
+`x_opt`、`x_em_ideal`、偏差、方向、按 L/C/R/k 族建议，以及曲线 rms / max_abs 与 `aligned`。
+
+## 配置参考
+
+任务为 UTF-8 JSON；相对路径的 `state_dir` 以配置文件所在目录为基准。常用键：
+
+| 键 | 作用 |
+|---|---|
+| `auto_netlist` | `false`/`"off"` 关闭；`"auto"`（默认）有 `state_dir` 或 library+cell 才执行；`true`/`"always"` 强制执行 |
+| `netlist_view` | 生成网表用的 view（`schematic` / `config`）；缺省按 `view` 或 `ADE_state.info` 的 designInfo |
+| `netlist_strict` | `true` 时失败即中止；默认有旧网表则继续，无旧网表仍报错 |
+| `netlist_timeout` | `createNetlist` 超时秒数，默认 600 |
+| `netlist_patch` | 层次改写开关：`patch_subckts`、`patch_instances`、`scope_map`（默认全开） |
+| `library` / `cell` / `view` / `state` / `state_dir` | 设计与 ADE L 状态 |
+| `variables` / `fixed_variables` / `linking` | 搜索变量（`init`/`min`/`max`，可选 `scale`、`integer`）、固定值、变量绑定 |
+| `targets` | `output` + `metric`（`scalar`/`band_min`/`band_max`/`band_flatness`/`band_mean`/`value_at`）+ `op`/`goal`/`tol`/`weight`/`role`；曲线目标用 `curve_op` + `limit` |
+| `settings` | `max_iter`、`patience`、`improve_rel`、`fail_limit`、`max_restarts`、`seed`、`strategy`、`mode`；可加 `portfolio`、`init_points` |
+| `output_dir` | run 目录；CLI 同一目录自动续跑，GUI 用「续跑」勾选控制，不勾则新建 run 目录 |
+| `netlist` / `sim_root` / `sim_timeout` | 网表路径、仿真树根、单轮超时 |
+| `save_raw` / `log_mode` | psf 留存级别（0/1/2）、日志模式（`compact`/`full`） |
+| `env` / `path_append` / `spectre_bin` / `virtuoso_bin` | 子进程环境与工具覆盖（留空现场探查） |
+| `layout_em` / `em_bridge` | 版图几何迭代、EM 融合；两者互斥 |
+| `em_align` | 第二阶段参数：`em_curve` / `em_netlist`（二选一）、`output_dir`、`tol`、`max_points`、`band`、`max_iter`、`patience`、`strategy`、`rms_tol`、`max_tol`、`outputs`、`reuse_output` |
+
+完整示例：
 
 ```json
 {
-  "name": "S21 flatness", "library": "MyLib", "cell": "test_cs_driver",
-  "view": "schematic", "state": "spectre_state1",
-  "state_dir": "/path/to/spectre_state1",
-  "analyses": "sp", "save_raw": 2, "log_mode": "compact",
-  "sim_timeout": 1800, "output_dir": "logs/test_cs_driver/run_1",
+  "name": "S21 flatness",
+  "library": "MyLib",
+  "cell": "test_cs_driver",
+  "view": "schematic",
+  "netlist_view": "config",
+  "auto_netlist": "auto",
+  "netlist_strict": false,
+  "netlist_timeout": 600,
+  "netlist_patch": {"patch_subckts": true, "patch_instances": true},
+  "state": "spectre_state1",
+  "state_dir": "state/spectre_state1",
+  "save_raw": 2,
+  "log_mode": "compact",
+  "sim_timeout": 1800,
+  "output_dir": "runs/pa_1",
   "variables": [
     {"name": "L1", "init": "250p", "min": "150p", "max": "350p"},
     {"name": "k0", "init": "0.6", "min": "0.4", "max": "0.9"}
   ],
   "fixed_variables": [{"name": "vdd", "value": "1.2"}],
-  "targets": [{"output": "S21 dB20", "metric": "band_min",
-    "band": ["24G", "44G"], "op": ">=", "goal": 3, "tol": 0.5}],
+  "targets": [
+    {"output": "S21 dB20", "metric": "band_min", "band": ["24G", "44G"],
+     "op": ">=", "goal": 3, "tol": 0.5}
+  ],
   "settings": {"max_iter": 100, "patience": 10, "improve_rel": 0.001,
-    "fail_limit": 5, "max_restarts": 2, "seed": 0,
-    "strategy": "simplex", "mode": "scalar"}
+               "fail_limit": 5, "max_restarts": 2, "seed": 0,
+               "strategy": "simplex", "mode": "scalar"}
 }
 ```
 
-- `output_dir`：CLI 直接作为 run 目录，同一目录再次运行会读取已有记录续跑。
-  GUI 留空或为默认 `logs/run` 时，每次新建 `logs/<circuit>/run_<时间戳>`。
-- `variables[]`：`name / init / min / max`，支持工程计数法（`250p`、`1.5G`、
-  `3meg`）；可选 `scale`（`auto` / `linear` / `log`，`auto` 在跨度 ≥10 倍且
-  `min>0` 时取对数）与 `integer: true`。顶层 `linking` 可绑定变量：
-  `[{"target": "L2", "source": "L1", "mode": "ratio", "factor": 0.8}]`。
-- `fixed_variables[]`：不参与搜索，值原样写入每轮网表。
-- `targets[]`：`output` 为 ADE L 输出名；`metric` 取 `scalar` / `band_min` /
-  `band_max` / `band_flatness` / `band_mean` / `value_at`（需 `freq`）；`band`
-  为 `[lo, hi]`；`op` 取 `>=` / `<=` / `==` / `range`（`range` 需 `goal2`）；
-  `tol`、`weight`、`role`（`error` / `constraint` / `objective`，默认 `error`）。
-  曲线目标用 `curve_op`（`above` / `below` / `match`）+
-  `limit: {"x": [...], "y": [...]}`。
-- `settings`：`max_iter`、`patience`、`improve_rel`、`fail_limit`、
-  `max_restarts`、`seed`、`strategy`、`mode`；
-  `portfolio: {"members": ["cmaes_ipop", "tpe"], "ucb_c": 1.0}`；
-  `init_points`：CSV 路径，每行一组变量值，作为先验点先真实仿真。
-- `save_raw`：`0` 提取后归档 psf；`1` 每轮保留；`2` 只保留首轮、每次新最优、
-  失败与末轮。`log_mode`：`compact`（默认）或 `full`。`env` 覆盖仿真子进程
-  环境变量；`path_append` 追加 `PATH`；`spectre_bin` / `virtuoso_bin` 留空即
-  现场探查；`netlist` 留空则按 `sim_root` 查找网表。
+补充：`variables[].scale`（`auto`/`linear`/`log`，`auto` 在跨度 ≥10 倍且 `min>0` 时取对数），
+`linking` 形如 `[{"target": "L2", "source": "L1", "mode": "ratio", "factor": 0.8}]`；
+`settings.portfolio` 形如 `{"members": ["cmaes_ipop", "tpe"], "ucb_c": 1.0}`；
+`settings.init_points` 为 CSV 先验点。`settings.mode`：`scalar`（默认）/ `spec` / `pareto`。
 
-## Search strategies
+## 策略速查
 
-| 策略 | 说明 | 策略 | 说明 |
+14 个注册策略，选型说明见设置页右侧「算法说明」（来自 `algorithm.DESCRIPTIONS`）：
+
+| 策略 | 一行说明 | 策略 | 一行说明 |
 |---|---|---|---|
-| `simplex` | 有界 Nelder-Mead 局部搜索（默认） | `global` | 全局差分进化 |
-| `de` | 自适应差分进化（SHADE 简化） | `lshade` | L-SHADE（成功历史 DE） |
-| `cmaes` | CMA-ES 协方差自适应 | `cmaes_ipop` | CMA-ES + IPOP 重启 |
-| `tpe` | 树形 Parzen 估计器（贝叶斯） | `nsga2` | NSGA-II 多目标 Pareto |
-| `weighted` | 加权标量化 → 内层单目标 | `worstspec` | 最差规格裕度标量化 |
-| `portfolio` | 多算法线 UCB 竞跑 | `random` / `grid` | 均匀随机 / 网格扫描 |
+| `simplex` | 有界 Nelder-Mead 局部搜索（默认） | `coordinate` | 逐轴 ±步长模式搜索（EM 对齐默认） |
+| `global` | 全局差分进化 | `de` | 自适应差分进化 |
+| `lshade` | L-SHADE | `cmaes` | CMA-ES |
+| `cmaes_ipop` | CMA-ES + IPOP 重启 | `tpe` | 贝叶斯 TPE |
+| `nsga2` | NSGA-II 多目标 | `weighted` | 加权标量化 |
+| `worstspec` | 最差规格裕度标量化 | `portfolio` | 多算法 UCB 竞跑 |
+| `random` | 均匀随机 | `grid` | 网格扫描 |
 
-选型速查与详细说明在设置页右侧「算法说明」，数据来自 `algorithm.DESCRIPTIONS`
-与 `help_text()`；`portfolio.members` 指定成员，`ucb_c` 控制探索强度。
+## 运行模型与输出
 
-## Runtime model
-
-启动时读取一次网表快照；每轮只改写顶层 `parameters` 行（固定变量 + 优化变量），
-直接运行 spectre，再由 `librf.il` 的求值服务提取输出曲线。第一轮包含求值服务
-冷启动。优化期间可开 Virtuoso / ADE L 查看，但不要修改原理图、变量或输出（快照
-已缓存）。
-
-失败分类：INFRA（license、网表、求值服务、工具找不到）原地免费重试一次，重试
-成功不记失败；重试仍失败、DNC 或超时均计一次失败并累加惩罚，连续失败达
-`fail_limit` 停止。单轮目标求值失败以 `BIG_ERROR=1e6` 惩罚并继续。停止原因：
-`max_iterations`、`targets_met`、`sim_failures`、`no_improvement`、
-`no_feasible_solution`、`stopped`。
-
-`settings.mode`：`scalar`（默认，所有目标误差加权求和）→ 单目标搜索；
-`spec`（`role=objective` 进 F，其余进 G；无 objective 时取 G 最差裕度）；
-`pareto`（objective 进 F、其余进 G，供 `nsga2`；`nsga2` + `scalar` 自动提升）。
-
-续跑：GUI 勾选「续跑」沿用当前输出目录；CLI 直接复用 `output_dir`。有快照时按
-`snapshot.json` + `events.jsonl` 精确还原算法状态；没有快照时把历史成功评测热
-启动进算法，不重新仿真；`settings.init_points` 的先验点会先被真实仿真。
-
-运行审计：写入 `<output_dir>/audit.jsonl`，每条含 `kind` / `path` / `detail`，
-只追加不覆盖；GUI 可注册回调实时接收。用于追溯某轮改写了哪个文件、用了什么模式。
-
-编码：目标机可能是 C locale（`locale.getpreferredencoding()` 为
-`ANSI_X3.4-1968`），Python 3.6 无 PEP 538/540。`optimizer.py` 与
-`librf_opt.py` 在模块内包装 `open()`（文本默认 UTF-8、读取用
-`errors="replace"`），子进程输出按字节接收再显式 UTF-8 解码。仍建议用
-`LANG=C.UTF-8` 启动并避免中文路径。
-
-## Output layout
+启动时读一次网表快照；每轮按作用域改写参数后直接运行 spectre，再由 `librf.il` 求值服务
+提取曲线。失败分 INFRA（license / 工具，免费重试一次）、DNC 与超时；连续失败达
+`fail_limit` 停止。停止原因：`max_iterations`、`targets_met`、`sim_failures`、
+`no_improvement`、`no_feasible_solution`、`stopped`。续跑按快照或历史记录还原（配置指纹
+`config_sha1` 变化则拒绝续跑）。写文件同时记 `<output_dir>/audit.jsonl`。
 
 ```text
 <output_dir>/
   deck_base.scs / manifest.jsonl / run_meta.json / history.csv
-  events.jsonl / snapshot.json / snapshot-N.json / report.json
-  convergence.png                  # 有 matplotlib 时
+  events.jsonl / snapshot.json / report.json / audit.jsonl
   iter_0000/
-    record.json                    # 变量、目标、状态、耗时
-    input.scs.params               # compact：parameters 行 + sha1
-    input.scs.old-*                # compact：完整副本归档（只改名不删除）
-    spectre.log                    # compact：错误/警告末 100 条 + 尾部 4KB
-    spectre.log.gz                 # compact：完整日志
-    result.txt / result.txt.gz     # 关键轮/末轮明文，普通轮 gz；psf/ 按 save_raw
+    record.json / input.scs.params / netlist_patch.json
+    spectre.log(.gz) / result.txt(.gz) / psf/（按 save_raw）
+  em_align/                # 第二阶段：em_align_report.json / .md
 ```
 
-`manifest.jsonl` 每个迭代至少一行；`type=retention` 追加归档后的最终文件集
-（同 index 以后者为准），`provisional` 标记待定 ordinary。`log_mode: "full"`
-回到逐轮完整 `input.scs`、明文 `spectre.log` 与明文 `result.txt`，仍写 manifest。
+`report.json` 的 `best_iter` 指向最优迭代，`best_met` 给出达标判定。compact 目录没有
+完整 `input.scs` 属正常，用 `--reconstruct RUN_DIR [INDEX [DEST]]` 按 sha1 重建；层次改写
+（子电路或实例级）的轮次会保留全文，`fallback=full_input_kept`。`*.old-*` 是归档副本，
+工具只改名不删除。
 
-compact 目录没有 `input.scs` 属正常：完整字节在 `deck_base.scs` +
-`input.scs.params`。重建（index 从 0 起，`7` = `iter_0007`）：
+## 版图 / EM
 
-```sh
-python3 optimizer.py --reconstruct RUN_DIR 7 out.scs
-python3 optimizer.py --reconstruct RUN_DIR           # 全部 → reconstructed/
-```
+- 「版图 EM」页：类型 `ind` / `tl` / `xfmr` / `cpl`，出图、EMX 与几何迭代；开
+  `layout_em.enabled` 后每轮几何 → 版图 → strmout → EMX → 电路，同几何点复用缓存
+  （`work/.geom_cache.json`）。几何变量须同时在 `variables` 中。
+- lri 几何内核：每圈为 ring0 的精确内缩，圈间距恒为 `s`、bbox 恒为 `W×H`；线段角度
+  0°/45°/90°；支持 `se` / `diff` / `f8` / `sym` 与中心抽头 `ct`。生成后先做间距、线宽与
+  bbox 断言再落版图。EMX 子页可设精度、频率与并行，结果含 L(f)/Q(f)与 SRF 判读。
+- 「EM 融合」页：只读展示 requested / grid / delivered，由 `em_bridge` 驱动，库只追加
+  （`em_lib.sqlite3` + 内容寻址 sNp），`grid_key` 只是索引、交付以 `delivered` 为准。
+- 入口与约束：层名按 `tech_profile.json` 角色解析（默认 `spiral=M5`、`underpass=M4`、
+  `route/ground=M3`、`via_sp=V4`、`via_un=V3`、`marker=MARKER`），出图前 `require_tech_ready`
+  预检。**`em_bridge` 与 `layout_em` 互斥**。
 
-重建按 sha1 校验；模板漂移时该轮已保留完整 `input.scs`，自动回退读取。
-`*.old-*` 是归档副本，工具只改名不删除；可自行清理，不影响续跑与重建。
+## 工艺剖面与工具查找
 
-## Layout & EM
+版图生成依赖四类文件：工艺库 techlib（层定义）、layermap（层名 → GDS 层号）、EMX `.proc`
+（层号 → 厚度/电导率）、`cds.lib`（库名 → 目录）。`tech_profile.json` 字段：`techlib`、
+`techlib_dir`、`layermap`、`proc`、`layers`、`text`、`drc`（`min_w`/`max_w`/`min_s`/
+`min_area`/`via`，参数级自检阈值，非 sign-off）、可选 `flow`（叠层校验，默认告警，
+`strict_flow` 升级为阻断）。门禁工艺无关：只按角色核对层是否存在，不写死层名或 GDS 层号。
 
-### lri geometry kernel
+`proc_cross_section.py` 解析 `.proc` 与 layermap，按声明顺序累加 z 生成金属/介质/VIA
+横截面并校验堆叠；内置示教叠层（M1–M5 + AP、V1–V4 + PA）只用于演示，真实工艺由
+`fixtures/` 与 `tech_profile.json` 覆盖。profile 查找顺序：`$LIBRF_TECH_PROFILE` →
+工作目录 → 当前目录 → 模块目录 → 内建默认；工作空间 `LIBRF_WS`，默认 `~/virtuoso_work`。
 
-lri 内核 v2 以 ring0 为基准，每一圈都是 ring0 的精确内缩，因此相邻圈金属间距
-恒等于 `s`，整体 bbox 恒为 `W×H`；走线段角度只取 0°、45°、90°，可生成八角等
-非曼哈顿轮廓。支持四种拓扑——`se` 单端、`diff` 差分、`f8` 八字、`sym` 对称，
-并提供 `ct` 中心抽头。
+工具路径现场探查，命中即停：显式环境变量（`SPECTRE_BIN`、`VIRTUOSO_BIN`、`LIBRF_EMX`、
+`LIBRF_DBACCESS`、`LIBRF_STRMOUT`、`LIBRF_LAYERMAP`、`LIBRF_PROC`、`LIBRF_CDSSETUP`）→
+`$CADHOME` / `$CDS` / `$SPECTRE_HOME` → `PATH` → `/opt/eda`、`/eda`、`/usr/eda`、
+`/opt/cadence`。GUI「环境」页「自动探测」「自检报告」。
 
-v2 修复了三个实际缺陷：差分双臂圈间短路、差分中心桥/抽头形成短匝、B 臂绕向
-导致互感为负。修复后同一几何 EMX 实测 L 由 0.40 nH 变为 1.70 nH。几何生成后
-先做间距、线宽与 bbox 断言，再落版图。
+## 安全规则
 
-### Layout generation
-
-「版图 EM」页的版图生成子页支持类型 `ind` / `tl` / `xfmr` / `cpl`，按类型
-展开动态几何表单与预设；按钮「仅出图」/「出图 + EM + views」/「渲染截图」；
-views 模式 `emx`（推荐）/ `skill`（回退）/ `none`。层名不写死在代码里，全部
-按 `tech_profile.json` 的角色解析。
-
-### PCell geometry fixes (1.1.0)
-
-`librf.il` 的螺旋/变压器几何逐项自查后修了七处（详见 `CHANGELOG.md`）：
-
-- 八角螺旋每圈内缩量按 8 条边递减（原按 4 条），否则同圈金属自重叠、bbox 失真；
-- 内径闭合式按向上取整的匝数计算，与实画绕线一致；
-- 中心抽头电感与 balun 改用**整螺旋 + 绕线中点抽头**，单层对称半螺旋在几何上
-  不存在（两半拐角逐点重合、包围面积为 0）；
-- 叠层/交指变压器：上绕组内端沿内孔引到中心、从中心穿孔下到下层引出，消除
-  上下绕组重叠；交指次级 `dout` 做半间距偏移，两绕组真正交错；
-- balun 三路下层引出线穷举互异方位、按最小同层间距选优，间距不足时报错；
-- 下穿孔/抽头焊盘与相邻绕组的净空、引出落点相对拉长后轮廓的计算补上断言。
-
-`librfSelfTest` 相应增加黄金断言（`din` 闭合式、八角 bbox/中心/无自重叠、
-抽头点落在线中心、三路引出方位互异）。
-
-### 1.2.0 changes
-
-- **SKILL 注入真正生效**：`tech_to_skill` 不再给 `drc.via` / `drc.min_area`
-  的数值加引号，`librfDrcViaNum` / `librfDrcMinArea` 读到数字；via 缺省回落
-  改为示教模板 `0.5/0.5/0.2`。此前 1.1.0 的 via 查表在真实运行中是死代码。
-- **via 描画**：underpass、传输线栅栏、lri 桥接/landing 的 via 阵列统一走
-  `librfDrcViaNum`；两级栈错位量随 `(cut+spacing)/2` 推导。
-- **DRC**：阈值补 `1.0 *` 浮点强转；`librfDrcFigs` 增加 path 线宽检查；
-  单根微带不再被假间距判死；新增 `librfAssertSpiralBox` 生成期外形断言。
-- **`librfPickRoutes`**：三路 M3 引出取 `cadddr`（最小间距）而非 `cadr`
-  （走线点表），修复 balun 生成与 SKILL 自测第 7 组的崩溃。
-- **引擎**：`spec`/`pareto` 按每个目标判定 `met`（违反约束不再报
-  `targets_met`）；续跑校验 `config_sha1`，拒绝沿用别的配置的历史；归档目录
-  不再计入历史；Windows 停止路径不再抛 `AttributeError`；`summary.failures`
-  按真实失败计数，全失败会话报 `sim_failures`。
-- **GUI**：修复「关于」的 `NameError`、EM 页读不到 `extra.em_actual`、变量
-  `scale`/`integer` 在打开/另存时丢失。
-- `librfSelfTest()` 在 IC618 实机 24 PASS / 0 FAIL（新增八角/方形孔径、via
-  规则、DRC 阈值三组断言）。
-
-### EMX simulation
-
-EM 仿真子页提供 cell、GDS、频率与 EMX 精度设置（edge-width、3d、sidewalls、
-via-separation、label-snap、差分 mode、温度、并行）；可开始 EM、查看指纹、
-命令行预览、保存/载入设置。结果含 L(f)/Q(f)、SRF 标线与健康判读。
-
-### Geometry iteration
-
-勾选「启用版图 EM 优化」后，每轮几何 → 版图 → strmout → EMX → 刷新固定 sNp
-→ 电路 spectre → 合并输出；同几何点命中 `work/.geom_cache.json`。
-
-```json
-"layout_em": {
-  "enabled": true, "type": "ind", "cell": "opt_ind", "work": "work",
-  "geom_vars": ["n", "w", "s", "dout"], "fixed_geom": {"shape": "octagon"},
-  "snp": "work/snps/opt_ind.s2p", "emx": {"freq": "1e9:30e9:21"},
-  "geom_outputs": true, "views_mode": "emx"
-}
-```
-
-几何变量必须同时出现在 `variables` 中（GUI 勾选后自动并入）；`geom_var_specs`
-是 GUI 生成的初始值与边界表。`geom_outputs: true` 把 `L0`、`SRF`、`Q@f0`、
-`L(f)`、`Q(f)` 并入优化输出。几何失败、锁冲突、超时计罚并计入 `fail_limit`；
-工具缺失等 INFRA 免费重试一次；写 cellview 前检测 `*.cdslck*`，被占用时拒绝
-写入。`em_bridge` 与 `layout_em` 互斥，不得同时启用。
-
-### EM fusion
-
-默认关闭；`em_bridge.enabled=false` 或缺段时对原流程零影响。启用后每轮在电路
-仿真前把电学目标（默认 `L0`）格栅化：先查 EM 库，命中则取库中的实测指纹；未
-命中时仅当桥持有 `EmOptimizer` 才现做几何搜索 → EMX → 指纹 → 入库。桥把库
-返回的 `delivered`（实测标量）写回对应电路变量后再跑电路仿真，并把 requested /
-grid / delivered / delta / distance / sNp 路径记入 record 与 GUI；history 只记
-delivered / grid / distance。`grid_key` 只是库索引，交付以 `delivered` 为准；
-库保存 sNp 副本但不改写网表 nport 指向。
-
-```json
-"em_bridge": {
-  "enabled": true, "mode": "track", "fallback": "actual",
-  "library": "work/em_lib", "tech": "RFCMOS",
-  "devices": [{"device_type": "ind", "target_var": "L0", "metric": "L0",
-    "f_op": "28G", "tolerances": {"L0": 0.02},
-    "grid_spec": {"step_rel": 0.02}}],
-  "em_opt": {"budget": {"max_em": 20, "time_cap_s": 600}}
-}
-```
-
-- `mode`（默认 `track`）：上一次求解的几何作为下一轮 EM 的几何先验。
-- `fallback`：`actual` / `clip` / `penalty`，默认 `actual`。
-- `library`：库根，默认 `work/em_lib`；`LIBRF_EM_LIB` 可覆盖。
-- `device_type`：`ind` / `ct` / `tl` / `cpl` / `xfmr`；`target_var` 绑定电路
-  变量（也接受 `var_prefix`），`metric` 为指纹键（默认 `L0`）。
-- `f_op` 与 `tech` 必填（`tech` 可提到全局）；`tolerances` 可按指标覆盖
-  `L0` / `Q@f0` / `srf_margin` / `theta_tol_deg`；`step_rel` 不得大于
-  `2 × tol`，否则报错。`em_opt.budget` 的 `max_em` / `time_cap_s` 不写时按
-  器件默认（如 `ind` 25 次、`tl` 10 次；时间上限 1800–2700 秒）。
-
-库布局：`<library>/em_lib.sqlite3`（只 INSERT，不覆盖旧行）+
-`snp/<sha1 前 16 位>.<原扩展名>`（内容寻址，只增不改）。状态：`hit_grid`、
-`hit_nearest`、`miss`、`error`、`best_effort`、`infra_fail`；`infra_fail` 不占
-优化预算。GUI「EM 融合」页实时展示 requested / grid / delivered 与告警。
-
-## Process profile & tool discovery
-
-版图生成依赖四类工艺文件，层名必须一致：工艺库 techlib（层定义）、layermap
-（层名 → GDS 层号）、EMX `.proc`（层号 → 金属厚度/电导率）、`cds.lib`
-（库名 → 目录）。`tech_profile.json` 字段：`techlib`、`techlib_dir`、`layermap`、
-`proc`、`layers`（角色 → 层名，默认 `spiral=M5`、`underpass=M4`、
-`route/ground=M3`、`via_sp=V4`、`via_un=V3`、`marker=MARKER`）、`text`（金属 →
-文字层，缺省 `<层名>TXT`）、`drc`（`min_w` / `max_w` / `min_s` / `min_area` /
-`via` 参数级自检阈值；其中 `drc.via` 同时驱动 SKILL 的 via 描画尺寸，
-不是 sign-off）。
-
-工艺页用 `build_tech` 构建工艺对象、用 `require_tech_ready` 在出图与 EM 前预检。
-门禁是**工艺无关**的：只按 `layers` 的角色映射核对 layermap 中是否存在对应层、
-proc 中是否存在对应导体层，不写死任何层名或 GDS 层号；文件缺失与角色层缺失为
-硬错，`techlib_dir` 与 `cds.lib` 缺失只告警并回退探查或自动生成。可选 `flow`
-段显式给出叠层流程后，额外校验顺序、通孔、间距与通孔电阻（默认只告警，
-`strict_flow` 升级为阻断）。
-
-`proc_cross_section.py` 解析 `.proc`（`DEFINE` 常量与四则运算）与 layermap，按
-声明顺序累加 z 坐标生成金属 / 介质 / VIA 横截面并做堆叠校验：缺流程金属、金属
-顺序错误、缺通孔、layermap 层号不符为硬错；间距偏差、通孔电阻与叠层顺序异常
-为告警。内置示教叠层（M1–M5 + AP、V1–V4 + PA）只用于演示与测试，实际工艺用
-`tech_profile.json` 的 `flow` 段或自己的 `.proc` 覆盖。模块顶层不 import
-tkinter，绘图函数接收调用方传入的 canvas，可在 GUI 工艺页直接渲染。
-
-仓库自带 `fixtures/demo_stack.proc` 与 `fixtures/demo_stack.layermap` 一对示教
-文件，`librf_opt.py --selftest` 与 `test_proc_cross_section.py` 都基于它们。
-
-查找顺序：`$LIBRF_TECH_PROFILE` → 工作目录 → 当前目录 → 模块目录 → 内建默认；
-缺项逐级回落。版图 cell 落在 `<WS>/LIBRF`，工作空间由 `LIBRF_WS` 指定（默认
-`~/virtuoso_work`）。
-
-工具路径现场探查，命中即停：显式环境变量（`SPECTRE_BIN`、`VIRTUOSO_BIN`、
-`LIBRF_EMX`、`LIBRF_DBACCESS`、`LIBRF_STRMOUT`、`LIBRF_LAYERMAP`、`LIBRF_PROC`、
-`LIBRF_CDSSETUP`）→ `$CADHOME` / `$CDS` / `$SPECTRE_HOME` 等环境目录 → `PATH`
-→ `/opt/eda`、`/eda`、`/usr/eda`、`/opt/cadence` 常见安装树。GUI「环境」页的
-「自动探测」填入空栏，「自检报告」显示每个工具的解析结果与来源。
-
-## Safety rules
-
-**版图/EM 写入绝不删除或覆盖目标机中已存在的非本工具文件。**
+**写入绝不删除或覆盖目标机中已存在的非本工具文件。**
 
 | 情形 | 行为 |
 |---|---|
@@ -343,45 +209,35 @@ tkinter，绘图函数接收调用方传入的 canvas，可在 GUI 工艺页直�
 | `cds.lib` | 只追加缺失 `DEFINE`/`SOFTINCLUDE`，改动前留 `.bak`，绝不截断 |
 | 需淘汰的旧产物 | 改名 `<名>.old-<时间戳>`，不删除 |
 
-用户数据示例：sNp、settings JSON、`cds.lib`、`result.txt`。内部状态：精确名
-`.librf_owned.json`、`.geom_cache.json`；前缀 `driver_`、`res_`、
-`dbaccess.log`、`strmout_`；后缀/包含 `.emx.log`、`.tmp`、`.old-`、`.bak-`。
-`optimizer.py` 直接落盘的 `record.json`、`history.csv`、`manifest.jsonl`、
-`deck_base.scs`、`input.scs.params`、快照与报告同属内部状态，免 `.bak`；run
-目录应专用。写 cellview 前检查 `*.cdslck*` 与 `.librf_owned` 归属，非本工具
-cell 拒绝重画。
+写 cellview 前检查 `*.cdslck*` 与 `.librf_owned` 归属，非本工具 cell 拒绝重画。
 
-## Testing
+## 测试
 
-当前测试规模：`optimizer.py --selftest` 82 个用例；`librf_opt.py --selftest`
-106 ok / 0 fail；`em_opt.py --selftest` 3 组 mock 场景；`--gui-smoke` 跑 3 轮
-mock 并检查进度、仿真设置与 EM 融合页；`proc_cross_section` 自带 31 个 unittest。
-`librf.il` 另带 `librfSelfTest()`（SKILL 侧黄金断言，需在 Virtuoso 内执行；
-1.2.0 实测 24 PASS / 0 FAIL），不计入上述 Python 用例数。
+`optimizer.py --selftest` 94 用例；`netlist_create.py` 16；`netlist_params.py` 103；
+`em_align.py` 108；`librf_opt.py --selftest` 106 ok / 0 fail；`test_proc_cross_section` 31；
+`em_opt.py --selftest` PASS；`--gui-smoke` 跑 3 轮 mock 并检查进度、仿真设置、EM 与对齐页。
+`librf.il` 另带 `librfSelfTest()`（SKILL 侧黄金断言，需在 Virtuoso 内执行，24 PASS / 0 FAIL），
+不计入上述 Python 用例数。
 
-Windows 上两项历史失败（`test_find_prog_env_override`、`run_cmd 中文输出不崩`）
-已改为跨平台写法，Windows 也应全绿。
-
-## Troubleshooting
+## 故障排查
 
 | 现象 | 处理 |
 |---|---|
-| `config file is required` | CLI 必须给出配置路径 |
-| `no spectre deck` | 设计页填「网表」或「网表根目录」，检查 library/cell |
-| `网表顶层没有 parameters 行` | 顶层必须有 `parameters` 行；子电路内的不会被改写 |
-| 找不到 spectre / virtuoso / emx | 设对应 `*_BIN` / `LIBRF_*` 环境变量，或用 GUI「自动探测」「自检报告」 |
-| 中文乱码 / `UnicodeDecodeError` | 用 `LANG=C.UTF-8` 启动，避免中文路径，配置存为 UTF-8 |
-| 工具报路径不存在 | 清空配置中的绝对路径，让现场探查接管；必要时设 `LIBRF_PROC` / `LIBRF_LAYERMAP` |
-| compact 目录没有 `input.scs` | 正常；用 `--reconstruct` 重建并看 sha1 校验 |
+| `config file is required` | CLI 必须给配置路径；仅 `--selftest` / `--reconstruct` 等除外 |
+| 自动网表失败 / `fallback` | `OSSHNL-*` / `ADE-*`：查 `cds.lib`、library / cell / view 与 `state_dir`；旧网表会备份恢复，需硬失败设 `netlist_strict: true` |
+| 重生成后 `SFE-1997` 参数无值 | ADE 变量在原理图里没有默认值；看 `netlist_create.carry_over`，旧网表有值会自动回填 |
+| 重生成后模型/分析缺失 | `netlist_create.testbench_merge` 会把旧网表的 `include`、`sp/dcOp/...`、`save` 合并回来；若旧网表本身没有，需在 config/ADE 里补 |
+| `网表里找不到变量 X` | 看 `iter_*/netlist_patch.json` 的 `missing`；确认变量在顶层、子电路默认值或实例参数中出现 |
+| `no spectre deck` | 填 `netlist` 或 `sim_root`，或用自动网表生成后重跑 |
+| 找不到 spectre / virtuoso / emx | 设对应 `*_BIN` / `LIBRF_*` 环境变量，或用 GUI 环境页自动探测 |
+| EM 对齐无结果 | 第一阶段 run 目录须有可定位的最优轮次（`best_iter` / `best_variables`）；曲线文件需解析出至少一条曲线 |
 | EM 结果层错或厚度不对 | 核对 `tech_profile.json` 的 `layers`/`text` 与 layermap、`.proc` 层名一致 |
-| 横截面校验报缺金属、顺序错误或缺通孔 | 检查 `.proc` 的层定义与 VIA 链，确认 layermap 层号对应 |
-| 电感几何断言失败（间距、线宽或 bbox） | 检查 `s`、`w` 与 `W×H` 是否冲突；差分拓扑注意中心抽头与臂间距 |
-| EM 库记录不更新 | 库只 INSERT；换空库目录重建（工具不删/不覆盖用户文件） |
+| 横截面校验报缺金属/顺序错/缺通孔 | 检查 `.proc` 层定义与 VIA 链，确认 layermap 层号对应 |
+| 电感几何断言失败 | 检查 `s`、`w` 与 `W×H` 是否冲突；差分拓扑注意中心抽头与臂间距 |
 | EMX 卡住或报锁 | 关闭 Virtuoso 中打开的 cellview；检查 `*.cdslck*` |
 | `em_bridge` 与 `layout_em` 同时开 | 两者互斥，关掉其中一个 |
-| EM 设备配置报错 | `f_op`、`tech` 必填；`step_rel` 不得大于 2×tol；缺 `em_bridge.py` 时不静默降级 |
-| selftest 返回码 1 | 已无已知失败；按 traceback 修复到全绿 |
+| 中文乱码 / `UnicodeDecodeError` | 用 `LANG=C.UTF-8` 启动，避免中文路径，配置存为 UTF-8 |
 
 ## License
 
-MIT，见 `LICENSE`。
+MIT，见 `LICENSE`。逐版变更见 [CHANGELOG](CHANGELOG.md)。

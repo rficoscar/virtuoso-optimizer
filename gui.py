@@ -1245,6 +1245,83 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
         model["error"] = str(exc)
     return model
 
+def _auto_netlist_on(value):
+    """Map a config value (bool / "auto" / "off") to the checkbox state."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "auto", "always")
+    return bool(value)
+
+def netlist_report_text(report):
+    """Human-readable summary of netlist_create.ensure_netlist() output."""
+    if not isinstance(report, dict):
+        return "网表生成返回异常: %r" % (report,)
+    status = str(report.get("status") or "unknown")
+    lines = ["状态: %s" % status]
+    design = report.get("design")
+    if isinstance(design, dict) and design:
+        bits = [str(design.get(k)) for k in ("library", "cell", "view") if design.get(k)]
+        if bits:
+            lines.append("设计: %s" % " / ".join(bits))
+    for key, label in (("path", "网表"), ("expected", "预期路径"),
+                       ("previous", "原网表"), ("backup", "备份"),
+                       ("wall", "耗时(秒)"), ("log", "日志"),
+                       ("message", "说明")):
+        val = report.get(key)
+        if val not in (None, "", [], {}):
+            lines.append("%s: %s" % (label, val))
+    for key, label in (("errors", "错误"), ("warnings", "告警")):
+        items = report.get(key) or []
+        if items:
+            lines.append("%s(%d):" % (label, len(items)))
+            for item in list(items)[:20]:
+                lines.append("  " + str(item))
+    if report.get("restored"):
+        lines.append("已恢复备份网表")
+    return "\n".join(lines)
+
+def em_align_event_text(event):
+    """Render one on_event() payload for the EM 对齐 log box."""
+    if isinstance(event, str):
+        return event
+    if isinstance(event, dict):
+        for key in ("message", "msg", "text", "log"):
+            val = event.get(key)
+            if val not in (None, ""):
+                return str(val)
+        kind = event.get("type") or event.get("event")
+        try:
+            rest = json.dumps(event, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            rest = str(event)
+        return ("[%s] %s" % (kind, rest)) if kind else rest
+    return str(event)
+
+def find_em_report_md(report, dirs):
+    """Locate em_align_report.md from the report or the usual output dirs."""
+    keys = ("report_md", "em_align_md", "markdown_path", "md_path")
+    if isinstance(report, dict):
+        for key in keys:
+            val = report.get(key)
+            if val and os.path.isfile(str(val)):
+                return os.path.abspath(str(val))
+        em = report.get("em_align")
+        if isinstance(em, dict):
+            for key in keys + ("report_path", "path"):
+                val = em.get(key)
+                if val and os.path.isfile(str(val)):
+                    return os.path.abspath(str(val))
+    for base in dirs or ():
+        if not base:
+            continue
+        path = os.path.join(base, "em_align_report.md")
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    return None
+
 class _TechTab:
     """「工艺」页：工艺文件路径输入 + require_tech_ready 门禁 + 横截面（懒加载）。
 
@@ -1438,6 +1515,9 @@ class OptimizerGui:
         self.mock_var = self.tk.BooleanVar(value=False)
         self.resume_var = self.tk.BooleanVar(value=False)
         self._run_dir_state = None
+        self._netlist_busy = False
+        self._em_align_running = False
+        self.em_align_report_dir = ""
         self._build_menubar()
         self._build_toolbar()
         self._build_tabs()
@@ -1572,7 +1652,8 @@ class OptimizerGui:
         for label, attr in (("设计", "design_tab"), ("变量", "vars_tab"),
                             ("目标", "targets_tab"), ("设置", "settings_tab"),
                             ("环境", "env_tab"), ("仿真设置", "simset_tab"),
-                            ("EM 融合", "em_tab"), ("JSON", "json_tab"),
+                            ("EM 融合", "em_tab"), ("EM 对齐", "em_align_tab"),
+                            ("JSON", "json_tab"),
                             ("进度", "progress_tab"), ("结果", "result_tab")):
             mview.add_command(label=label, command=lambda a=attr: self._show_tab(a))
         bar.add_cascade(label="视图", menu=mview)
@@ -1627,6 +1708,8 @@ class OptimizerGui:
             "    只读实时展示, 2 秒轮询自动刷新 (也可手动刷新)\n\n"
             "运行机制: 启动时读取一次网表快照, 每轮迭代只改写网表的"
             " parameters 行并直接运行 spectre, 不重新生成网表。\n"
+            "  设计页勾选「开始前自动生成网表」时, 启动前先调用 netlist_create;\n"
+            "  「立即生成网表」按钮可随时单独生成。EM 对齐页做两阶段对齐。\n"
             "  因此第一轮约 7 秒(求值服务冷启动), 之后每轮约 0.5 秒。\n"
             "注意: 优化期间可以开着 Virtuoso 和 ADE L 查看原理图。\n"
             "  本工具对 ADE L 只读, 仿真与求值都是独立进程。\n"
@@ -1662,6 +1745,7 @@ class OptimizerGui:
         self._build_tech_tab()
         self._build_simset_tab()
         self._build_em_tab()
+        self._build_em_align_tab()
         self._build_json_tab()
         self._build_progress_tab()
         self._build_result_tab()
@@ -1682,12 +1766,14 @@ class OptimizerGui:
         self.fields = {}
         keys = [
             ("name", "名称"), ("library", "库"), ("cell", "单元"), ("view", "视图"),
+            ("netlist_view", "网表视图"),
             ("state", "状态"), ("state_dir", "状态目录"), ("work_dir", "工作目录"),
             ("sim_root", "网表根目录"), ("netlist", "网表"), ("virtuoso_bin", "virtuoso 路径"),
             ("output_dir", "输出目录"), ("analyses", "分析"),
         ]
         choices = {
             "view": ("schematic", "symbol", "layout"),
+            "netlist_view": ("schematic", "config"),
             "analyses": ("sp", "ac", "dc", "tran", "noise", "pss"),
         }
         browse = ("state_dir", "work_dir", "output_dir", "sim_root", "netlist")
@@ -1704,6 +1790,12 @@ class OptimizerGui:
         btns.grid(row=len(keys), column=0, columnspan=4, sticky="w", pady=8)
         self.ttk.Button(btns, text="导入 ADE L 变量/输出", command=self._import_ade).pack(side="left", padx=2)
         self.ttk.Button(btns, text="查找网表", command=self._find_netlist).pack(side="left", padx=2)
+        self.auto_netlist_var = self.tk.BooleanVar(value=False)
+        self.ttk.Checkbutton(btns, text="开始前自动生成网表",
+                             variable=self.auto_netlist_var).pack(side="left", padx=8)
+        self.netlist_btn = self.ttk.Button(btns, text="立即生成网表",
+                                           command=self._netlist_now)
+        self.netlist_btn.pack(side="left", padx=2)
         self.ttk.Label(btns, text="导入: 变量进变量页, 输出名进目标页下拉框").pack(side="left", padx=8)
         tab.columnconfigure(1, weight=1)
     def _browse_path(self, key):
@@ -1738,6 +1830,98 @@ class OptimizerGui:
         lines.append("")
         lines.append("已把最新的一个填入「网表」栏；要换用请手动改。")
         self._show_text_dialog("查找网表", chr(10).join(lines))
+    def _netlist_cfg(self):
+        """Build the subset of cfg netlist_create needs, without validation."""
+        cfg = self._collect_cfg(validate=False)
+        if cfg is None:
+            return None
+        cfg = dict(cfg)
+        # 「立即生成」= 强制执行, 不受复选框的 auto 语义影响。
+        cfg["auto_netlist"] = "always"
+        view = ""
+        try:
+            view = self.fields["netlist_view"].get().strip()
+        except Exception:
+            pass
+        if view:
+            cfg["netlist_view"] = view
+        return cfg
+    def _netlist_now(self):
+        if getattr(self, "_netlist_busy", False):
+            self._dialog("生成网表", "正在生成，请稍候。", error=True)
+            return
+        cfg = self._netlist_cfg()
+        if cfg is None:
+            return
+        if not (cfg.get("cell") or "").strip() and not (cfg.get("state_dir") or "").strip():
+            self._dialog("生成网表",
+                         "请先填写「单元」，或填写「状态目录」（用于读取 ADE 状态）。",
+                         error=True)
+            return
+        self._netlist_busy = True
+        try:
+            self.netlist_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._set_status("正在生成网表…")
+        threading.Thread(target=self._netlist_worker, args=(cfg,), daemon=True).start()
+    def _netlist_worker(self, cfg):
+        """Background thread: never touch Tk; report through the queue."""
+        try:
+            try:
+                import netlist_create as _nc
+            except Exception as exc:
+                raise RuntimeError("netlist_create 模块不可用: %s" % exc)
+            fn = getattr(_nc, "ensure_netlist", None)
+            if fn is None:
+                raise RuntimeError("netlist_create 缺少 ensure_netlist()")
+            rep = fn(cfg)
+        except Exception as exc:
+            import traceback
+            self.queue.put({"type": "netlist_now", "ok": False,
+                            "error": "%s: %s" % (type(exc).__name__, exc),
+                            "traceback": traceback.format_exc()})
+            return
+        self.queue.put({"type": "netlist_now", "ok": True, "report": rep})
+    def _handle_netlist_now(self, ev):
+        self._netlist_busy = False
+        try:
+            self.netlist_btn.configure(state="normal")
+        except Exception:
+            pass
+        if not ev.get("ok"):
+            msg = ev.get("error") or "未知错误"
+            self._set_status("生成网表失败: %s" % msg)
+            self._log("生成网表失败: %s\n" % msg)
+            self._dialog("生成网表失败", msg, error=True)
+            return
+        rep = ev.get("report") or {}
+        text = netlist_report_text(rep)
+        self._log("[生成网表] %s\n" % text.replace(chr(10), " | "))
+        status = str(rep.get("status") or "")
+        design = rep.get("design") if isinstance(rep.get("design"), dict) else {}
+        if status in ("ok", "fallback"):
+            path = rep.get("path") or rep.get("expected")
+            if path and status == "ok":
+                try:
+                    self.fields["netlist"].set(str(path))
+                except Exception:
+                    pass
+            view = design.get("view")
+            if view:
+                try:
+                    self.fields["netlist_view"].set(str(view))
+                except Exception:
+                    pass
+        if status == "ok":
+            self._set_status("网表已生成: %s" % (rep.get("path") or rep.get("expected") or ""))
+            self._dialog("生成网表", text)
+        elif status == "fallback":
+            self._set_status("网表生成失败，沿用旧网表")
+            self._dialog("生成网表", text, error=True)
+        else:
+            self._set_status("网表生成未完成: %s" % status)
+            self._dialog("生成网表", text, error=True)
     def _env_probe(self):
         """Fill empty rows by probing this machine (no absolute paths)."""
         import optimizer as _opt
@@ -1933,7 +2117,7 @@ class OptimizerGui:
             "失败上限 fail_limit —— 整数 ≥1。连续仿真失败达到即停止（stop_reason=sim_failures）。默认 5。基础设施类错误（license/网表/求值服务）会免费重试一次且不计入。\n"
             "最大重启 max_restarts —— 整数 ≥0。停滞时允许的最大重启次数。默认 2。重启围绕当前最优点重新布点（带衰减扰动 + 少量随机移民）。\n"
             "随机种子 seed —— 整数（含 0）。同种子 + 同配置 → 结果可复现。留空=每次不同。默认 0。\n"
-            "搜索策略 strategy —— 取值见「算法说明」小标签页（simplex / global / de / lshade / cmaes / cmaes_ipop / tpe / nsga2 / weighted / worstspec / portfolio / random / grid）。\n"
+            "搜索策略 strategy —— 取值见「算法说明」小标签页（simplex / coordinate / global / de / lshade / cmaes / cmaes_ipop / tpe / nsga2 / weighted / worstspec / portfolio / random / grid）。\n"
             "另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、noise_sigma（噪声估计）、init_points（预热 CSV）。\n")
         sim_detail = (
             "仿真选项详细说明\n\n"
@@ -1964,8 +2148,9 @@ class OptimizerGui:
              "选型速查（strategy 取值）\n"
              "  变量少且平滑 → simplex（默认）    变量多 / 多峰 → global 或 de\n"
              "  预算≥50 单目标 → lshade          变量强耦合 → cmaes / cmaes_ipop\n"
-             "  仿真极贵省次数 → tpe             多目标 → nsga2 / weighted /\n"
-             "  拿不准选哪个 → portfolio          worstspec；基线 → random / grid\n"
+             "  EM 两阶段对齐 → coordinate        仿真极贵省次数 → tpe\n"
+             "  多目标 → nsga2 / weighted /      拿不准 → portfolio\n"
+             "  worstspec；基线 → random / grid\n"
              "\n下方「详细说明」= 全部算法的原理 / 适用 / 优势 / 局限 / 历史利用。\n",
              ""),   # detail filled at switch time from algorithm.help_text()
             ("历史与续跑",
@@ -2370,6 +2555,320 @@ class OptimizerGui:
                              "_em_after_id")
     def _em_shutdown(self):
         self._poll_text_shutdown("_em_closed", "_em_after_id")
+    # EM 两阶段对齐（需求 E / C 的入口）
+    def _build_em_align_tab(self):
+        tab = self.ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab, text="EM 对齐")
+        self.em_align_tab = tab
+        self.em_align_fields = {}
+        self.em_align_extra = {}
+        form = self.ttk.Frame(tab)
+        form.pack(side="top", fill="x")
+        rows = (("stage1_dir", "第一阶段 run 目录", "dir"),
+                ("em_curve", "EM 曲线文件", "file"),
+                ("em_netlist", "EM 网表", "file"),
+                ("output_dir", "输出目录", "dir"),
+                ("max_iter", "最大迭代", None),
+                ("tol", "匹配容差", None))
+        for row, (key, label, kind) in enumerate(rows):
+            self.ttk.Label(form, text=label).grid(row=row, column=0, sticky="e", padx=4, pady=2)
+            var = self.tk.StringVar()
+            self.ttk.Entry(form, textvariable=var, width=64).grid(
+                row=row, column=1, sticky="we", padx=4)
+            self.em_align_fields[key] = var
+            if kind:
+                self.ttk.Button(form, text="浏览",
+                                command=lambda k=key, t=kind: self._browse_em_align(k, t)
+                                ).grid(row=row, column=2, padx=4)
+        form.columnconfigure(1, weight=1)
+        self.ttk.Label(tab, foreground="#888888",
+                       text="EM 曲线文件与 EM 网表至少填一个；输出目录留空=<第一阶段>/em_align；"
+                            "最大迭代/容差留空=用优化器默认").pack(anchor="w", pady=(2, 4))
+        bar = self.ttk.Frame(tab)
+        bar.pack(side="top", fill="x", pady=(0, 4))
+        self.em_align_start_btn = self.ttk.Button(bar, text="开始 EM 对齐",
+                                                  command=self._start_em_align)
+        self.em_align_start_btn.pack(side="left", padx=2)
+        self.ttk.Button(bar, text="打开报告目录",
+                        command=self._open_em_align_dir).pack(side="left", padx=2)
+        self.em_align_status_var = self.tk.StringVar(value="就绪")
+        self.ttk.Label(bar, textvariable=self.em_align_status_var,
+                       foreground="#555555").pack(side="left", padx=8)
+        self.em_align_path_var = self.tk.StringVar(value="")
+        self.ttk.Label(bar, textvariable=self.em_align_path_var,
+                       foreground="#2266cc").pack(side="left", padx=8)
+        body = self.ttk.Frame(tab)
+        body.pack(side="top", fill="both", expand=True)
+        self.ttk.Label(body, text="进度/日志").pack(anchor="w")
+        log_wrap = self.ttk.Frame(body)
+        log_wrap.pack(side="top", fill="both", expand=True)
+        self.em_align_log_text = self._scrolled_text(log_wrap, wrap="none", height=10)
+        self.em_align_log_text.configure(state="disabled")
+        self.ttk.Label(body, text="对齐报告 (em_align_report.md)").pack(anchor="w", pady=(4, 0))
+        res_wrap = self.ttk.Frame(body)
+        res_wrap.pack(side="top", fill="both", expand=True)
+        self.em_align_result_text = self._scrolled_text(res_wrap, wrap="none")
+        self.em_align_result_text.configure(state="disabled")
+    def _browse_em_align(self, key, kind):
+        from tkinter import filedialog
+        var = self.em_align_fields.get(key)
+        if var is None:
+            return
+        cur = os.path.expanduser(var.get().strip()) or os.path.expanduser("~")
+        if kind == "dir":
+            path = filedialog.askdirectory(parent=self.root, initialdir=cur)
+        else:
+            path = filedialog.askopenfilename(
+                parent=self.root, initialdir=cur,
+                filetypes=[("曲线/数据文件",
+                            ("*.txt", "*.csv", "*.json", "*.s2p", "*.s3p", "*.s4p")),
+                           ("全部文件", "*.*")])
+        if path:
+            var.set(path)
+    def _collect_em_align(self):
+        fields = getattr(self, "em_align_fields", None)
+        if not fields:
+            return {}
+        # 保留 em_align 里本页不显示的键 (band/outputs/max_points/...).
+        sec = dict(getattr(self, "em_align_extra", {}) or {})
+        for key, var in fields.items():
+            text = (var.get() or "").strip()
+            if not text:
+                continue
+            if key == "max_iter":
+                try:
+                    sec[key] = int(parse_eng(text))
+                except Exception:
+                    sec[key] = text
+            elif key == "tol":
+                try:
+                    sec[key] = float(parse_eng(text))
+                except Exception:
+                    sec[key] = text
+            else:
+                sec[key] = text
+        return sec
+    def _load_em_align(self, section):
+        fields = getattr(self, "em_align_fields", None)
+        if not fields:
+            return
+        sec = section if isinstance(section, dict) else {}
+        self.em_align_extra = {k: v for k, v in sec.items() if k not in fields}
+        for key, var in fields.items():
+            val = sec.get(key)
+            var.set("" if val is None else str(val))
+        self.em_align_report_dir = ""
+        try:
+            self.em_align_path_var.set("")
+            self.em_align_status_var.set("就绪")
+        except Exception:
+            pass
+        if not getattr(self, "_em_align_running", False):
+            try:
+                self._set_text(self.em_align_log_text, "")
+                self._set_text(self.em_align_result_text, "")
+            except Exception:
+                pass
+    def _em_align_append_log(self, text):
+        if not text:
+            return
+        try:
+            box = self.em_align_log_text
+            box.configure(state="normal")
+            box.insert("end", "[%s] %s\n" % (time.strftime("%H:%M:%S"), str(text).rstrip()))
+            box.see("end")
+            box.configure(state="disabled")
+        except Exception:
+            pass
+    def _start_em_align(self):
+        if getattr(self, "_em_align_running", False):
+            self._dialog("EM 对齐", "正在运行，请等待完成。", error=True)
+            return
+        vals = {k: (v.get() or "").strip() for k, v in self.em_align_fields.items()}
+        stage1 = os.path.expanduser(vals.get("stage1_dir", ""))
+        if not stage1:
+            self._dialog("EM 对齐", "请填写第一阶段 run 目录。", error=True)
+            return
+        if not os.path.isdir(stage1):
+            self._dialog("EM 对齐", "第一阶段 run 目录不存在：\n%s" % stage1, error=True)
+            return
+        curve = os.path.expanduser(vals.get("em_curve", ""))
+        netlist = os.path.expanduser(vals.get("em_netlist", ""))
+        if not curve and not netlist:
+            self._dialog("EM 对齐", "EM 曲线文件与 EM 网表至少填一个。", error=True)
+            return
+        if curve and not os.path.isfile(curve):
+            self._dialog("EM 对齐", "EM 曲线文件不存在：\n%s" % curve, error=True)
+            return
+        if netlist and not os.path.isfile(netlist):
+            self._dialog("EM 对齐", "EM 网表不存在：\n%s" % netlist, error=True)
+            return
+        max_iter = None
+        if vals.get("max_iter"):
+            try:
+                max_iter = int(parse_eng(vals["max_iter"]))
+            except Exception:
+                self._dialog("EM 对齐", "最大迭代不是整数：%s" % vals["max_iter"], error=True)
+                return
+            if max_iter <= 0:
+                self._dialog("EM 对齐", "最大迭代必须为正数。", error=True)
+                return
+        tol = None
+        if vals.get("tol"):
+            try:
+                tol = float(parse_eng(vals["tol"]))
+            except Exception:
+                self._dialog("EM 对齐", "匹配容差不是数值：%s" % vals["tol"], error=True)
+                return
+            if tol <= 0:
+                self._dialog("EM 对齐", "匹配容差必须为正数。", error=True)
+                return
+        out_dir = os.path.expanduser(vals.get("output_dir", "")) or None
+        cfg = self._collect_cfg(validate=False)
+        if cfg is None:
+            return
+        self._em_align_running = True
+        try:
+            self.em_align_start_btn.configure(state="disabled")
+        except Exception:
+            pass
+        self._set_text(self.em_align_log_text, "")
+        self._set_text(self.em_align_result_text, "运行中…")
+        self.em_align_path_var.set("")
+        self.em_align_report_dir = ""
+        self.em_align_status_var.set("运行中…")
+        self._set_status("EM 对齐运行中…")
+        self._em_align_append_log("开始 EM 对齐: %s" % stage1)
+        if curve:
+            self._em_align_append_log("EM 曲线: %s" % curve)
+        if netlist:
+            self._em_align_append_log("EM 网表: %s" % netlist)
+        threading.Thread(target=self._em_align_worker,
+                         args=(cfg, stage1, curve or None, netlist or None,
+                               out_dir, max_iter, tol, bool(self.mock_var.get())),
+                         daemon=True).start()
+    def _em_align_worker(self, cfg, stage1, curve, netlist, out_dir,
+                         max_iter, tol, mock):
+        """Background thread: never touch Tk; report through the queue."""
+        try:
+            try:
+                import optimizer as _opt
+            except Exception as exc:
+                raise RuntimeError("无法导入 optimizer: %s" % exc)
+            fn = getattr(_opt, "run_em_align", None)
+            if fn is None:
+                raise RuntimeError(
+                    "optimizer.run_em_align 尚未实现（等待集成线按契约提供）；"
+                    "EM 对齐页与配置项已就绪。")
+            report = fn(cfg, stage1, em_curve=curve, em_netlist=netlist,
+                        output_dir=out_dir, max_iter=max_iter, tol=tol,
+                        mock=mock, on_event=self._em_align_event)
+        except Exception as exc:
+            import traceback
+            default_dir = out_dir or os.path.join(stage1, "em_align")
+            self.queue.put({"type": "em_align_done", "ok": False,
+                            "error": "%s: %s" % (type(exc).__name__, exc),
+                            "traceback": traceback.format_exc(),
+                            "report_dir": default_dir})
+            return
+        default_dir = out_dir or os.path.join(stage1, "em_align")
+        self.queue.put({"type": "em_align_done", "ok": True, "report": report,
+                        "report_dir": default_dir})
+    def _em_align_event(self, event):
+        """on_event callback. Runs in the worker thread."""
+        self.queue.put({"type": "em_align_log", "text": em_align_event_text(event)})
+    def _handle_em_align_done(self, ev):
+        self._em_align_running = False
+        try:
+            self.em_align_start_btn.configure(state="normal")
+        except Exception:
+            pass
+        if not ev.get("ok"):
+            msg = ev.get("error") or "未知错误"
+            self.em_align_status_var.set("失败")
+            self._em_align_append_log("失败: %s" % msg)
+            if ev.get("traceback"):
+                self._em_align_append_log(str(ev["traceback"]).rstrip())
+            self._set_text(self.em_align_result_text, "EM 对齐失败\n%s" % msg)
+            self.em_align_report_dir = ev.get("report_dir") or ""
+            self._set_status("EM 对齐失败: %s" % msg)
+            self._log("EM 对齐失败: %s\n" % msg)
+            self._dialog("EM 对齐失败", msg, error=True)
+            return
+        report = ev.get("report")
+        dirs = []
+        for cand in (ev.get("report_dir"),):
+            if cand:
+                dirs.append(cand)
+        vals = {k: (v.get() or "").strip() for k, v in self.em_align_fields.items()}
+        if vals.get("stage1_dir"):
+            dirs.append(os.path.join(os.path.expanduser(vals["stage1_dir"]), "em_align"))
+        if vals.get("output_dir"):
+            dirs.append(os.path.expanduser(vals["output_dir"]))
+        md = find_em_report_md(report, dirs)
+        text = None
+        if md:
+            try:
+                with open(md, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except Exception as exc:
+                self._em_align_append_log("读取报告失败: %s" % exc)
+                text = None
+        em = report.get("em_align") if isinstance(report, dict) else None
+        if not text and isinstance(em, dict):
+            try:
+                import em_align as _ea
+                text = _ea.format_markdown(em)
+            except Exception as exc:
+                self._em_align_append_log("em_align.format_markdown 不可用: %s" % exc)
+        if not text:
+            try:
+                text = json.dumps(report, indent=2, ensure_ascii=False)
+            except Exception:
+                text = str(report)
+        head = []
+        if md:
+            head.append("报告: %s" % md)
+            self.em_align_report_dir = os.path.dirname(md)
+            self.em_align_path_var.set(md)
+        else:
+            head.append("报告文件未找到（输出目录: %s）" % (dirs[0] if dirs else "(未指定)"))
+            self.em_align_report_dir = ev.get("report_dir") or ""
+            self.em_align_path_var.set("")
+        aligned = em.get("aligned") if isinstance(em, dict) else None
+        if aligned is not None:
+            head.append("aligned: %s" % aligned)
+        self._set_text(self.em_align_result_text, "\n".join(head + ["", text]))
+        state = "完成"
+        if aligned is True:
+            state += "（已对齐）"
+        elif aligned is False:
+            state += "（未对齐）"
+        self.em_align_status_var.set(state)
+        self._set_status("EM 对齐完成")
+        self._dialog("EM 对齐", "\n".join([state] + head))
+    def _open_em_align_dir(self):
+        vals = {k: (v.get() or "").strip() for k, v in self.em_align_fields.items()}
+        cands = [getattr(self, "em_align_report_dir", "") or ""]
+        if vals.get("output_dir"):
+            cands.append(os.path.expanduser(vals["output_dir"]))
+        if vals.get("stage1_dir"):
+            cands.append(os.path.join(os.path.expanduser(vals["stage1_dir"]), "em_align"))
+        for path in cands:
+            if path and os.path.isdir(path):
+                try:
+                    if hasattr(os, "startfile"):
+                        os.startfile(path)
+                    else:
+                        import subprocess
+                        opener = "open" if sys.platform == "darwin" else "xdg-open"
+                        subprocess.Popen([opener, path])
+                    return
+                except Exception as exc:
+                    self._dialog("打开报告目录", "无法打开 %s:\n%s" % (path, exc), error=True)
+                    return
+        self._dialog("打开报告目录",
+                     "报告目录不存在。先运行 EM 对齐，或填写输出目录。", error=True)
     def _build_json_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="JSON")
@@ -2528,7 +3027,8 @@ class OptimizerGui:
         managed = ("name", "library", "cell", "view", "state", "state_dir",
                    "work_dir", "virtuoso_bin", "output_dir", "analyses", "save_raw",
                    "sim_timeout", "variables", "fixed_variables", "targets", "settings",
-                   "netlist", "sim_root", "spectre_bin", "env", "path_append")
+                   "netlist", "sim_root", "spectre_bin", "env", "path_append",
+                   "auto_netlist", "netlist_view", "em_align")
         self.extra = {k: v for k, v in cfg.items() if k not in managed}
         tech = getattr(self, "tech_tab", None)
         if tech is not None:
@@ -2576,6 +3076,9 @@ class OptimizerGui:
                 var.set(str(_SET_DEFAULTS[key] if val is None else val))
         self._vars_undo_stack = []
         self._vars_redo_stack = []
+        if hasattr(self, "auto_netlist_var"):
+            self.auto_netlist_var.set(_auto_netlist_on(cfg.get("auto_netlist")))
+        self._load_em_align(cfg.get("em_align"))
         self._live_refresh_axis_options()
         self._refresh_json()
     def _collect_cfg(self, validate=True):
@@ -2635,6 +3138,10 @@ class OptimizerGui:
                 fixed.append({"name": vals[0], "value": vals[1]})
             cfg["fixed_variables"] = fixed
             cfg["targets"] = [self.target_specs[iid] for iid in self.target_tree.get_children()]
+            cfg["auto_netlist"] = (bool(self.auto_netlist_var.get())
+                                   if hasattr(self, "auto_netlist_var") else False)
+            cfg["netlist_view"] = f.get("netlist_view", "")
+            cfg["em_align"] = self._collect_em_align()
             s = dict(self.extra_settings)
             for key in self.set_fields:
                 text = self.set_fields[key].get().strip()
@@ -3617,6 +4124,12 @@ class OptimizerGui:
             self._handle_iteration(ev)
         elif kind == "restart":
             self._log(f"[{ev.get('index')}] 重启单纯形 {ev.get('count')}\n")
+        elif kind == "netlist_now":
+            self._handle_netlist_now(ev)
+        elif kind == "em_align_log":
+            self._em_align_append_log(ev.get("text", ""))
+        elif kind == "em_align_done":
+            self._handle_em_align_done(ev)
         elif kind == "done":
             self._handle_done(ev)
     def _handle_iteration(self, ev):
@@ -3767,6 +4280,27 @@ def run_gui(cfg_path=None, smoke=False):
                 reason = "EM 融合页缺少库统计区"
         except Exception as exc:
             reason = "EM 融合页读取失败: %s" % exc
+    if reason is None and not getattr(gui, "em_align_tab", None):
+        reason = "EM 对齐页未创建"
+    elif reason is None and (not getattr(gui, "em_align_log_text", None)
+                             or not getattr(gui, "em_align_result_text", None)):
+        reason = "EM 对齐页文本框未创建"
+    elif reason is None and not getattr(gui, "netlist_btn", None):
+        reason = "设计页缺少「立即生成网表」按钮"
+    elif reason is None:
+        try:
+            probe = gui._collect_cfg(validate=False)
+            if not isinstance(probe, dict):
+                reason = "配置收集失败"
+            else:
+                missing = [k for k in ("auto_netlist", "netlist_view", "em_align")
+                           if k not in probe]
+                if missing:
+                    reason = "配置缺少键: " + ", ".join(missing)
+                elif not isinstance(probe.get("em_align"), dict):
+                    reason = "em_align 不是配置段"
+        except Exception as exc:
+            reason = "配置键检查失败: %s" % exc
     # P2-2: stop the poll chain before destroy (same as _on_close).
     try:
         gui._simset_shutdown()

@@ -27,8 +27,9 @@ from optimizer import (  # noqa: F401
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
     config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
-    read_manifest, reconstruct_input_scs, resolve_prog, resolve_run_dir,
-    rewrite_netlist_parameters, run_optimization, stop_all_runners,
+    MockRunner, prepare_netlist, read_manifest, reconstruct_input_scs,
+    resolve_prog, resolve_run_dir, rewrite_netlist_parameters,
+    run_em_align, run_optimization, stop_all_runners,
     suggest_bounds, tool_report,
 )
 from optimizer import (  # private helpers referenced by the suite
@@ -1388,13 +1389,235 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertAlmostEqual(eb["em_opt"]["budget"]["max_em"], 20)
 
 
+class TestV12Modules(unittest.TestCase):
+    """V12: auto netlist, scoped parameter patching, EM two-stage alignment."""
+
+    DECK = (
+        "simulator lang=spectre\n"
+        "parameters L1=250p L2=280p \\\n"
+        "  k0=0.6 cin=100f\n"
+        "subckt ind a b\n"
+        "parameters L1=200p k0=0.5\n"
+        "L1 a b L1\n"
+        "ends ind\n"
+        "X1 n1 n2 ind L1=210p k0=0.55\n"
+    )
+
+    def test_coordinate_search_converges(self):
+        """Coordinate strategy walks down each axis from x0."""
+        import algorithm
+        alg = algorithm.create("coordinate", ["x"], [(0.0, 1.0)],
+                               x0=[0.7], seed=0)
+        for _ in range(80):
+            x = alg.ask()[0]
+            alg.tell([x], [(x[0] - 0.4) ** 2])
+        self.assertAlmostEqual(alg.best()[0][0], 0.4, places=2)
+
+    def test_netlist_params_continuation_and_scopes(self):
+        """Continuation lines, subckt defaults and instance overrides patched."""
+        import netlist_params
+        text, rep = netlist_params.patch_netlist(
+            self.DECK, {"L1": "260p", "L2": "290p", "k0": "0.7",
+                        "cin": "110f"})
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual(rep["missing"], [])
+        self.assertIn("parameters L1=260p L2=290p", text)
+        self.assertIn("k0=700m", text)
+        self.assertIn("cin=110f", text)
+        self.assertNotIn("L1=250p", text)
+        self.assertNotIn("L1=200p", text)
+        self.assertNotIn("L1=210p", text)
+
+    def test_netlist_params_missing_is_loud(self):
+        """A variable absent everywhere must fail, not be silently skipped."""
+        import netlist_params
+        text, rep = netlist_params.patch_netlist(self.DECK, {"nope": "1"})
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["missing"], ["nope"])
+        self.assertEqual(text, self.DECK)
+
+    def test_netlist_params_rewrite_compat(self):
+        """The old top-level rewrite entry stays usable by other callers."""
+        line = parse_netlist_parameters(self.DECK)
+        self.assertIn("L1", line)
+        out, n = rewrite_netlist_parameters(self.DECK, "L1=2n")
+        self.assertEqual(n, 1)
+        self.assertIn("L1=2n", out)
+
+    def test_netlist_create_read_design_and_path(self):
+        """ADE state + explicit view -> mixed source, expected config path."""
+        import netlist_create
+        tmp = tempfile.mkdtemp(prefix="v12_nc_")
+        state = os.path.join(tmp, "spectre_state1")
+        os.makedirs(state)
+        with open(os.path.join(state, "ADE_state.info"), "w") as f:
+            f.write("designInfo = '(\"LibA\" \"CellA\" \"schematic\" "
+                    "\"spectre\")\n")
+        design = netlist_create.read_design({
+            "state_dir": state, "library": "LibB", "netlist_view": "config"})
+        self.assertEqual(design["library"], "LibB")
+        self.assertEqual(design["cell"], "CellA")
+        self.assertEqual(design["view"], "config")
+        self.assertEqual(design["source"], "mixed")
+        path = netlist_create.expected_netlist_path(
+            design, {"sim_root": tmp})
+        self.assertTrue(path.replace("\\", "/").endswith(
+            "/spectre/config/netlist/input.scs"), path)
+
+    def test_netlist_create_merge_testbench(self):
+        """Model includes and ADE analyses survive a config createNetlist."""
+        import netlist_create
+        old = (
+            "simulator lang=spectre\n"
+            "parameters fin=36G\n"
+            "include \"/pdk/models.lib\" section=tt\n"
+            "subckt s a b\nends s\n"
+            "I0 (a b) s\n"
+            "sp sp ports=[PORT0 PORT1] start=16G stop=56G lin=81\n"
+            "sweephb sweep param=pin start=-20 stop=10 step=1 {\n"
+            "  hb hb fundfreqs=[(fin)]\n"
+            "}\n"
+            "save PORT1:p\n"
+            "saveOptions options save=selected\n"
+            "include \"/proj/cell.pex.netlist\"\n")
+        new = (
+            "simulator lang=spectre\n"
+            "global 0\n"
+            "parameters fin=36G\n"
+            "subckt s a b\nends s\n"
+            "I0 (a b) s\n"
+            "saveOptions options save=selected\n"
+            "include \"/proj/cell.pex.netlist\"\n")
+        merged, tb = netlist_create.merge_testbench(new, old)
+        self.assertEqual(tb["includes"], 1, tb)
+        self.assertEqual(sorted(tb["analyses"]), ["sp", "sweephb"])
+        self.assertIn('include "/pdk/models.lib"', merged)
+        self.assertIn("sp sp ports=[PORT0 PORT1]", merged)
+        self.assertIn("hb hb fundfreqs", merged)
+        self.assertIn("save PORT1:p", merged)
+        self.assertEqual(merged.count("include \"/proj/cell.pex.netlist\""),
+                         1)
+
+    def test_netlist_create_carry_over_bare_params(self):
+        """ADE bare declarations keep the previous deck's effective values."""
+        import netlist_create
+        old = ("simulator lang=spectre\n"
+               "parameters Ls2=140p Lp2=400p k2=475m \\\n"
+               "    cneu=40f\n"
+               "I3 (a b) xfmr_tap _par0=Ls2 _par1=Lp2 _par2=k2\n")
+        new = ("simulator lang=spectre\n"
+               "parameters Ls2 Lp2 k2=475m cneu=40f\n"
+               "I3 (a b) xfmr_tap _par0=Ls2 _par1=Lp2 _par2=k2\n")
+        merged, changes = netlist_create.carry_over_parameters(new, old)
+        self.assertEqual(sorted(c["name"] for c in changes),
+                         ["Lp2", "Ls2"])
+        self.assertIn("Ls2=140p", merged)
+        self.assertIn("Lp2=400p", merged)
+        self.assertIn("_par0=Ls2", merged)
+
+    def test_netlist_create_log_classification(self):
+        """Echoed IL source is not an error; warnings stay warnings."""
+        import netlist_create
+        text = ("\\i printf(\"OPT_NETLIST_FAIL createNetlist returned nil\")\n"
+                "\\o WARNING (OSSHNL-379): unable to descend\n"
+                "\\o ERROR (ADE-5726): Unable to open config\n"
+                "\\o Errors: 0\tWarnings: 0\n")
+        errors, warnings = netlist_create._scan_lines(text)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("ADE-5726", errors[0])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("OSSHNL-379", warnings[0])
+
+    def test_netlist_create_work_dir_finds_cds_lib(self):
+        """Virtuoso cwd walks up to the project root that owns cds.lib."""
+        import netlist_create
+        tmp = tempfile.mkdtemp(prefix="v12_cds_")
+        root = os.path.join(tmp, "proj")
+        state = os.path.join(root, "sim", "Cell", "spectre_state1")
+        os.makedirs(state)
+        with open(os.path.join(root, "cds.lib"), "w") as f:
+            f.write("DEFINE LibA ./LibA\n")
+        got = netlist_create._work_dir({"state_dir": state})
+        self.assertEqual(os.path.normcase(os.path.abspath(got)),
+                         os.path.normcase(os.path.abspath(root)))
+
+    def test_em_align_csv_and_match_targets(self):
+        """Generic CSV headers survive; targets carry x/y limits."""
+        import em_align
+        tmp = tempfile.mkdtemp(prefix="v12_em_")
+        path = os.path.join(tmp, "em.csv")
+        with open(path, "w") as f:
+            f.write("freq,S21 dB20\n")
+            for i in range(11):
+                f.write("%.6e,%.6f\n" % (24e9 + i * 1e9, -3.0 + 0.1 * i))
+        curves = em_align.load_curves(path)
+        self.assertIn("S21 dB20", curves)
+        targets = em_align.build_match_targets(curves, max_points=6,
+                                               tol=0.05)
+        self.assertTrue(targets)
+        t = targets[0]
+        self.assertEqual(t["curve_op"], "match")
+        self.assertEqual(t["output"], "S21 dB20")
+        self.assertLessEqual(len(t["limit"]["x"]), 6)
+        self.assertEqual(len(t["limit"]["x"]), len(t["limit"]["y"]))
+
+    def test_em_align_correction_serializable(self):
+        """correction_report is JSON-safe and flags a close alignment."""
+        import em_align
+        xs = [24e9 + i * 1e9 for i in range(11)]
+        ys = [-3.0 + 0.1 * i for i in range(11)]
+        rep = em_align.correction_report(
+            {"L1": 250e-12}, {"L1": 260e-12},
+            {"S21 dB20": (xs, ys)},
+            {"S21 dB20": (xs, [y - 0.05 for y in ys])},
+            {"S21 dB20": (xs, [y - 0.04 for y in ys])},
+            var_specs={"L1": {"name": "L1", "min": "150p", "max": "350p"}},
+            rms_tol=0.1, max_tol=0.5)
+        json.dumps(rep)
+        self.assertTrue(rep["aligned"])
+        self.assertEqual(rep["summary"]["n_vars_changed"], 1)
+
+    def test_run_em_align_mock_known_answer(self):
+        """Stage1 -> y_em -> stage2 produces x_em_ideal and both reports."""
+        tmp = tempfile.mkdtemp(prefix="v12_e2e_")
+        netlist = os.path.join(tmp, "dummy.scs")
+        with open(netlist, "w") as f:
+            f.write("// dummy\n")
+        cfg = mock_config(os.path.join(tmp, "stage1"), max_iter=6)
+        cfg["netlist"] = netlist
+        cfg["auto_netlist"] = False
+        cfg["state_dir"] = ""
+        run_optimization(cfg, mock=True, max_iter=6)
+        truth = {"L1": 260e-12, "L2": 290e-12, "k0": 0.70,
+                 "cin": 110e-15}
+        res = MockRunner(cfg).run(truth, tempfile.mkdtemp(prefix="v12_em_"))
+        xs, ys = res.curves["S21 dB20"]
+        em_csv = os.path.join(tmp, "em.csv")
+        with open(em_csv, "w") as f:
+            f.write("freq,S21 dB20\n")
+            for xi, yi in zip(xs, ys):
+                f.write("%.9e,%.9f\n" % (xi, yi))
+        report = run_em_align(cfg, os.path.join(tmp, "stage1"),
+                              em_curve=em_csv, max_iter=12, mock=True)
+        payload = report["em_align"]
+        self.assertTrue(os.path.isfile(payload["report_json"]))
+        self.assertTrue(os.path.isfile(payload["report_md"]))
+        self.assertEqual(payload["stage1_variables"]["L1"], "250p")
+        self.assertTrue(payload["stage2_variables"])
+        self.assertNotEqual(payload["stage2_variables"], payload["stage1_variables"])
+        outs = [t["output"] for t in payload["targets"]]
+        self.assertEqual(len(outs), len(set(outs)), outs)
+        self.assertEqual(set(payload["correction"]["curves"]), set(outs))
+        self.assertIn("correction", payload)
+
+
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
     TestStopSemantics, TestResumeIdentity,
     TestFixes, TestCurvesTabRemoved, TestRunDirs, TestHistorySeedV05,
     TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
-    TestS3EmBridge, TestAuditTrail,
+    TestS3EmBridge, TestAuditTrail, TestV12Modules,
 )
 
 

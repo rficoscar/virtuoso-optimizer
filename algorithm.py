@@ -537,6 +537,119 @@ class NelderMead(_UnitSpace, AlgorithmBase):
         self._record_best(pt, value)
 register("simplex", NelderMead)
 
+
+class CoordinateSearch(_UnitSpace, AlgorithmBase):
+    """Compass/coordinate pattern search around x0.
+
+    One simulation per step, each axis tried +step then -step; a failed
+    pair halves that axis step.  Meant for EM alignment, where the new
+    target usually sits near x_opt and a global search would waste
+    expensive simulations.
+    """
+    name = "coordinate"
+
+    def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
+                 seed=0, budget=None, **opts):
+        AlgorithmBase.__init__(self, names, bounds, x0=x0, n_obj=n_obj,
+                               n_constr=n_constr, seed=seed, budget=budget,
+                               **opts)
+        self._best_u = self._to_unit(self.x0)
+        self.cur = list(self._best_u)
+        init = float(opts.get("step", 0.1))
+        self.step = [max(1e-6, min(0.5, init))] * self.n
+        self.axis = 0
+        self.sign = 1
+        self.pending_pt = None
+        self.pending_val = None
+        self.started = False
+
+    def _candidate(self):
+        pt = list(self.cur)
+        pt[self.axis] = min(1.0, max(0.0, pt[self.axis]
+                                     + self.sign * self.step[self.axis]))
+        return pt
+
+    def _advance(self, improved):
+        if improved:
+            self.step[self.axis] = min(0.5, self.step[self.axis] * 1.2)
+            self.axis = 0
+            self.sign = 1
+            return
+        if self.sign > 0:
+            self.sign = -1
+            return
+        self.step[self.axis] *= 0.5
+        self.sign = 1
+        self.axis = (self.axis + 1) % self.n
+
+    def ask(self, n=1):
+        if int(n) < 1:
+            return []
+        if self.pending_pt is not None:
+            return [self._to_real(self.pending_pt)]
+        if not self.started:
+            self.pending_pt = list(self.cur)
+            return [self._to_real(self.pending_pt)]
+        pt = self._candidate()
+        if pt == self.cur:
+            # At a bound: treat this direction as failed and try next.
+            self._advance(False)
+            pt = self._candidate()
+        self.pending_pt = pt
+        return [self._to_real(pt)]
+
+    def tell(self, X, F, G=None):
+        if len(X) != 1 or len(F) != 1:
+            raise ValueError("CoordinateSearch evaluates one point per ask")
+        value = scalar_of(F[0])
+        self.eval_count += 1
+        cand = self.pending_pt if self.pending_pt is not None else self.cur
+        improved = self.best_y is None or value < self.best_y
+        if improved:
+            self._record_best(cand, value)
+            self.cur = list(cand)
+        if not self.started:
+            # First ask is x0 itself: record the baseline, then step.
+            self.started = True
+            self._record_best(self.cur, value)
+        else:
+            self._advance(improved)
+        self.pending_pt = None
+
+    def simplex_size(self):
+        return 0.0
+
+    def snapshot(self):
+        return {
+            "name": self.name,
+            "eval_count": self.eval_count,
+            "best_x": list(self.best_x),
+            "best_y": self.best_y,
+            "rng": self.rng.getstate(),
+            "cur": list(self.cur),
+            "step": list(self.step),
+            "axis": self.axis,
+            "sign": self.sign,
+            "started": self.started,
+        }
+
+    def restore(self, state):
+        self.eval_count = state.get("eval_count", 0)
+        self.best_x = list(state.get("best_x", self.best_x))
+        self.best_y = state.get("best_y", None)
+        self.cur = list(state.get("cur", self.cur))
+        self.step = list(state.get("step", self.step))
+        self.axis = int(state.get("axis", 0))
+        self.sign = int(state.get("sign", 1))
+        self.started = bool(state.get("started", False))
+        rng = state.get("rng")
+        if rng is not None:
+            self.rng.setstate(rng)
+
+
+register("coordinate", CoordinateSearch)
+
+
 # ---- Differential evolution (adaptive F/CR) ----
 
 def _trial_tuple(state):
@@ -2848,6 +2961,14 @@ DESCRIPTIONS = {
         "pro": "实现稳健、每次迭代只增加一次仿真；对光滑问题收敛快。",
         "con": "纯局部方法，多峰问题易陷局部最优；变量多时顶点数变多、更慢。",
         "hist": "v05：历史仿真点按目标值排序直接重建单纯形顶点(免重仿)；无快照续跑时不再冷启动。",
+    },
+    "coordinate": {
+        "title": "坐标模式搜索 (coordinate)", "short": "逐轴 ±步长的模式搜索，EM 对齐默认",
+        "how": "以 x0 为中心，每次只沿一个变量增大或减小一个步长；同轴两个方向都变差就把该轴步长减半，改进则回到第一轴继续。",
+        "when": "已有可信初值(x_opt)、只需小范围修正；昂贵仿真、需要少量评估就贴近目标时。",
+        "pro": "每步一次仿真；对非光滑/带深谷的匹配曲线比单纯形稳；无随机性，结果可复现。",
+        "con": "纯局部；目标需要大范围改动或强变量耦合时不如 CMA-ES / 全局搜索。",
+        "hist": "v12：EM 两阶段对齐新增；第二阶段默认用它从 x_opt 收敛到 x_em_ideal。",
     },
     "global": {
         "title": "全局差分进化 (global, v03 DE)", "short": "LHS 布点 + DE/rand/1 与 current-to-pbest/1 混合",
