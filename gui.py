@@ -1509,7 +1509,7 @@ class OptimizerGui:
         self.curve_stats = {"plain": 0, "gz": 0, "missing": 0, "corrupt": 0, "total": 0}
         self._vars_undo_stack, self._vars_redo_stack = [], []
         self.best_var_values = None
-        root.title("Helix: A Virtuoso Optimizer")
+        root.title("Virtuoso Optimizer %s" % VERSION)
         root.geometry("1200x800")
         root.minsize(900, 600)
         self.mock_var = self.tk.BooleanVar(value=False)
@@ -1610,6 +1610,8 @@ class OptimizerGui:
         body.pack(side="top", fill="both", expand=True)
         box = self._scrolled_text(body, wrap="none", height=24)
         box.configure(state="disabled")
+        # Callers may inject their own strip into the tab, above this body.
+        tab._poll_body = body
         return tab, box, status_var, auto_var
     def _add_field(self, parent, row, key, label, store, choices=None, width=16, sticky="w"):
         """One label + entry/combo grid row; the StringVar lands in store."""
@@ -1655,12 +1657,12 @@ class OptimizerGui:
         medit.add_command(label="重做变量编辑", accelerator="Ctrl+Y", command=self._vars_redo)
         bar.add_cascade(label="编辑", menu=medit)
         mview = self.tk.Menu(bar, tearoff=0)
-        for label, attr in (("设计", "design_tab"), ("变量", "vars_tab"),
-                            ("目标", "targets_tab"), ("设置", "settings_tab"),
-                            ("环境", "env_tab"), ("仿真设置", "simset_tab"),
-                            ("EM 融合", "em_tab"), ("EM 对齐", "em_align_tab"),
-                            ("JSON", "json_tab"),
-                            ("进度", "progress_tab"), ("结果", "result_tab")):
+        for label, attr in (("环境", "env_tab"), ("设计", "design_tab"),
+                            ("变量", "vars_tab"), ("目标", "targets_tab"),
+                            ("仿真设置", "simset_tab"),
+                            ("进度", "progress_tab"), ("结果", "result_tab"),
+                            ("工艺", "tech_tab"),
+                            ("EM 对齐", "em_align_tab"), ("EM 融合", "em_tab")):
             mview.add_command(label=label, command=lambda a=attr: self._show_tab(a))
         bar.add_cascade(label="视图", menu=mview)
         mrun = self.tk.Menu(bar, tearoff=0)
@@ -1673,6 +1675,7 @@ class OptimizerGui:
         mhelp = self.tk.Menu(bar, tearoff=0)
         for label, cmd in (("使用说明", self._show_help),
                            ("算法说明", self._show_algo_help),
+                           ("参数说明", self._show_param_help),
                            ("关于", self._show_about)):
             mhelp.add_command(label=label, command=cmd)
         bar.add_cascade(label="帮助", menu=mhelp)
@@ -1707,8 +1710,8 @@ class OptimizerGui:
             "  颜色: 最优=红, 最近=蓝, 其余按迭代由旧到新渐变。\n\n"
             "变量柱状图: 蓝色填充=最近迭代取值;\n"
             "  醒目红线=最优变量组合在该变量上的取值, 便于对照当前偏离。\n"
-            "算法选择与历史数据利用: 见菜单「帮助-算法说明」。\n\n"
-            "模块名称对照:\n  工具栏/菜单栏/状态栏, 设计页/变量页/目标页/设置页/JSON页/\n"
+            "算法选择: 见菜单「帮助-算法说明」; 各参数含义: 「帮助-参数说明」。\n\n"
+            "模块名称对照:\n  工具栏/菜单栏/状态栏, 环境页/设计页/变量页/目标页/\n"
             "  进度页(收敛图/变量柱状图/日志栏/动态曲线栏)/结果页\n"
             "  仿真设置页: ADE 分析/网表 parameters/模型文件/目标频段覆盖,\n"
             "    只读实时展示, 2 秒轮询自动刷新 (也可手动刷新)\n\n"
@@ -1722,37 +1725,64 @@ class OptimizerGui:
             "  但优化进行中不要改原理图/变量/输出(快照已缓存)。\n"
         ))
     def _show_algo_help(self):
-        self._show_tab("settings_tab")
-        nb = getattr(self, "set_help_nb", None)
-        if nb is None:
-            return
         try:
-            for i in range(nb.index("end")):
-                if nb.tab(i, "text") == "算法说明":
-                    nb.select(i)
-                    break
-        except Exception:
-            return
-        self._settings_help_switch()
+            from algorithm import help_text
+            text = help_text()
+        except Exception as exc:
+            text = "算法说明加载失败: %s" % exc
+        self._show_long_text("算法说明", text)
+    def _show_param_help(self):
+        """Field reference for 搜索设置 / 运行选项 / 历史与续跑."""
+        self._show_long_text("参数说明", (
+            "搜索设置详细说明（取值 / 影响）—— 目标页底部\n\n"
+            "最大迭代 max_iter —— 整数 ≥1。累计到这么多轮停止（stop_reason=max_iterations）。默认 100。续跑时沿用此前迭代数：历史 N 次 + 本次 (max_iter-N) 次。\n"
+            "停滞耐心 patience —— 整数 ≥1。连续这么多轮无实质改进时触发停滞动作（重启/踢点）；重启次数用完仍无改进则停止（stop_reason=no_improvement）。默认 10。\n"
+            "改进阈值 improve_rel —— 小数 0~1。相对改善 < improve_rel 视为“无改进”。默认 0.001。目标噪声大时可调大（如 0.01），避免把噪声误判为改进。\n"
+            "失败上限 fail_limit —— 整数 ≥1。连续仿真失败达到即停止（stop_reason=sim_failures）。默认 5。基础设施类错误（license/网表/求值服务）会免费重试一次且不计入。\n"
+            "最大重启 max_restarts —— 整数 ≥0。停滞时允许的最大重启次数。默认 2。重启围绕当前最优点重新布点（带衰减扰动 + 少量随机移民）。\n"
+            "随机种子 seed —— 整数（含 0）。同种子 + 同配置 → 结果可复现。留空=每次不同。默认 0。\n"
+            "搜索策略 strategy —— 取值见「算法说明」。另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、noise_sigma（噪声估计）、init_points（预热 CSV）。\n\n"
+            "运行选项详细说明 —— 仿真设置页\n\n"
+            "保存原始数据 save_raw —— 1（默认）：每轮迭代保留 psf/ 原始数据，可用 ViVA 打开复查波形；代价是磁盘占用大（每轮数 MB）。0：提取输出曲线后不保留原始数据，只留 result.txt 中的曲线。长时间大规模优化建议设 0。\n"
+            "仿真超时 sim_timeout —— 正数，秒。单轮 spectre 超过该时间判为 TIMEOUT 失败并终止进程。默认 3600。设小可防挂死占用 license；但小于真实仿真耗时会误杀。实际单轮耗时可从进度页日志的“耗时”估计（求值循环约 0.5 秒/次）。\n\n"
+            "历史数据与续跑机制 —— 输出目录 + 「续跑」勾选\n\n"
+            "1) 精确续跑：输出目录中的 snapshot*.json（约每 10 轮写一次）+ events.jsonl 可逐位还原算法内部状态（种群 / RNG / 代理模型），再补演快照之后的事件。续跑结果与不间断跑完全一致（回归测试保证）。\n"
+            "2) 历史热启动（无快照可还原时自动启用）：所有历史成功评测（变量+目标值）被注入算法，且不再重新仿真——TPE 进 Parzen 核密度；DE/L-SHADE 填入种群槽位；NSGA-II 进初始父代池与 Pareto 档案；CMA-ES 均值移到历史最优；单纯形用历史最优点重建顶点；portfolio 每条成员线都接收全部历史。失败评测不注入（惩罚值会污染代理模型）。\n"
+            "3) 预热布点 settings.init_points：指向一个 CSV，每行一组变量值（列序=variables 顺序，工程计数法可写）。这些点会作为第一批被真实仿真（与历史注入不同——需要仿真预算），适合手工放几个经验设计点。\n"
+            "4) 预算一致：历史点计入评测数（eval_count），L-SHADE 种群缩减、portfolio 的 UCB 配额等预算感知机制据此分配剩余预算，与运行循环一致。\n"
+        ))
+    def _show_long_text(self, title, text):
+        """Scrollable read-only window for long help."""
+        win = self.tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("900x620")
+        self.ttk.Button(win, text="关闭", command=win.destroy).pack(
+            side="bottom", pady=4)
+        frame = self.ttk.Frame(win)
+        frame.pack(side="top", fill="both", expand=True)
+        box = self._scrolled_text(frame, wrap="word")
+        box.insert("1.0", text)
+        box.configure(state="disabled")
+        return win
     def _show_about(self):
         self._dialog("关于",
-                     "Helix: A Virtuoso Optimizer\n"
+                     "Virtuoso Optimizer\n"
                      "Version %s · MIT\n"
                      "spectre 直连快速引擎 (engine: fast)\n"
                      "ADE L 状态驱动, 无 Maestro 依赖" % VERSION)
     def _build_tabs(self):
         self.notebook = self.ttk.Notebook(self.root)
         self.notebook.pack(side="top", fill="both", expand=True, padx=4, pady=4)
+        # Build order follows data dependencies (设计页 first: it owns
+        # self.fields). Display order is set afterwards by _reorder_tabs.
         self._build_design_tab()
         self._build_vars_tab()
         self._build_targets_tab()
-        self._build_settings_tab()
         self._build_env_tab()
         self._build_tech_tab()
         self._build_simset_tab()
         self._build_em_tab()
         self._build_em_align_tab()
-        self._build_json_tab()
         self._build_progress_tab()
         self._build_result_tab()
         self._em_hook = None
@@ -1761,6 +1791,35 @@ class OptimizerGui:
             self._em_hook = librf_opt.register(self)
         except Exception as exc:
             print("librf_opt 未加载 (版图 EM 页不可用): %s" % exc)
+        self._reorder_tabs()
+    # 环境 → 设计 → 变量 → 目标 → 仿真设置 → 进度 → 结果 → 工艺
+    #   → 版图 EM → EM 对齐 → EM 融合
+    TAB_ORDER = ("环境", "设计", "变量", "目标", "仿真设置", "进度", "结果",
+                 "工艺", "版图 EM", "EM 对齐", "EM 融合")
+    def _reorder_tabs(self):
+        """Put the notebook pages in the release order.
+
+        Pages are built in dependency order; ttk moves an existing tab
+        when it is inserted again. Unknown pages keep their position at
+        the end so a missing/extra module never hides a page.
+        """
+        wanted = list(self.TAB_ORDER)
+        placed = []
+        pos = 0
+        for want in wanted:
+            for tab in self.notebook.tabs():
+                if tab in placed:
+                    continue
+                try:
+                    text = self.notebook.tab(tab, "text")
+                except Exception:
+                    continue
+                if text.strip() != want:
+                    continue
+                self.notebook.insert(pos, tab, text=text)
+                placed.append(tab)
+                pos += 1
+                break
     def _build_status(self):
         self.status_var = self.tk.StringVar(value="就绪")
         self.ttk.Label(self.root, textvariable=self.status_var,
@@ -2112,123 +2171,39 @@ class OptimizerGui:
                   '一般用「从CSV载入」自动生成。点「字段说明」看全部字段。'))
         help_line.grid(row=3, column=0, columnspan=6, sticky="we", pady=(6, 0))
         self.ttk.Label(btns, text="上下界: 目标=下界 目标2=上界").pack(side="left", padx=8)
+        # 搜索设置（原「设置」页的搜索组）：目标定义优化问题，这里定义怎么搜。
+        self.set_fields = {}
+        sbar = self.ttk.Frame(tab)
+        sbar.grid(row=4, column=0, columnspan=6, sticky="we", pady=(12, 0))
+        self.ttk.Label(sbar, text="搜索设置", foreground="#0066cc").grid(
+            row=0, column=0, columnspan=8, sticky="w", pady=(0, 2))
+        search_keys = (("max_iter", "最大迭代", ()),
+                       ("patience", "停滞耐心", ()),
+                       ("improve_rel", "改进阈值", ()),
+                       ("fail_limit", "失败上限", ()),
+                       ("max_restarts", "最大重启", ()),
+                       ("seed", "随机种子", ()),
+                       ("strategy", "搜索策略",
+                        tuple(Settings.allowed_strategies())))
+        for col, (key, label, chs) in enumerate(search_keys):
+            cell = self.ttk.Frame(sbar)
+            cell.grid(row=1, column=col, padx=(0, 8), sticky="w")
+            self.ttk.Label(cell, text=label).pack(anchor="w")
+            var = self.tk.StringVar()
+            if chs:
+                widget = self.ttk.Combobox(cell, textvariable=var, width=13,
+                                           values=list(chs), state="readonly")
+            else:
+                widget = self.ttk.Entry(cell, textvariable=var, width=10)
+            widget.pack(anchor="w")
+            self.set_fields[key] = var
+        self.ttk.Label(
+            sbar, foreground="#555555",
+            text=("策略选型见菜单「帮助 → 算法说明」，各参数含义见「帮助 → 参数说明」；"
+                  "最大迭代是本次会话的预算上限，续跑时沿用历史迭代数。")
+        ).grid(row=2, column=0, columnspan=8, sticky="w", pady=(4, 0))
         tab.rowconfigure(0, weight=1)
         tab.columnconfigure(0, weight=1)
-    def _settings_help_data(self):
-        search_detail = (
-            "搜索设置详细说明（取值 / 影响）\n\n"
-            "最大迭代 max_iter —— 整数 ≥1。累计到这么多轮停止（stop_reason=max_iterations）。默认 100。续跑时沿用此前迭代数：历史 N 次 + 本次 (max_iter-N) 次。\n"
-            "停滞耐心 patience —— 整数 ≥1。连续这么多轮无实质改进时触发停滞动作（重启/踢点）；重启次数用完仍无改进则停止（stop_reason=no_improvement）。默认 10。\n"
-            "改进阈值 improve_rel —— 小数 0~1。相对改善 < improve_rel 视为“无改进”。默认 0.001。目标噪声大时可调大（如 0.01），避免把噪声误判为改进。\n"
-            "失败上限 fail_limit —— 整数 ≥1。连续仿真失败达到即停止（stop_reason=sim_failures）。默认 5。基础设施类错误（license/网表/求值服务）会免费重试一次且不计入。\n"
-            "最大重启 max_restarts —— 整数 ≥0。停滞时允许的最大重启次数。默认 2。重启围绕当前最优点重新布点（带衰减扰动 + 少量随机移民）。\n"
-            "随机种子 seed —— 整数（含 0）。同种子 + 同配置 → 结果可复现。留空=每次不同。默认 0。\n"
-            "搜索策略 strategy —— 取值见「算法说明」小标签页（simplex / coordinate / global / de / lshade / cmaes / cmaes_ipop / tpe / nsga2 / weighted / worstspec / portfolio / random / grid）。\n"
-            "另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、noise_sigma（噪声估计）、init_points（预热 CSV）。\n")
-        sim_detail = (
-            "仿真选项详细说明\n\n"
-            "保存原始数据 save_raw —— 1（默认）：每轮迭代保留 psf/ 原始数据，可用 ViVA 打开复查波形；代价是磁盘占用大（每轮数 MB）。0：提取输出曲线后不保留原始数据，只留 result.txt 中的曲线。长时间大规模优化建议设 0。\n"
-            "仿真超时 sim_timeout —— 正数，秒。单轮 spectre 超过该时间判为 TIMEOUT 失败并终止进程。默认 3600。设小可防挂死占用 license；但小于真实仿真耗时会误杀。实际单轮耗时可从进度页日志的“耗时”估计（求值循环约 0.5 秒/次）。\n")
-        hist_detail = (
-            "历史数据与续跑机制详细说明\n\n"
-            "1) 精确续跑：输出目录中的 snapshot*.json（约每 10 轮写一次）+ events.jsonl 可逐位还原算法内部状态（种群 / RNG / 代理模型），再补演快照之后的事件。续跑结果与不间断跑完全一致（回归测试保证）。\n"
-            "2) 历史热启动（无快照可还原时自动启用）：所有历史成功评测（变量+目标值）被注入算法，且不再重新仿真——TPE 进 Parzen 核密度；DE/L-SHADE 填入种群槽位；NSGA-II 进初始父代池与 Pareto 档案；CMA-ES 均值移到历史最优；单纯形用历史最优点重建顶点；portfolio 每条成员线都接收全部历史。失败评测不注入（惩罚值会污染代理模型）。\n"
-            "3) 预热布点 settings.init_points：指向一个 CSV，每行一组变量值（列序=variables 顺序，工程计数法可写）。这些点会作为第一批被真实仿真（与历史注入不同——需要仿真预算），适合手工放几个经验设计点。\n"
-            "4) 预算一致：历史点计入评测数（eval_count），L-SHADE 种群缩减、portfolio 的 UCB 配额等预算感知机制据此分配剩余预算，与运行循环一致。\n")
-        return [
-            ("搜索设置",
-             "最大迭代 max_iter —— 预算上限，达到即停（默认 100）\n"
-             "停滞耐心 patience —— 连续无改进轮数，触发重启（默认 10）\n"
-             "改进阈值 improve_rel —— 相对改善小于此算无改进（默认 0.001）\n"
-             "失败上限 fail_limit —— 连续仿真失败达到即停（默认 5）\n"
-             "最大重启 max_restarts —— 停滞时最多重启次数（默认 2）\n"
-             "随机种子 seed —— 同种子可复现；留空=每次不同（默认 0）\n"
-             "搜索策略 strategy —— 选型速查见「算法说明」小标签页\n",
-             search_detail),
-            ("仿真选项",
-             "保存原始数据 save_raw —— 1=留 psf 原始结果（可开 ViVA，占磁盘）\n"
-             "                          0=只留提取出的曲线数据（默认 1）\n"
-             "仿真超时 sim_timeout —— 单轮 spectre 秒数上限，超时判失败并杀进程（默认 3600）\n",
-             sim_detail),
-            ("算法说明",
-             "选型速查（strategy 取值）\n"
-             "  变量少且平滑 → simplex（默认）    变量多 / 多峰 → global 或 de\n"
-             "  预算≥50 单目标 → lshade          变量强耦合 → cmaes / cmaes_ipop\n"
-             "  EM 两阶段对齐 → coordinate        仿真极贵省次数 → tpe\n"
-             "  多目标 → nsga2 / weighted /      拿不准 → portfolio\n"
-             "  worstspec；基线 → random / grid\n"
-             "\n下方「详细说明」= 全部算法的原理 / 适用 / 优势 / 局限 / 历史利用。\n",
-             ""),   # detail filled at switch time from algorithm.help_text()
-            ("历史与续跑",
-             "精确续跑 —— snapshot+events 逐位还原算法状态，与不间断跑等价\n"
-             "历史热启动 —— 无快照时全部历史成功评测注入算法（免重仿）\n"
-             "预热布点 —— settings.init_points 指向 CSV，每行一组变量值\n"
-             "预算一致 —— 历史点计入评测数，预算机制按真实花费分配\n",
-             hist_detail),
-        ]
-    def _settings_help_switch(self, _event=None):
-        nb = getattr(self, "set_help_nb", None)
-        box = getattr(self, "set_detail_box", None)
-        if nb is None or box is None:
-            return
-        try:
-            idx = nb.index("current")
-            title = nb.tab(idx, "text")
-        except Exception:
-            return
-        detail = (self.set_help_details or {}).get(title, "")
-        if title == "算法说明" and not detail:
-            try:
-                from algorithm import help_text
-                detail = help_text()
-            except Exception as exc:
-                detail = "算法说明加载失败: %s" % exc
-        self._set_text(box, detail)
-    def _build_settings_tab(self):
-        tab = self.ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="设置")
-        self.settings_tab = tab
-        self.set_fields = {}
-        # left column: the settings form (compact)
-        left = self.ttk.Frame(tab)
-        left.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
-        keys = [("max_iter", "最大迭代", ()),
-                ("patience", "停滞耐心", ()),
-                ("improve_rel", "改进阈值", ()),
-                ("fail_limit", "失败上限", ()),
-                ("max_restarts", "最大重启", ()),
-                ("seed", "随机种子", ()),
-                ("strategy", "搜索策略", Settings.allowed_strategies())]
-        for row, (key, label, chs) in enumerate(keys):
-            self._add_field(left, row, key, label, self.set_fields, chs, 13 if chs else 16)
-        row = len(keys)
-        self.ttk.Label(left, text="仿真选项", foreground="#0066cc").grid(row=row, column=0, sticky="w", padx=4, pady=(10, 2))
-        sim_opts = (("save_raw", "保存原始数据", ("1", "0")), ("sim_timeout", "仿真超时", ()))
-        for i, (key, label, chs) in enumerate(sim_opts):
-            self._add_field(left, row + 1 + i, key, label, self.fields, chs, 13 if chs else 16)
-        # right: big help area (v05): small tabs + detail pane
-        right = self.ttk.Frame(tab)
-        right.grid(row=0, column=1, sticky="nsew")
-        tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(0, weight=1)
-        self.set_help_nb = self.ttk.Notebook(right)
-        self.set_help_nb.pack(fill="both", expand=True)
-        self.set_help_details = {}
-        for title, summary, detail in self._settings_help_data():
-            frame = self.ttk.Frame(self.set_help_nb, padding=4)
-            self.set_help_nb.add(frame, text=title)
-            box = self._make_text(frame, wrap="word", height=9, width=56)
-            box.insert("1.0", summary)
-            box.configure(state="disabled")
-            box.pack(fill="both", expand=True)
-            self.set_help_details[title] = detail
-        det = self.ttk.Frame(right)
-        det.pack(fill="both", expand=True, pady=(8, 0))
-        self.ttk.Label(det, text="详细说明（随上方小标签页切换）", foreground="#0066cc").pack(anchor="w")
-        self.set_detail_box = self._make_text(det, wrap="word", height=18)
-        self.set_detail_box.pack(fill="both", expand=True)
-        self.set_help_nb.bind("<<NotebookTabChanged>>", self._settings_help_switch)
-        self._settings_help_switch()
     def _build_tech_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="工艺")
@@ -2297,6 +2272,22 @@ class OptimizerGui:
                 "只读展示: 在 ADE 里改设置即可, 本页自动跟随;优化器只展示不修改",
                 self._simset_refresh)
         self.simset_tab = tab
+        # 运行选项（原「设置」页）：属于仿真执行，放这一页。
+        opt = self.ttk.Frame(tab)
+        opt.pack(side="top", fill="x", pady=(0, 4), before=tab._poll_body)
+        self.ttk.Label(opt, text="运行选项", foreground="#0066cc").pack(
+            side="left", padx=(0, 10))
+        self.ttk.Label(opt, text="保存原始数据").pack(side="left")
+        raw_var = self.tk.StringVar()
+        self.ttk.Combobox(opt, textvariable=raw_var, width=5, state="readonly",
+                          values=("1", "2", "0")).pack(side="left", padx=(2, 12))
+        self.fields["save_raw"] = raw_var
+        self.ttk.Label(opt, text="仿真超时(秒)").pack(side="left")
+        tout_var = self.tk.StringVar()
+        self.ttk.Entry(opt, textvariable=tout_var, width=10).pack(side="left", padx=2)
+        self.fields["sim_timeout"] = tout_var
+        self.ttk.Label(opt, text="1=保留全部 psf 2=只留关键轮 0=不留",
+                       foreground="#888888").pack(side="left", padx=10)
         self._simset_sig = self._simset_last_text = None
         self._simset_closed = False
         self._simset_after_id = None
@@ -2875,20 +2866,6 @@ class OptimizerGui:
                     return
         self._dialog("打开报告目录",
                      "报告目录不存在。先运行 EM 对齐，或填写输出目录。", error=True)
-    def _build_json_tab(self):
-        tab = self.ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="JSON")
-        self.json_tab = tab
-        btns = self.ttk.Frame(tab)
-        btns.pack(side="top", fill="x")
-        self.ttk.Button(btns, text="应用修改", command=self._apply_json).pack(side="left", padx=2)
-        self.ttk.Button(btns, text="刷新", command=self._refresh_json).pack(side="left", padx=2)
-        self.ttk.Label(
-            btns, foreground="#555555",
-            text=("「刷新」把当前表单生成 JSON；「应用修改」用文本整体覆盖表单"
-                  "（改了表单要先刷新再改文本，否则旧文本会冲掉新改动）")
-        ).pack(side="left", padx=12)
-        self.json_text = self._scrolled_text(tab, wrap="none", height=20)
     def _build_progress_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=4)
         self.notebook.add(tab, text="进度")
@@ -3086,7 +3063,6 @@ class OptimizerGui:
             self.auto_netlist_var.set(_auto_netlist_on(cfg.get("auto_netlist")))
         self._load_em_align(cfg.get("em_align"))
         self._live_refresh_axis_options()
-        self._refresh_json()
     def _collect_cfg(self, validate=True):
         """Build the config dict from the form. Return None on bad input."""
         try:
@@ -3169,20 +3145,6 @@ class OptimizerGui:
             self._dialog("配置错误", str(exc), error=True)
             return None
         return cfg
-    def _refresh_json(self):
-        cfg = self._collect_cfg(validate=False)
-        if cfg is None:
-            return
-        self._set_text(self.json_text, json.dumps(cfg, indent=2, ensure_ascii=False))
-    def _apply_json(self):
-        text = self.json_text.get("1.0", "end")
-        try:
-            cfg = json.loads(text)
-        except Exception as exc:
-            self._dialog("JSON 解析失败", str(exc), error=True)
-            return
-        self._load_cfg_to_ui(cfg)
-        self._dialog("JSON", "已应用修改")
     # variable table
     # variable-table undo/redo (v05)
     def _vars_snapshot(self):
@@ -4099,9 +4061,12 @@ class OptimizerGui:
                                       on_event=self._on_event,
                                       stop_check=self._stop_check,
                                       resume=resume)
-        except Exception:
+        except Exception as exc:
             import traceback
             self.queue.put({"type": "log", "text": traceback.format_exc()})
+            # Preflight failures (missing analysis, bad netlist) are user
+            # mistakes, not crashes: say it in a dialog, not only a log.
+            self.queue.put({"type": "error", "text": str(exc) or repr(exc)})
         finally:
             sys.stdout = real
         self.queue.put({"type": "done", "report": report})
@@ -4136,6 +4101,8 @@ class OptimizerGui:
             self._em_align_append_log(ev.get("text", ""))
         elif kind == "em_align_done":
             self._handle_em_align_done(ev)
+        elif kind == "error":
+            self._dialog("运行中止", ev.get("text", ""), error=True)
         elif kind == "done":
             self._handle_done(ev)
     def _handle_iteration(self, ev):

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Helix 1.2.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Virtuoso Optimizer 1.4.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Windows failures: none.
@@ -27,7 +27,8 @@ from optimizer import (  # noqa: F401
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
     config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
-    MockRunner, prepare_netlist, read_manifest, reconstruct_input_scs,
+    MockRunner, netlist_analyses, preflight_netlist, prepare_netlist,
+    read_manifest, reconstruct_input_scs,
     resolve_prog, resolve_run_dir, rewrite_netlist_parameters,
     run_em_align, run_optimization, stop_all_runners,
     suggest_bounds, tool_report,
@@ -269,9 +270,15 @@ class TestPipeline(unittest.TestCase):
         # A bad netlist fails every iteration. With fail_limit above
         # max_iter the loop simply runs out of budget; that must not be
         # reported as a normal max_iterations completion.
+        # The deck itself must pass preflight (exists, has an analysis);
+        # it then fails at simulation time on every iteration.
         work = tempfile.mkdtemp()
         cfg = mock_config(os.path.join(work, "out"), 2)
-        cfg["netlist"] = os.path.join(work, "missing.scs")
+        deck = os.path.join(work, "input.scs")
+        with open(deck, "w") as fh:
+            fh.write("simulator lang=spectre\n"
+                     "sp sp ports=[PORT0 PORT1] start=1G stop=2G step=.1G\n")
+        cfg["netlist"] = deck
         cfg["state_dir"] = os.path.join(work, "missing_state")
         cfg["settings"]["fail_limit"] = 5
         report = run_optimization(cfg, mock=False)
@@ -697,8 +704,8 @@ class TestToolDiscovery(unittest.TestCase):
         finally:
             del os.environ["OPT_TEST_PROG"]
     def test_find_prog_fallbacks(self):
-        work = tempfile.mkdtemp(prefix="helix_probe_")
-        name = "helix_probe_tool.exe" if os.name == "nt" else "helix_probe_tool"
+        work = tempfile.mkdtemp(prefix="vo_probe_")
+        name = "vo_probe_tool.exe" if os.name == "nt" else "vo_probe_tool"
         exe = os.path.join(work, name)
         with open(exe, "w") as fh:
             fh.write("")
@@ -1482,6 +1489,39 @@ class TestV12Modules(unittest.TestCase):
         out, n = rewrite_netlist_parameters(self.DECK, "L1=2n")
         self.assertEqual(n, 1)
         self.assertIn("L1=2n", out)
+
+    def test_netlist_analyses_detected(self):
+        """Analysis lines are recognised by statement head, not substring."""
+        found = netlist_analyses(self.DECK)
+        self.assertEqual(list(found), [])
+        deck = self.DECK + "sp sp ports=[P0 P1] start=1G stop=2G\n"
+        self.assertEqual(list(netlist_analyses(deck)), ["sp"])
+
+    def test_preflight_rejects_unusable_deck(self):
+        """A deck that cannot produce curves fails at start, not after 50 rounds."""
+        tmp = tempfile.mkdtemp(prefix="v12_pf_")
+        missing = os.path.join(tmp, "missing.scs")
+        with self.assertRaises(RuntimeError) as ctx:
+            preflight_netlist({"netlist": missing})
+        self.assertIn("网表不存在", str(ctx.exception))
+
+        bare = os.path.join(tmp, "input.scs")
+        with open(bare, "w") as f:
+            f.write(self.DECK)
+        with self.assertRaises(RuntimeError) as ctx:
+            preflight_netlist({"netlist": bare})
+        self.assertIn("没有任何分析语句", str(ctx.exception))
+
+        good = os.path.join(tmp, "good.scs")
+        with open(good, "w") as f:
+            f.write(self.DECK + "sp sp ports=[P0 P1] start=1G stop=2G\n")
+        self.assertIn("sp", preflight_netlist({"netlist": good}))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            preflight_netlist({"netlist": good, "analyses": "sp dc"})
+        self.assertIn("dc", str(ctx.exception))
+
+        self.assertEqual(preflight_netlist({}), "")
 
     def test_netlist_create_read_design_and_path(self):
         """ADE state + explicit view -> mixed source, expected config path."""

@@ -1,5 +1,5 @@
 ;====================================================================
-; librf.il — Helix 1.2.0 SKILL 合并文件（两部分，两种 Cadence 进程共用）
+; librf.il — Virtuoso Optimizer 1.4.0 SKILL 合并文件（两部分，两种 Cadence 进程共用）
 ;   A) 版图引擎 (原 librf_layout.il)：dbAccess 经 driver.il load() 后调
 ;      librfRun(...) / librfMakeViews(...) / librfEmxViews(...)
 ;   B) 求值服务 (原 eval_serve.il)：virtuoso -replay librf.il 启动，读 ADE L
@@ -184,7 +184,7 @@ let((queueDir stateFile loaded)
       unless(vok
         myFatal(strcat("bad output entries in: " stateFile))))
     myServeEval()))
-; librf_layout.il — LIBRF SKILL 版图引擎 (IC618 经典 SKILL / dbAccess, Helix 1.2.0)
+; librf_layout.il — LIBRF SKILL 版图引擎 (IC618 经典 SKILL / dbAccess, Virtuoso Optimizer 1.4.0)
 ; 职责: 电感/传输线/变压器/耦合线参数化绘制 + port/label + MARKER 标记 + via 阵列
 ; 入口: librfRun(req) / librfMakeViews(req) / librfEmxViews(req)；req = list(nil 'type "ind"
 ;   'lib "LIBRF" ... 'result "/p")

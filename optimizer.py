@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-'Helix: A Virtuoso Optimizer.'
-VERSION = "1.3.2"
+'Virtuoso Optimizer.'
+VERSION = "1.4.0"
 import argparse
 import csv
 import glob
@@ -1552,6 +1552,57 @@ def rewrite_netlist_parameters(text, line):
         return mod.rewrite_netlist_parameters(text, line)
     return _legacy_rewrite_netlist_parameters(text, line)
 
+# Analysis statements a spectre deck must carry for outputs to exist at
+# all. A deck without them still runs (spectre exits 0) but yields no
+# curves, so every iteration silently scores BIG_ERROR.
+_ANALYSIS_KEYWORDS = frozenset((
+    "sp", "dc", "tran", "ac", "pss", "pac", "pnoise", "noise", "stb",
+    "xf", "sens", "pz", "hb", "hbac", "hbsp", "envlp", "sweep",
+    "montecarlo", "mpde", "spnoise",
+))
+
+def netlist_analyses(text):
+    """Analysis statement heads defined in a spectre deck, in file order."""
+    found = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("*", "//")):
+            continue
+        head = line.split(None, 1)[0].lower()
+        if head in _ANALYSIS_KEYWORDS:
+            found.append(head)
+    return found
+
+def preflight_netlist(cfg):
+    """Fail fast when the deck cannot produce any output.
+
+    Raises RuntimeError with an actionable message; returns a short
+    description on success so callers can log it.
+    """
+    path = str((cfg or {}).get("netlist") or "").strip()
+    if not path:
+        return ""
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise RuntimeError(
+            "网表不存在：%s。请先在 ADE 里生成网表，"
+            "或在设计页把「网表」指到正确的 input.scs。" % path)
+    found = netlist_analyses(_read_text(path))
+    want = [p for p in str(cfg.get("analyses") or "").replace(",", " ").split()
+            if p]
+    missing = [w for w in want if w.lower() not in found]
+    if missing:
+        raise RuntimeError(
+            "网表 %s 里没有 %s 分析语句（现有：%s）。ADE 增量重生成网表时"
+            "可能丢掉了分析；请回 ADE 重新生成网表，或把分析行补回网表后重跑。"
+            % (path, "/".join(missing), "/".join(found) or "无"))
+    if not found:
+        raise RuntimeError(
+            "网表 %s 里没有任何分析语句（sp/dc/tran/ac…）。这样的网表 spectre "
+            "能跑完但不会产生输出曲线，迭代只会一路失败。请回 ADE 重新生成"
+            "网表，或把分析行补回网表后重跑。" % path)
+    return "分析: %s" % "/".join(found)
+
 class RealRunner:
     'Run one iteration: spectre direct + eval serve.'
     # Runners with a live virtuoso process.
@@ -3097,6 +3148,15 @@ class Optimization:
                 return "stopped"
             values = self._ask_point()
             result = self.runner.run(values, self.logger.iter_dir(it))
+            if result.status == "ok" and not result.curves:
+                # spectre succeeded but produced nothing to score: the
+                # deck has no usable analysis or the output names miss.
+                # Continuing would only burn iterations on BIG_ERROR.
+                raise RuntimeError(
+                    "第 %d 轮没有解析到任何输出曲线（%s）。常见原因：网表缺少"
+                    "对应分析语句、或目标里的输出名与 ADE 输出不一致。已在首轮"
+                    "中止，避免空跑；请检查网表分析与目标输出名后重跑。"
+                    % (it, result.message or "无消息"))
             if result.status != "ok":
                 kind = classify(result.status, result.message,
                                 wall=result.wall,
@@ -3560,6 +3620,12 @@ def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
                      stop_check=None, resume=None):
     'Run one optimization session.'
     netlist_report = prepare_netlist(cfg, mock=mock)
+    if not mock:
+        # A deck without the requested analysis runs green and yields no
+        # curves; catch that before spending iterations on penalties.
+        summary = preflight_netlist(cfg)
+        if summary:
+            print("网表预检: %s" % summary)
     opt = Optimization(cfg, mock=mock, max_iter=max_iter,
                        on_event=on_event, stop_check=stop_check,
                        resume=resume)

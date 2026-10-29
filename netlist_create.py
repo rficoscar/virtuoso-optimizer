@@ -265,7 +265,7 @@ def build_script(design, status_path=None):
     fmt_fail_path = ('"OPT_NETLIST_FAIL createNetlist returned no path '
                      '(OSSHNL/ADE)\\n"')
     lines = [
-        "; Helix A: createNetlist before optimization. Generated; do not edit.",
+        "; Virtuoso Optimizer: createNetlist before optimization. Generated; do not edit.",
         "simulator('spectre)",
         "design(%s %s %s)" % (lib, cell, view),
         "let((port p q)",
@@ -1440,7 +1440,7 @@ def _load_cfg(path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Helix: 优化前重新生成 Virtuoso 网表（需求 A）")
+        description="Virtuoso Optimizer: 优化前重新生成 Virtuoso 网表（需求 A）")
     parser.add_argument("--selftest", action="store_true",
                         help="运行纯 Python 自测（不依赖 Cadence）")
     parser.add_argument("--config", help="optimizer 配置 JSON")
