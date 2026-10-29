@@ -23,13 +23,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from optimizer import (  # noqa: F401
     EXAMPLE_CFG, LOG_MODE_COMPACT, LOG_MODE_FULL, MANIFEST_NAME,
     NETLIST_BASE_NAME, NETLIST_META_NAME, Optimization, RealRunner,
-    RunLogger, Settings, Target, Transform, build_optimizer, circuit_id,
+    RunLogger, Settings, SimResult, Target, Transform, build_optimizer,
+    circuit_id,
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
     config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
     MockRunner, netlist_analyses, preflight_netlist, prepare_netlist,
     read_manifest, reconstruct_input_scs,
-    resolve_prog, resolve_run_dir, rewrite_netlist_parameters,
+    resolve_netlist_path, resolve_prog, resolve_run_dir,
+    rewrite_netlist_parameters,
     run_em_align, run_optimization, stop_all_runners,
     suggest_bounds, tool_report,
 )
@@ -1491,11 +1493,20 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("L1=2n", out)
 
     def test_netlist_analyses_detected(self):
-        """Analysis lines are recognised by statement head, not substring."""
-        found = netlist_analyses(self.DECK)
-        self.assertEqual(list(found), [])
-        deck = self.DECK + "sp sp ports=[P0 P1] start=1G stop=2G\n"
-        self.assertEqual(list(netlist_analyses(deck)), ["sp"])
+        """ADE writes `<name> <type>`; comments and instances never count."""
+        self.assertEqual(list(netlist_analyses(self.DECK)), [])
+        deck = self.DECK + ("ac1 ac start=1G stop=2G dec=10\n"
+                            "sp1 sp ports=[P0 P1] start=1G stop=2G\n")
+        self.assertEqual(list(netlist_analyses(deck)), ["ac", "sp"])
+        # Hand-written type-first decks still count.
+        self.assertEqual(
+            list(netlist_analyses("sp sp ports=[a b] start=1 stop=2\n")),
+            ["sp"])
+        self.assertEqual(list(netlist_analyses("tf tf start=1 stop=2\n")),
+                         ["tf"])
+        for line in ("save sp\n", "sp (a 0) capacitor c=1p\n",
+                     "// ac1 ac start=1\n"):
+            self.assertEqual(list(netlist_analyses(line)), [], line)
 
     def test_preflight_rejects_unusable_deck(self):
         """A deck that cannot produce curves fails at start, not after 50 rounds."""
@@ -1516,6 +1527,12 @@ class TestV12Modules(unittest.TestCase):
         with open(good, "w") as f:
             f.write(self.DECK + "sp sp ports=[P0 P1] start=1G stop=2G\n")
         self.assertIn("sp", preflight_netlist({"netlist": good}))
+
+        # ADE names analyses (`ac1 ac ...`); a valid deck must not be rejected.
+        named = os.path.join(tmp, "named.scs")
+        with open(named, "w") as f:
+            f.write(self.DECK + "ac1 ac start=1G stop=2G dec=10\n")
+        self.assertIn("ac", preflight_netlist({"netlist": named}))
 
         with self.assertRaises(RuntimeError) as ctx:
             preflight_netlist({"netlist": good, "analyses": "sp dc"})
@@ -1690,6 +1707,89 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("correction", payload)
 
 
+class _ScriptRunner:
+    """Sim runner stub that returns scripted results in order."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def run(self, values, iter_dir):
+        self.calls += 1
+        if self.results:
+            return self.results.pop(0)
+        return SimResult(status="fail", message="script exhausted")
+
+
+class TestPreflightAndCurveGuard(unittest.TestCase):
+    """1.4.1: analysis preflight and the zero-curve abort guard."""
+
+    def _opt(self):
+        out = os.path.join(tempfile.mkdtemp(prefix="v141_opt_"), "out")
+        return Optimization(mock_config(out, 3), mock=True, max_iter=3)
+
+    def test_zero_curve_abort_direct(self):
+        opt = self._opt()
+        opt.runner = _ScriptRunner(
+            [SimResult(status="ok", message="no outputs")])
+        with self.assertRaises(RuntimeError) as ctx:
+            opt.run()
+        msg = str(ctx.exception)
+        self.assertIn("第 0 轮", msg)
+        self.assertIn("输出曲线", msg)
+        self.assertNotIn("首轮", msg)
+
+    def test_zero_curve_abort_after_infra_retry(self):
+        # A first INFRA failure triggers one retry; that retry must obey
+        # the same "ok but no curves" guard as the first attempt.
+        opt = self._opt()
+        opt.runner = _ScriptRunner([
+            SimResult(status="fail", message="cannot start eval serve"),
+            SimResult(status="ok", message="no outputs"),
+        ])
+        with self.assertRaises(RuntimeError) as ctx:
+            opt.run()
+        self.assertIn("第 0 轮", str(ctx.exception))
+        self.assertEqual(opt.runner.calls, 2)
+
+    def test_preflight_checks_discovered_deck(self):
+        # No explicit netlist: the runner finds input.scs under the cell's
+        # simulation tree, so preflight must check that same file.
+        tmp = tempfile.mkdtemp(prefix="v141_disc_")
+        deck_dir = os.path.join(tmp, "Lib", "Cell", "spectre",
+                                "schematic", "netlist")
+        os.makedirs(deck_dir)
+        deck = os.path.join(deck_dir, "input.scs")
+        with open(deck, "w") as f:
+            f.write("simulator lang=spectre\n"
+                    "sp1 sp ports=[a b] start=1 stop=2\n")
+        cfg = {"sim_root": tmp, "library": "Lib", "cell": "Cell"}
+        self.assertEqual(os.path.abspath(deck), resolve_netlist_path(cfg))
+        self.assertEqual(os.path.abspath(deck),
+                         RealRunner(dict(cfg), ".")._find_deck())
+        self.assertIn("sp", preflight_netlist(cfg))
+        with open(deck, "w") as f:
+            f.write("simulator lang=spectre\nparameters a=1\n")
+        with self.assertRaises(RuntimeError) as ctx:
+            preflight_netlist(cfg)
+        self.assertIn("没有任何分析语句", str(ctx.exception))
+
+    def test_run_optimization_preflight_rejects_bad_deck(self):
+        # The rejection must fire through the real entry point, not only
+        # when preflight_netlist() is called directly.
+        tmp = tempfile.mkdtemp(prefix="v141_pf_")
+        deck = os.path.join(tmp, "input.scs")
+        with open(deck, "w") as f:
+            f.write("simulator lang=spectre\nparameters L1=1n\n")
+        cfg = example_config()
+        cfg["netlist"] = deck
+        cfg["auto_netlist"] = False
+        cfg["output_dir"] = os.path.join(tmp, "out")
+        with self.assertRaises(RuntimeError) as ctx:
+            run_optimization(cfg, mock=False)
+        self.assertIn("分析语句", str(ctx.exception))
+
+
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
     TestStopSemantics, TestResumeIdentity,
@@ -1697,6 +1797,7 @@ _TEST_CLASSES = (
     TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
     TestS3EmBridge, TestAuditTrail, TestV12Modules,
+    TestPreflightAndCurveGuard,
 )
 
 

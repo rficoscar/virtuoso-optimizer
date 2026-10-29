@@ -4,7 +4,7 @@
 自动重生成网表 → 直连 spectre 迭代 → 收敛报告。版图侧可按工艺角色生成电感 /
 传输线 / 变压器 / 耦合线，接 EMX 做几何迭代。
 
-`Version 1.4.0 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
+`Version 1.4.1 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
 
 ## 特点
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.4.1 — 2026-10-30
+
+网表预检与零曲线守卫的三处缺陷修复，均带回归测试；引擎算法与配置语义不变。
+
+- **预检误杀具名分析网表**：`netlist_analyses()` 按行首 token 判断分析类型，
+  而 spectre/ADE 的语句是 `<分析名> <类型> …`（`ac1 ac start=…`、
+  `sp1 sp ports=…`），真实网表会被判成"没有任何分析语句"、启动即中止。
+  改为按第二个 token 取类型，保留 `sp sp …` 首 token 兼容写法；分析类型集合
+  补齐到与 `netlist_create._ANALYSES` 一致（`tf` / `hbnoise` / `pstb` /
+  `acmatch` 等），并跳过 `save sp` 这类指令行。
+- **零曲线守卫漏掉 INFRA 重试**：首轮被判 INFRA 后重试成功、但解析不到任何
+  曲线时，守卫被绕过，仍按 BIG_ERROR 记一轮成功继续空跑。现在首次结果与重试
+  结果都检查；中止消息改用实际轮次，不再写死"首轮"。
+- **预检不覆盖自动发现的网表**：未填 `netlist` 时运行器会按
+  `sim_root/library/cell` 自己找 `input.scs`（GUI 默认就是"未指定，自动查找"），
+  预检却直接跳过。抽出 `resolve_netlist_path()` 供运行器与预检共用，预检检查的
+  正是实际要仿真的文件；补 `run_optimization` 入口的拒绝路径测试。
+- 自测 103 用例全绿（新增 4 条）；`--gui-smoke` OK；netlist_create 16、
+  netlist_params 103、em_align 108、em_opt PASS、librf_opt 106、
+  proc_cross_section 31 全部通过。
+
 ## 1.4.0 — 2026-10-30
 
 界面结构与命名调整 + 一处"跑了但没结果"的实机缺陷修复；引擎与配置语义不变。

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Virtuoso Optimizer.'
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 import argparse
 import csv
 import glob
@@ -1552,26 +1552,84 @@ def rewrite_netlist_parameters(text, line):
         return mod.rewrite_netlist_parameters(text, line)
     return _legacy_rewrite_netlist_parameters(text, line)
 
-# Analysis statements a spectre deck must carry for outputs to exist at
-# all. A deck without them still runs (spectre exits 0) but yields no
-# curves, so every iteration silently scores BIG_ERROR.
+# Analysis types a spectre deck can carry. Kept in sync with the deck
+# merger (netlist_create._ANALYSES) and the parameter patcher
+# (netlist_params._ANALYSIS); a type missing here makes preflight reject
+# a valid deck.
 _ANALYSIS_KEYWORDS = frozenset((
-    "sp", "dc", "tran", "ac", "pss", "pac", "pnoise", "noise", "stb",
-    "xf", "sens", "pz", "hb", "hbac", "hbsp", "envlp", "sweep",
-    "montecarlo", "mpde", "spnoise",
+    "ac", "acmatch", "acnoise", "dc", "dcmatch", "disto", "envlp",
+    "fourier", "hb", "hbac", "hbnoise", "hbsp", "montecarlo", "mpde",
+    "noise", "pac", "pacnoise", "pnoise", "pss", "pstb", "psp", "pz",
+    "ql", "sens", "sp", "spnoise", "stb", "sweep", "sweephb", "tf",
+    "tran", "xf",
+))
+
+# First tokens that are statements, never analysis names. A `save sp`
+# line must not be mistaken for an sp analysis.
+_NETLIST_DIRECTIVES = frozenset((
+    "simulator", "global", "include", "ahdl_include", "hdl_include",
+    "parameters", "subckt", "ends", "inline", "model", "library",
+    "endlibrary", "section", "endsection", "statistics", "process",
+    "paramtest", "options", "save", "ic", "nodeset", "temp", "alter",
+    "altergroup", "real", "check", "assert", "shell", "set", "title",
+    "end", "info", "fatal", "warning", "error",
 ))
 
 def netlist_analyses(text):
-    """Analysis statement heads defined in a spectre deck, in file order."""
+    """Analysis types defined in a spectre deck, in file order.
+
+    Spectre writes analyses as ``<name> <type> key=val ...`` (ADE:
+    ``ac1 ac start=...``, ``sp1 sp ports=[...]``), so the type is the
+    second token.  A type-first form (``sp sp ports=[...]``) is accepted
+    too for hand-written decks.
+    """
     found = []
     for raw in (text or "").splitlines():
         line = raw.strip()
-        if not line or line.startswith(("*", "//")):
+        if not line or line.startswith(("*", "//", ";", "#")):
             continue
-        head = line.split(None, 1)[0].lower()
-        if head in _ANALYSIS_KEYWORDS:
-            found.append(head)
+        toks = line.split()
+        head = toks[0].lower()
+        if head in _NETLIST_DIRECTIVES:
+            continue
+        kind = None
+        if len(toks) > 1 and toks[1].lower() in _ANALYSIS_KEYWORDS:
+            kind = toks[1].lower()
+        elif head in _ANALYSIS_KEYWORDS and not (
+                len(toks) > 1 and toks[1].startswith("(")):
+            # Type-first form. An instance's second token is a node
+            # list starting with "(", so it cannot land here.
+            kind = head
+        if kind:
+            found.append(kind)
     return found
+
+def resolve_netlist_path(cfg):
+    """The spectre deck a real run will read.
+
+    An explicit ``netlist`` wins; otherwise the newest input.scs under
+    the cell's simulation tree, preferring the requested view, exactly
+    as RealRunner discovers it.  Returns an absolute path or "".
+    """
+    cfg = cfg or {}
+    raw = str(cfg.get("netlist") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    root = os.path.expanduser(str(cfg.get("sim_root") or "~/simulation"))
+    cell_dir = os.path.join(root, str(cfg.get("library") or ""),
+                            str(cfg.get("cell") or ""))
+    hits = glob.glob(os.path.join(cell_dir, "**", "input.scs"),
+                     recursive=True)
+    if not hits:
+        return ""
+    view = str(cfg.get("netlist_view") or cfg.get("view") or "").strip()
+    if view:
+        marker = os.sep + "spectre" + os.sep + view + os.sep
+        preferred = [p for p in hits if marker in p]
+        if preferred:
+            hits = preferred
+    hits.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return hits[0]
 
 def preflight_netlist(cfg):
     """Fail fast when the deck cannot produce any output.
@@ -1579,10 +1637,15 @@ def preflight_netlist(cfg):
     Raises RuntimeError with an actionable message; returns a short
     description on success so callers can log it.
     """
-    path = str((cfg or {}).get("netlist") or "").strip()
+    cfg = cfg or {}
+    explicit = bool(str(cfg.get("netlist") or "").strip())
+    # Without an explicit netlist the runner discovers one under the
+    # cell's simulation tree; check it only when a cell/library is named.
+    if not explicit and not (cfg.get("library") or cfg.get("cell")):
+        return ""
+    path = resolve_netlist_path(cfg)
     if not path:
         return ""
-    path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(path):
         raise RuntimeError(
             "网表不存在：%s。请先在 ADE 里生成网表，"
@@ -1850,28 +1913,13 @@ class RealRunner:
               "启动前按 auto_netlist 决定是否从原理图/config 重新生成")
         return self.deck
     def _find_deck(self):
-        """Newest input.scs under the simulation tree of the cell.
+        """Deck picked by the shared resolver (explicit netlist or newest).
 
-        With a config/hierarchical run the same cell has both
-        spectre/schematic and spectre/config decks. Prefer the view the
-        user asked for instead of whichever file happens to be newest.
+        Kept as a method so callers/tests keep the same entry point; the
+        view preference and discovery rules live in resolve_netlist_path
+        so preflight checks the exact file this runner will read.
         """
-        cfg = self.config
-        root = os.path.expanduser(cfg.get("sim_root", "~/simulation"))
-        cell_dir = os.path.join(root, cfg.get("library", ""),
-                                cfg.get("cell", ""))
-        hits = glob.glob(os.path.join(cell_dir, "**", "input.scs"),
-                         recursive=True)
-        if not hits:
-            return None
-        view = str(cfg.get("netlist_view") or cfg.get("view") or "").strip()
-        if view:
-            marker = os.sep + "spectre" + os.sep + view + os.sep
-            preferred = [p for p in hits if marker in p]
-            if preferred:
-                hits = preferred
-        hits.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        return hits[0]
+        return resolve_netlist_path(self.config) or None
     def _ensure_eval(self):
         """Start the output eval serve when it is not running."""
         if self.proc is not None and self.proc.poll() is None:
@@ -3148,15 +3196,7 @@ class Optimization:
                 return "stopped"
             values = self._ask_point()
             result = self.runner.run(values, self.logger.iter_dir(it))
-            if result.status == "ok" and not result.curves:
-                # spectre succeeded but produced nothing to score: the
-                # deck has no usable analysis or the output names miss.
-                # Continuing would only burn iterations on BIG_ERROR.
-                raise RuntimeError(
-                    "第 %d 轮没有解析到任何输出曲线（%s）。常见原因：网表缺少"
-                    "对应分析语句、或目标里的输出名与 ADE 输出不一致。已在首轮"
-                    "中止，避免空跑；请检查网表分析与目标输出名后重跑。"
-                    % (it, result.message or "无消息"))
+            self._reject_empty_curves(it, result)
             if result.status != "ok":
                 kind = classify(result.status, result.message,
                                 wall=result.wall,
@@ -3168,6 +3208,7 @@ class Optimization:
                           f"{result.message}")
                     result = self.runner.run(values,
                                              self.logger.iter_dir(it))
+                    self._reject_empty_curves(it, result)
                     if result.status == "ok":
                         fails = 0
                         total, met = self._log_success(it, values, result)
@@ -3209,6 +3250,20 @@ class Optimization:
             if all(st and st != "ok" for st in statuses):
                 return "sim_failures"
         return "max_iterations"
+    def _reject_empty_curves(self, it, result):
+        """Stop when a green simulation produced nothing to score.
+
+        spectre can exit 0 (and SKILL can write STATUS ok) while the
+        eval serve parses no outputs at all: no usable analysis in the
+        deck, or output names that do not match ADE. Continuing would
+        only burn iterations on BIG_ERROR.
+        """
+        if result.status == "ok" and not result.curves:
+            raise RuntimeError(
+                "第 %d 轮没有解析到任何输出曲线（%s）。常见原因：网表缺少"
+                "对应分析语句、或目标里的输出名与 ADE 输出不一致。已中止，"
+                "避免空跑；请检查网表分析与目标输出名后重跑。"
+                % (it, result.message or "无消息"))
     def _emit(self, event):
         'Send one progress event to the host callback.'
         if self.on_event is None:
