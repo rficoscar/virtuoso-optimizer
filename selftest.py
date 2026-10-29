@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 1.4.4 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Virtuoso Optimizer regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Windows failures: none.
@@ -27,7 +27,8 @@ from optimizer import (  # noqa: F401
     circuit_id,
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
-    config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
+    config_fingerprint, load_config, load_previous, parse_eng,
+    parse_netlist_parameters,
     MockRunner, netlist_analyses, preflight_netlist,
     read_manifest, reconstruct_input_scs,
     resolve_netlist_path, resolve_prog, resolve_run_dir,
@@ -260,6 +261,21 @@ class TestPipeline(unittest.TestCase):
         report2 = run_optimization(mock_config(out_dir, 30), mock=True)
         self.assertEqual(report2["iterations"], 10)
         self.assertLessEqual(report2["best_total_error"], report["best_total_error"])
+    def test_config_resume_false_starts_fresh(self):
+        work = tempfile.mkdtemp()
+        out_dir = os.path.join(work, "out")
+        run_optimization(mock_config(out_dir, 5), mock=True)
+        # An explicit resume argument outranks the config key.
+        cfg = mock_config(out_dir, 7)
+        cfg["resume"] = False
+        self.assertEqual(
+            run_optimization(cfg, mock=True, resume=True)["iterations"], 2)
+        # Without the explicit flag "resume": false starts over: 7 - 5
+        # means the historical 5 iterations were wrongly reused.
+        self.assertEqual(run_optimization(cfg, mock=True)["iterations"], 7)
+        # JSON string form is accepted as well.
+        cfg["resume"] = "false"
+        self.assertEqual(run_optimization(cfg, mock=True)["iterations"], 7)
     def test_simulation_failures_stop_the_run(self):
         work = tempfile.mkdtemp()
         cfg = mock_config(os.path.join(work, "out"), 20)
@@ -495,6 +511,22 @@ class TestRunDirs(unittest.TestCase):
             self.assertNotIn(bad, cid)
         self.assertEqual(cid, os.path.basename(cid))
         self.assertEqual(circuit_id({"name": "  .. "}), "circuit")
+    def test_load_config_relative_state_dir(self):
+        work = tempfile.mkdtemp()
+        path = os.path.join(work, "task.json")
+        def load(payload):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            return load_config(path)
+        # "" / null mean "not set": they must not become the config folder,
+        # or auto_netlist would try to regenerate from a non-existent state.
+        self.assertEqual(load({"state_dir": ""})["state_dir"], "")
+        self.assertIsNone(load({"state_dir": None})["state_dir"])
+        self.assertNotIn("state_dir", load({}))
+        # Relative stays anchored to the config file; absolute is untouched.
+        self.assertEqual(load({"state_dir": "ade"})["state_dir"],
+                         os.path.join(work, "ade"))
+        self.assertEqual(load({"state_dir": work})["state_dir"], work)
     def test_make_run_dir_layout_and_collision(self):
         root = tempfile.mkdtemp()
         path = make_run_dir(root, "cc")
@@ -1291,16 +1323,68 @@ class TestTechProfile(unittest.TestCase):
         self.assertEqual([k for k in t if str(k).startswith("_doc")], [],
                          "_doc* keys must be stripped by the loader")
         # The source file does carry _doc* -> stripping happens on load.
-        raw = json.load(open(self.TP_PATH, encoding="utf-8"))
+        with open(self.TP_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
         self.assertTrue([k for k in raw if str(k).startswith("_doc")])
+    def test_profile_values_are_applied(self):
+        # The shipped template equals the built-in default, so comparing it
+        # with DEFAULT_TECH alone would also pass if the loader ignored the
+        # file. Load a deliberately different profile instead.
+        import librf_opt
+        work = tempfile.mkdtemp()
+        path = os.path.join(work, "tech_profile.json")
+        payload = {"techlib": "DEMO65",
+                   "layers": {"spiral": "M7"},
+                   "text": {"M7": "M7LABEL"},
+                   "drc": {"min_w": 0.2, "min_area": {"M7": 0.5}}}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        t = self._load(path=path)
+        self.assertEqual(t["techlib"], "DEMO65")
+        self.assertEqual(t["layers"]["spiral"], "M7")
+        self.assertEqual(t["text"]["M7"], "M7LABEL")
+        self.assertEqual(t["drc"]["min_w"], 0.2)
+        self.assertEqual(t["drc"]["min_area"]["M7"], 0.5)
+        # Missing keys fall back to the built-in default.
+        self.assertEqual(t["layers"]["route"], librf_opt.DEFAULT_TECH["layers"]["route"])
+        self.assertEqual(t["drc"]["max_w"], librf_opt.DEFAULT_TECH["drc"]["max_w"])
+        self.assertEqual(t["drc"]["min_area"]["M3"],
+                         librf_opt.DEFAULT_TECH["drc"]["min_area"]["M3"])
+        self.assertTrue(t["_src"].endswith("tech_profile.json"))
+    def test_env_profile_is_loaded(self):
+        # tech_profile.json suggests LIBRF_TECH_PROFILE for a custom PDK;
+        # that documented path must work and outrank the shipped template.
+        import librf_opt
+        work = tempfile.mkdtemp()
+        path = os.path.join(work, "custom.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"techlib": "DEMO65", "layers": {"spiral": "MA"}}, f)
+        old = os.environ.get("LIBRF_TECH_PROFILE")
+        os.environ["LIBRF_TECH_PROFILE"] = path
+        try:
+            t = self._load()
+        finally:
+            if old is None:
+                os.environ.pop("LIBRF_TECH_PROFILE", None)
+            else:
+                os.environ["LIBRF_TECH_PROFILE"] = old
+        self.assertEqual(t["techlib"], "DEMO65")
+        self.assertEqual(t["layers"]["spiral"], "MA")
+        self.assertEqual(t["layers"]["route"], librf_opt.DEFAULT_TECH["layers"]["route"])
+        self.assertTrue(t["_src"].endswith("custom.json"))
     def test_auto_load_no_self_disturb(self):
         """Auto-load order hits the local profile but still equals the default."""
         cwd = os.getcwd()
+        # The documented env override would otherwise make this depend on
+        # the machine running the suite (test_env_profile_is_loaded covers it).
+        old = os.environ.pop("LIBRF_TECH_PROFILE", None)
         try:
             os.chdir(self.HERE)
             t = self._load(work=".")
         finally:
             os.chdir(cwd)
+            if old is not None:
+                os.environ["LIBRF_TECH_PROFILE"] = old
         import librf_opt
         d = librf_opt.DEFAULT_TECH
         self.assertEqual(t["techlib"], d["techlib"])
@@ -1374,7 +1458,7 @@ class TestS3EmBridge(unittest.TestCase):
         """S3-ISO-07 em_bridge absent + layout_em on -> GeomRunner (v07 behaviour)."""
         try:
             import librf_opt  # noqa: F401 - layout_em needs the optional module
-        except Exception as exc:
+        except ImportError as exc:
             self.skipTest("librf_opt unavailable (%s)" % exc)
         cfg = self._base_cfg(layout_em={"enabled": True, "type": "ind", "mock": True,
                                         "geom_vars": [], "cell": "t", "work": "work"})
@@ -2248,6 +2332,74 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
                                 set_fields={"max_iter": _GVar("0")})
         self.assertIsNone(bad._collect_cfg())
 
+    def test_param_help_names_only_live_settings(self):
+        """Help may not advertise a settings key the engine never reads."""
+        import inspect
+        import gui
+        text = inspect.getsource(gui.OptimizerGui._show_param_help)
+        root = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(root, "optimizer.py"), encoding="utf-8") as f:
+            engine = f.read()
+        for key in ("mode", "portfolio", "init_points"):
+            self.assertIn(key, engine)
+        self.assertEqual("noise_sigma" in engine, "noise_sigma" in text,
+                         "help must not name a setting the engine lacks")
+
+
+def _optional_tests_module(name):
+    """Import an optional sibling test module; None only when it is absent.
+
+    A SyntaxError or an import-time failure must fail the gate instead of
+    silently shrinking the suite the way ``except Exception`` would.
+    """
+    try:
+        return __import__(name)
+    except ImportError:
+        return None
+
+
+def _test_classes_in(module):
+    """Every unittest.TestCase subclass defined in one test module."""
+    return [obj for _name, obj in sorted(vars(module).items())
+            if isinstance(obj, type) and issubclass(obj, unittest.TestCase)
+            and obj is not unittest.TestCase]
+
+
+class TestOptionalTestImport(unittest.TestCase):
+    """Optional test modules are skipped only when genuinely absent."""
+
+    def test_missing_module_is_none(self):
+        self.assertIsNone(_optional_tests_module("_opt_missing_xyz"))
+
+    def test_broken_module_raises(self):
+        import shutil
+        work = tempfile.mkdtemp()
+        try:
+            for name, body in (("_opt_broken_xyz", "raise RuntimeError('boo')\n"),
+                               ("_opt_syntax_xyz", "def broken(:\n")):
+                with open(os.path.join(work, name + ".py"), "w",
+                          encoding="utf-8") as f:
+                    f.write(body)
+            sys.path.insert(0, work)
+            try:
+                self.assertRaises(RuntimeError, _optional_tests_module,
+                                  "_opt_broken_xyz")
+                self.assertRaises(SyntaxError, _optional_tests_module,
+                                  "_opt_syntax_xyz")
+            finally:
+                sys.path.remove(work)
+                sys.modules.pop("_opt_broken_xyz", None)
+                sys.modules.pop("_opt_syntax_xyz", None)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_proc_suite_classes_are_discovered(self):
+        proc_tests = _optional_tests_module("test_proc_cross_section")
+        if proc_tests is None:
+            self.skipTest("proc suite not deployed")
+        names = [cls.__name__ for cls in _test_classes_in(proc_tests)]
+        self.assertIn("ProcCrossSectionTest", names)
+
 
 class TestSuiteRegistry(unittest.TestCase):
     """A new Test* class that is not listed below silently never runs."""
@@ -2269,7 +2421,7 @@ _TEST_CLASSES = (
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
     TestS3EmBridge, TestAuditTrail, TestV12Modules,
     TestPreflightAndCurveGuard, TestSearchStrategyFixes,
-    TestGuiConfigRoundTrip, TestSuiteRegistry,
+    TestGuiConfigRoundTrip, TestSuiteRegistry, TestOptionalTestImport,
 )
 
 
@@ -2278,17 +2430,14 @@ def run_selftests():
     # GUI classes stay here so a headless CLI run never imports tkinter.
     global OptimizerGui, PlotCanvas
     from gui import OptimizerGui, PlotCanvas
-    # The proc cross-section suite lives in its own module; run it when the
-    # optional module is deployed (same fallback as librf_opt).
-    try:
-        import test_proc_cross_section as proc_tests
-    except Exception:
-        proc_tests = None
+    # The proc cross-section suite lives in its own module; run every
+    # Test* class it defines when the optional module is deployed.
+    proc_tests = _optional_tests_module("test_proc_cross_section")
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([loader.loadTestsFromTestCase(cls) for cls in _TEST_CLASSES])
     if proc_tests is not None:
-        suite.addTests(loader.loadTestsFromTestCase(
-            proc_tests.ProcCrossSectionTest))
+        for cls in _test_classes_in(proc_tests):
+            suite.addTests(loader.loadTestsFromTestCase(cls))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return len(result.failures) + len(result.errors)
 

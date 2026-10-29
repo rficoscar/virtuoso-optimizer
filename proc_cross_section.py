@@ -104,12 +104,18 @@ def _safe_eval(expr, env):
         if isinstance(node, allowed): continue
         if const is not None and isinstance(node, const) and isinstance(node.value, (int, float)): continue
         return None
-    # Cap powers: 9**9**9 or nested powers would be computed in full first.
+    # Cap powers: reject nested powers and exponents outside +/-64. The
+    # exponent may be a constant expression or a defined name, but not a
+    # power itself (9**9**9 would otherwise be computed in full).
     for node in ast.walk(tree):
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Pow): continue
-        raw = getattr(node.right, "n", getattr(node.right, "value", None))
-        if not isinstance(raw, (int, float)) or abs(raw) > 64: return None
         if isinstance(node.left, ast.BinOp) and isinstance(node.left.op, ast.Pow): return None
+        if any(isinstance(n, ast.BinOp) and isinstance(n.op, ast.Pow)
+               for n in ast.walk(node.right)): return None
+        try: exp = eval(compile(ast.Expression(node.right), "<proc>", "eval"),
+                        {"__builtins__": {}}, env)
+        except Exception: return None
+        if isinstance(exp, bool) or not isinstance(exp, (int, float)) or abs(exp) > 64: return None
     try: value = eval(compile(tree, "<proc>", "eval"), {"__builtins__": {}}, env)
     except Exception: return None
     if isinstance(value, bool) or not isinstance(value, (int, float)): return None
@@ -117,7 +123,9 @@ def _safe_eval(expr, env):
 
 
 def _numeric_env(defines):
-    env = {}
+    # dtemp defaults to 0 C so define chains can use it, while an explicit
+    # `define dtemp = 25` must still override the default.
+    env = {"dtemp": 0.0}
     for _round in range(3):
         changed = False
         for name, expr in (defines or {}).items():
@@ -125,9 +133,6 @@ def _numeric_env(defines):
             if value is not None and env.get(name) != value:
                 env[name] = value; changed = True
         if not changed: break
-    # Default only when the proc did not define it; an explicit
-    # `define dtemp = 25` must drive temperature-dependent rho.
-    env.setdefault("dtemp", 0.0)
     return env
 
 

@@ -1786,7 +1786,7 @@ class OptimizerGui:
             "失败上限 fail_limit —— 整数 ≥1。连续仿真失败达到即停止（stop_reason=sim_failures）。默认 5。基础设施类错误（license/网表/求值服务）会免费重试一次且不计入。\n"
             "最大重启 max_restarts —— 整数 ≥0。停滞时允许的最大重启次数。默认 2。重启围绕当前最优点重新布点（带衰减扰动 + 少量随机移民）。\n"
             "随机种子 seed —— 整数（含 0）。同种子 + 同配置 → 结果可复现。留空=每次不同。默认 0。\n"
-            "搜索策略 strategy —— 取值见「算法说明」。另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、noise_sigma（噪声估计）、init_points（预热 CSV）。\n\n"
+            "搜索策略 strategy —— 取值见「算法说明」。另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、init_points（预热 CSV）。\n\n"
             "运行选项详细说明 —— 仿真设置页\n\n"
             "保存原始数据 save_raw —— 1（默认）：每轮迭代保留 psf/ 原始数据，可用 ViVA 打开复查波形；代价是磁盘占用大（每轮数 MB）。0：提取输出曲线后不保留原始数据，只留 result.txt 中的曲线。长时间大规模优化建议设 0。\n"
             "仿真超时 sim_timeout —— 正数，秒。单轮 spectre 超过该时间判为 TIMEOUT 失败并终止进程。默认 3600。设小可防挂死占用 license；但小于真实仿真耗时会误杀。实际单轮耗时可从进度页日志的“耗时”估计（求值循环约 0.5 秒/次）。\n\n"

@@ -4,7 +4,7 @@
 自动重生成网表 → 直连 spectre 迭代 → 收敛报告。版图侧可按工艺角色生成电感 /
 传输线 / 变压器 / 耦合线，接 EMX 做几何迭代。
 
-`Version 1.4.7 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
+`Version 1.4.8 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
 
 ## 特点
 
@@ -65,9 +65,10 @@ SSH 里没有 `DISPLAY` 时程序只会打印 `GUI_SMOKE_FAIL: no display` 后�
 | `library` / `cell` / `view` / `state` / `state_dir` | 设计与 ADE L 状态 |
 | `netlist` / `sim_root` / `sim_timeout` | 网表路径、仿真树根、单轮超时 |
 | `variables` / `fixed_variables` | 搜索变量（`init`/`min`/`max`，可选 `scale`、`integer`）与固定值 |
-| `targets` | `output` + `metric`（scalar / band_min / band_max / band_flatness / band_mean / value_at）+ `op`/`goal`/`tol`/`weight` |
+| `targets` | `output` + `metric`（scalar / band_min / band_max / band_flatness / band_mean / value_at）+ `band`（频段）/ `freq`（value_at）+ `op`（`>=`/`<=`/`==`/`range`）/`goal`/`goal2`/`tol`/`weight`；spec/pareto 模式用 `role`（error / constraint / objective）区分子目标 |
 | `settings` | `max_iter`、`patience`、`improve_rel`、`fail_limit`、`max_restarts`、`seed`、`strategy`、`mode` |
 | `output_dir` | run 目录；CLI 同目录自动续跑，GUI 用「续跑」勾选控制 |
+| `resume` | `false` 时忽略同目录历史，旧数据归档后从迭代 0 新开；缺省自动续跑 |
 
 ## 运行产物
 

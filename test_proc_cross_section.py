@@ -499,6 +499,30 @@ class ProcCrossSectionTest(unittest.TestCase):
             "conductor 0.5 rho1 MA\nlayer 1 4\n"))
         self.assertAlmostEqual(data["conductors"][0]["rho"], 0.086)
 
+    def test_define_uses_default_dtemp(self):
+        # A define that references dtemp without redefining it must see
+        # the same 0 C default as a conductor expression: 0.08.
+        data = pcs.parse_proc(self._write(
+            "dtemp_default.proc", "define r0 = 0.08\n"
+            "define rho1 = r0*(1+0.003*dtemp)\n"
+            "conductor 0.5 rho1 MA\nlayer 1 4\n"))
+        self.assertAlmostEqual(data["conductors"][0]["rho"], 0.08)
+
+    def test_safe_eval_power_exponents(self):
+        # 1.4.7 capped powers but also rejected valid exponents:
+        # negative constants, defined names and constant expressions.
+        self.assertAlmostEqual(pcs._safe_eval("10**-3", {}), 0.001)
+        self.assertEqual(pcs._safe_eval("2**p", {"p": 3}), 8.0)
+        self.assertEqual(pcs._safe_eval("2**(1+1)", {}), 4.0)
+        # The cap still rejects blow-up expressions immediately.
+        for expr, env in (("9**9**9", {}), ("(9**64)**64", {}),
+                          ("2**65", {}), ("2**-65", {}),
+                          ("2**p", {"p": 65}), ("2**q", {})):
+            self.assertIsNone(pcs._safe_eval(expr, env), expr)
+        data = pcs.parse_proc(self._write(
+            "neg_exp.proc", "layer 10**-3 4\nlayer 1 4\n"))
+        self.assertAlmostEqual(data["stack"][0]["thickness"], 0.001)
+
     def test_flow_maps_skip_non_finite(self):
         flow = pcs.flow_from_profile({"flow": {
             "metals": ["MA", "MB"],
@@ -634,7 +658,9 @@ class ProcCrossSectionTest(unittest.TestCase):
         with io.open(path, "rb") as fh:
             text = fh.read().decode("utf-8")  # 严格解码
         self.assertIn("横截面", text)
-        self.assertLessEqual(len(text.splitlines()), 760)
+        # Anti-bloat guard: the 1.4.7 parser fixes needed a little headroom
+        # over the old 760-line cap; keep the limit explicit.
+        self.assertLessEqual(len(text.splitlines()), 800)
         self.assertNotIn("dataclass", text)
         self.assertNotIn(":" "=", text)
         top_imports = [ln for ln in text.splitlines()

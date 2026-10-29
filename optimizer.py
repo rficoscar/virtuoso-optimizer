@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Virtuoso Optimizer.'
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 import argparse
 import csv
 import glob
@@ -3556,8 +3556,11 @@ def load_config(path):
         cfg = json.load(f)
     base = os.path.dirname(os.path.abspath(path))
     for key in ("state_dir",):
-        if key in cfg and not os.path.isabs(cfg[key]):
-            cfg[key] = os.path.join(base, cfg[key])
+        value = cfg.get(key)
+        # "" / null mean "not set"; joining them to the config folder would
+        # make auto_netlist treat that folder as a real state_dir.
+        if isinstance(value, str) and value.strip() and not os.path.isabs(value):
+            cfg[key] = os.path.join(base, value)
     return cfg
 
 def build_variables(cfg):
@@ -3683,9 +3686,22 @@ def prepare_netlist(cfg, mock=False):
               file=sys.stderr)
     return report
 
+def _resume_flag(value):
+    """cfg['resume'] -> True/False/None; None keeps auto-resume."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip().lower() not in (
+            "", "0", "false", "no", "off", "none", "disabled")
+    return bool(value)
+
 def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
                      stop_check=None, resume=None):
     'Run one optimization session.'
+    # The "resume": false advice in the fingerprint error lives in the
+    # config file; honour it unless the caller passed an explicit flag.
+    if resume is None:
+        resume = _resume_flag((cfg or {}).get("resume"))
     netlist_report = prepare_netlist(cfg, mock=mock)
     if not mock:
         # A deck without the requested analysis runs green and yields no
