@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.4.6 — 2026-10-30
+
+网表模块（`netlist_create` / `netlist_params`）的解析与写回修复：ADE 命名的
+分析语句不再在测试台合并时丢失，分析选项不再被当作设计变量改写，非有限数
+不再写进网表；续行、`inline subckt` 作用域与注释中的花括号一并修正。接口
+形状不变，均带回归测试。
+
+- **命名分析在合并时丢失**：ADE 写的是 `<分析名> <类型> key=val`
+  （`ac1 ac start=...`、`sp1 sp ports=...`），而 `_extract_testbench` 只把
+  首 token 当分析类型，`merge_testbench` 也按首 token 去重。于是从
+  config view 重建网表后，旧 deck 的 `ac1 ac` 整条消失，仿真没有分析可跑。
+  新增 `_analysis_kind`：首 token 命中语句关键字（`save`/`parameters`/
+  `subckt`/`include` 等）先排除，再看第二 token 是否为分析类型，首 token
+  即类型的旧写法仍兼容；合并按**类型**去重，语句关键字不再误判。
+  验证：`_t_merge_testbench` 断言 `["ac","sp","sweep"]` 全部合并、`save sp`
+  仍按 save 处理；`_t_merge_named_write_back` 用注入 runner 跑完整
+  `create_netlist`，确认 `ac1 ac`、`include`、`save` 写回且新参数保留。
+- **分析类型集合漂移**：`netlist_params._ANALYSIS` 缺 `hbac`/`hbnoise`/
+  `pac`/`pacnoise`/`pnoise`/`pstb`/`psp`/`ql`/`spnoise`/`sweephb`/`hbsp`/
+  `mpde`/`acnoise`，`netlist_create._ANALYSES` 缺 `disto`/`fourier`/`hbsp`/
+  `mpde`。缺失类型让 `pnoise1 pnoise ... dec=20` 被当成实例，一旦设计变量
+  叫 `dec`，分析选项就被改写并报告成功。两处集合补齐，并在
+  `selftest.py` 断言两者覆盖 `optimizer._ANALYSIS_KEYWORDS`、语句关键字
+  覆盖 `_NETLIST_DIRECTIVES`，防止再次漂移。验证：新自测断言
+  `pnoise1/hbnoise1/pac1/sweephb1` 不产生实例、`dec=20` 不被改、
+  顶层 `parameters dec` 正常打补丁。
+- **非有限数写入网表**：`format_value(float("inf"))` 产出 `infT`，
+  `10**400` 在 `float()` 处 OverflowError，`"1e999"` 解析为 inf；fixed
+  变量同样不校验。这些值会以 `ok=True` 写进 deck，spectre 直接报语法错。
+  新增 `_is_finite`（布尔放行、数值走 `math.isfinite`、字符串先拒
+  `inf`/`nan` 字面量再试解析，表达式原样放行），`format_eng` 对 inf/nan/
+  溢出抛 `ValueError`，`patch_netlist` 的 values 与 fixed 入口把非有限值
+  记为 missing 并告警，不改写文本。验证：`inf`/`-inf`/`nan`/`10**400`/
+  `"1e999"`/`"nan"` 六种输入均 `ok=False` 且网表字节不变。
+- **续行与作用域**：`_logical_lines` 只认行尾 `\` 和花括号，文档声称的
+  前导 `+` 续行实际不生效，`parameters a=1` + `+ b=2` 只识别到 `a`；花括号
+  计数不跳过注释，注释里一个孤立的 `{` 会把余下整个 deck 并成一条语句；
+  `_top_parameters` 只匹配 `subckt`，`inline subckt` 的内部参数被当成顶层
+  参数带走。现在前导 `+` 独立成为续行标记，`_brace_opens` 跳过 `//`、
+  `/* */` 与引号内文本，`inline subckt` 计入作用域。验证：
+  `_t_logical_lines_scope` 覆盖三种输入及 `carry_over_parameters` 回写。
+- **网表校验分支**：`_validate_netlist` 的空路径/不存在/过小/缺
+  `simulator lang=spectre` 四条拒绝路径此前无测试，补齐 `_t_validate_netlist`；
+  `merge_testbench` 删除已不用的 `existing_first` 计算。
+- 自测：`netlist_create --selftest` 16→20 组，`netlist_params --selftest`
+  103→125 条，`selftest.py` 119 条全通过。
+
 ## 1.4.5 — 2026-10-30
 
 EM 链路（`em_align` / `em_opt` / `em_bridge`）的验收语义与真实路径修复：跨 stage

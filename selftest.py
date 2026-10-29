@@ -1647,6 +1647,19 @@ class TestV12Modules(unittest.TestCase):
         for line in ("save sp\n", "sp (a 0) capacitor c=1p\n",
                      "// ac1 ac start=1\n"):
             self.assertEqual(list(netlist_analyses(line)), [], line)
+        # 分析类型集必须覆盖预检关键字，否则合法网表会被判无分析；
+        # 语句关键字集也必须覆盖 optimizer 的指令集，否则 save sp 等
+        # 会因第二 token 恰好是分析名而误判。
+        import netlist_create
+        import netlist_params
+        from optimizer import _ANALYSIS_KEYWORDS, _NETLIST_DIRECTIVES
+        missing = sorted(set(_ANALYSIS_KEYWORDS) - netlist_create._ANALYSES)
+        self.assertEqual(missing, [], missing)
+        missing = sorted(set(_ANALYSIS_KEYWORDS) - set(netlist_params._ANALYSIS))
+        self.assertEqual(missing, [], missing)
+        missing = sorted(set(_NETLIST_DIRECTIVES)
+                         - netlist_create._NON_ANALYSIS_HEADS)
+        self.assertEqual(missing, [], missing)
 
     def test_preflight_rejects_unusable_deck(self):
         """A deck that cannot produce curves fails at start, not after 50 rounds."""
@@ -1709,8 +1722,8 @@ class TestV12Modules(unittest.TestCase):
             "include \"/pdk/models.lib\" section=tt\n"
             "subckt s a b\nends s\n"
             "I0 (a b) s\n"
-            "sp sp ports=[PORT0 PORT1] start=16G stop=56G lin=81\n"
-            "sweephb sweep param=pin start=-20 stop=10 step=1 {\n"
+            "sp1 sp ports=[PORT0 PORT1] start=16G stop=56G lin=81\n"
+            "sweep1 sweep param=pin start=-20 stop=10 step=1 {\n"
             "  hb hb fundfreqs=[(fin)]\n"
             "}\n"
             "save PORT1:p\n"
@@ -1726,9 +1739,10 @@ class TestV12Modules(unittest.TestCase):
             "include \"/proj/cell.pex.netlist\"\n")
         merged, tb = netlist_create.merge_testbench(new, old)
         self.assertEqual(tb["includes"], 1, tb)
-        self.assertEqual(sorted(tb["analyses"]), ["sp", "sweephb"])
+        self.assertEqual(sorted(tb["analyses"]), ["sp", "sweep"])
         self.assertIn('include "/pdk/models.lib"', merged)
-        self.assertIn("sp sp ports=[PORT0 PORT1]", merged)
+        self.assertIn("sp1 sp ports=[PORT0 PORT1]", merged)
+        self.assertIn("sweep1 sweep param=pin", merged)
         self.assertIn("hb hb fundfreqs", merged)
         self.assertIn("save PORT1:p", merged)
         self.assertEqual(merged.count("include \"/proj/cell.pex.netlist\""),

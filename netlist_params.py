@@ -31,6 +31,7 @@ Python 3.6, standard library only, UTF-8 explicitly.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -74,9 +75,46 @@ def parse_value(text):
     return float(match.group(1)) * scale
 
 
+_NON_FINITE_TEXT = frozenset((
+    "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
+    "nan", "+nan", "-nan",
+))
+
+
+def _is_finite(value):
+    """False for inf/nan/overflowing numbers; expressions stay allowed.
+
+    ``1e999`` parses to inf and a huge JSON integer overflows ``float``;
+    writing ``infT`` into a deck would be reported as a successful patch
+    while spectre cannot parse it.  Non-numeric strings (``2*pi``) are
+    expressions, not numbers, so they pass through.
+    """
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        try:
+            return math.isfinite(value)
+        except (OverflowError, ValueError):
+            return False
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return True
+    if text.lower() in _NON_FINITE_TEXT:
+        return False
+    try:
+        return math.isfinite(parse_value(text))
+    except (ValueError, OverflowError):
+        return True
+
+
 def format_eng(value):
     """Format a float as an engineering string (same shape as optimizer)."""
-    value = float(value)
+    try:
+        value = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise ValueError("bad number: %s" % (value,))
+    if not math.isfinite(value):
+        raise ValueError("bad number: %s" % (value,))
     if value == 0:
         return "0"
     sign = "-" if value < 0 else ""
@@ -94,14 +132,21 @@ def format_value(value):
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, (int, float)):
-        return format_eng(value)
+        try:
+            return format_eng(value)
+        except (OverflowError, ValueError):
+            return ""
     text = "" if value is None else str(value).strip()
     if not text:
         return ""
     try:
-        return format_eng(parse_value(text))
+        number = parse_value(text)
     except ValueError:
         return text
+    try:
+        return format_eng(number)
+    except (OverflowError, ValueError):
+        return ""
 
 
 def _format_fixed(value):
@@ -109,7 +154,10 @@ def _format_fixed(value):
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, (int, float)):
-        return format_eng(value)
+        try:
+            return format_eng(value)
+        except (OverflowError, ValueError):
+            return ""
     if value is None:
         return ""
     return str(value).strip()
@@ -130,9 +178,13 @@ load pull correlate mismatch montecarlo
 
 # `ac1 ac start=...` style analysis statements: the second token is the
 # analysis type.  Their `name=value` pairs must never be patched.
+# Keep in sync with optimizer._ANALYSIS_KEYWORDS; a type missing here makes
+# a named analysis look like an instance, so its options are treated as
+# design parameters.
 _ANALYSIS = frozenset("""
-ac dc tran noise sp pss hb envlp xf sens pz stb dcmatch acmatch sweep
-montecarlo tf fourier disto
+ac acmatch acnoise dc dcmatch disto envlp fourier hb hbac hbnoise hbsp
+montecarlo mpde noise pac pacnoise pnoise pss pstb psp pz ql sens sp
+spnoise stb sweep sweephb tf tran xf
 """.split())
 
 
@@ -753,6 +805,11 @@ def patch_netlist(text, values, fixed=None, options=None):
 
     for raw_name, raw_value in fixed.items():
         name = str(raw_name)
+        if not _is_finite(raw_value):
+            invalid.append(name)
+            warnings.append(
+                "fixed 变量 %s 的值不是有限数，已跳过" % name)
+            continue
         formatted = _format_fixed(raw_value)
         if not formatted:
             invalid.append(name)
@@ -769,6 +826,11 @@ def patch_netlist(text, values, fixed=None, options=None):
 
     for raw_name, raw_value in values.items():
         name = str(raw_name)
+        if not _is_finite(raw_value):
+            invalid.append(name)
+            warnings.append(
+                "变量 %s 的值不是有限数，已跳过" % name)
+            continue
         formatted = format_value(raw_value)
         if not formatted:
             invalid.append(name)
@@ -1139,6 +1201,34 @@ def _selftest():
         check("parse rejects identifier", False)
     except ValueError:
         check("parse rejects identifier", True)
+    try:
+        format_eng(float("inf"))
+        check("format inf rejected", False)
+    except ValueError:
+        check("format inf rejected", True)
+    try:
+        format_eng(10 ** 400)
+        check("format huge int rejected", False)
+    except ValueError:
+        check("format huge int rejected", True)
+
+    # -- non-finite values are refused, never written as infT ------------
+    for bad in (float("inf"), float("-inf"), float("nan"), 10 ** 400,
+                "1e999", "nan"):
+        bad_text, bad_report = patch_netlist("parameters w=1u\n", {"w": bad})
+        check("non-finite value rejected",
+              bad_report["ok"] is False
+              and bad_report["missing"] == ["w"],
+              "%r %s" % (bad, bad_report["missing"]))
+        check("non-finite value leaves text",
+              bad_text == "parameters w=1u\n", bad_text)
+    fixed_bad_text, fixed_bad = patch_netlist(
+        "parameters nf=2\n", {}, fixed={"nf": float("nan")})
+    check("non-finite fixed rejected",
+          fixed_bad["ok"] is False and fixed_bad["missing"] == ["nf"],
+          str(fixed_bad["missing"]))
+    check("non-finite fixed leaves text",
+          fixed_bad_text == "parameters nf=2\n", fixed_bad_text)
 
     # -- inspect ----------------------------------------------------------
     info = inspect_netlist(DECK)
@@ -1300,6 +1390,39 @@ def _selftest():
           analysis_report["counts"] == {"top": 1, "subckt": 0, "instance": 1},
           str(analysis_report["counts"]))
 
+    # -- named analyses of every supported type --------------------------
+    # ADE writes `<name> <type> ...`; a type missing from _ANALYSIS makes
+    # the statement look like an instance whose options get patched.
+    named_analyses = "\n".join([
+        "simulator lang=spectre",
+        "parameters dec=20",
+        "pnoise1 pnoise start=1G stop=10G dec=20",
+        "hbnoise1 hbnoise start=1G stop=10G dec=20",
+        "pac1 pac start=1G stop=10G dec=20",
+        "sweephb1 sweephb param=pin start=-20 stop=10",
+        "",
+    ])
+    named_info = inspect_netlist(named_analyses)
+    named_instances = [inst["name"] for inst in named_info["instances"]]
+    check("named analyses not instances", named_instances == [],
+          str(named_instances))
+    named_text, named_report = patch_netlist(named_analyses, {"dec": 10})
+    check("named analysis options untouched",
+          "pnoise1 pnoise start=1G stop=10G dec=20" in named_text
+          and "hbnoise1 hbnoise start=1G stop=10G dec=20" in named_text
+          and "pac1 pac start=1G stop=10G dec=20" in named_text,
+          _line_with(named_text, "pnoise1"))
+    check("named analysis top dec patched",
+          "parameters dec=10" in named_text)
+    check("named analysis counts",
+          named_report["counts"] == {"top": 1, "subckt": 0, "instance": 0},
+          str(named_report["counts"]))
+    _, option_report = patch_netlist(named_analyses, {"start": 5.0})
+    check("analysis option is not a design variable",
+          option_report["ok"] is False
+          and option_report["missing"] == ["start"],
+          str(option_report["missing"]))
+
     # -- multi-line node list without + / \ ------------------------------
     multi_info = inspect_netlist(_MULTILINE)
     multi_inst = multi_info["instances"][0]
@@ -1327,16 +1450,22 @@ def _selftest():
     check("missing leaves text", same_text == DECK)
 
     # -- scope_map --------------------------------------------------------
+    # Use a target value different from both the top (1u) and instance
+    # (4u) spellings, otherwise "instance untouched" would pass merely
+    # because the old value already equals the formatted target.
     scoped, scoped_report = patch_netlist(
-        DECK, {"w": 4e-6},
+        DECK, {"w": 6e-6},
         options={"scope_map": {"w": ["sub:xfmr_tap"]}})
     check("scope_map keeps top", "parameters w=1u l=0.1u \\" in scoped)
     check("scope_map patches subckt",
-          "subckt xfmr_tap (a b c) w=4u" in scoped)
+          "subckt xfmr_tap (a b c) w=6u" in scoped)
     check("scope_map keeps instance w=4u", "X1 (n1 n2) xfmr_tap w=4u" in scoped)
     check("scope_map counts",
           scoped_report["counts"] == {"top": 0, "subckt": 1, "instance": 0},
           str(scoped_report["counts"]))
+    check("scope_map applied only subckt",
+          scoped_report["applied"]["w"]["locations"] == ["sub:xfmr_tap"],
+          str(scoped_report["applied"]["w"]))
 
     bad_scope, bad_report = patch_netlist(
         DECK, {"w": 4e-6}, options={"scope_map": {"w": ["bogus"]}})

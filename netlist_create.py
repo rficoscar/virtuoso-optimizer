@@ -515,6 +515,34 @@ def _scan_lines(text):
     return errors, warnings
 
 
+def _brace_opens(text):
+    'Unclosed { } count, ignoring // comments, /* */ and quoted text.'
+    depth = 0
+    quote = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            break
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                break
+            i = end + 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return depth
+
+
 def _logical_lines(lines):
     'Yield (start, end, text) for statements joined by \\, + or { } blocks.'
     i = 0
@@ -523,12 +551,17 @@ def _logical_lines(lines):
         text = lines[i]
         while i + 1 < len(lines):
             cont = text.rstrip().endswith("\\")
-            opens = text.count("{") - text.count("}")
-            if not cont and opens <= 0:
+            # Braces inside comments/quotes are not block syntax; counting
+            # them would swallow the rest of the deck into one statement.
+            opens = _brace_opens(text)
+            nxt = lines[i + 1].lstrip()
+            # A leading "+" is a continuation marker too (SPICE heritage),
+            # independent of a trailing backslash on the previous line.
+            plus = nxt.startswith("+")
+            if not cont and opens <= 0 and not plus:
                 break
             i += 1
-            nxt = lines[i].lstrip()
-            if nxt.startswith("+"):
+            if plus:
                 nxt = nxt[1:]
             text = text.rstrip().rstrip("\\") + " " + nxt
         yield start, i, text
@@ -550,7 +583,7 @@ def _top_parameters(text):
         if not code or code.startswith(("//", "*", ";", "#")):
             continue
         low = code.lower()
-        if re.match(r"subckt\b", low):
+        if re.match(r"(?:inline\s+)?subckt\b", low):
             depth += 1
             continue
         if re.match(r"ends\b", low):
@@ -627,16 +660,50 @@ def carry_over_parameters(new_text, old_text):
     return _fill_parameters(new_text, new_values), changes
 
 
+# 分析类型集合必须覆盖 optimizer._ANALYSIS_KEYWORDS（预检用同一口径），
+# selftest.py 有子集断言防漂移。
 _ANALYSES = {
-    "ac", "acmatch", "acnoise", "dc", "dcOp".lower(), "dcmatch", "envlp",
-    "hb", "hbac", "hbnoise", "noise", "pac", "pacnoise", "pnoise", "pss",
-    "pstb", "psp", "pz", "ql", "sens", "sp", "spnoise", "stb", "sweep",
-    "sweephb", "tran", "xf", "tf", "montecarlo",
+    "ac", "acmatch", "acnoise", "dc", "dcOp".lower(), "dcmatch", "disto",
+    "envlp", "fourier", "hb", "hbac", "hbnoise", "hbsp", "montecarlo",
+    "mpde", "noise", "pac", "pacnoise", "pnoise", "pss", "pstb", "psp",
+    "pz", "ql", "sens", "sp", "spnoise", "stb", "sweep", "sweephb",
+    "tran", "xf", "tf",
 }
+
+# 语句首 token：这些行永远不是分析（`save sp`、`parameters sp`、
+# `subckt sp` 等），必须先于第二 token 的类型判断排除。`inc` 是 spectre
+# 合法的 include 写法，optimizer 的指令集没有列它，这里有意保留。
+_NON_ANALYSIS_HEADS = frozenset((
+    "simulator", "global", "include", "ahdl_include", "hdl_include", "inc",
+    "parameters", "subckt", "ends", "inline", "model", "library",
+    "endlibrary", "section", "endsection", "statistics", "process",
+    "paramtest", "options", "save", "ic", "nodeset", "temp", "alter",
+    "altergroup", "real", "check", "assert", "shell", "set", "title",
+    "end", "info", "fatal", "warning", "error",
+))
 
 
 def _normalize_stmt(text):
     return " ".join(str(text or "").split())
+
+
+def _analysis_kind(code):
+    """一行逻辑语句的分析类型；不是分析则返回 None。
+
+    spectre/ADE 写成 ``<分析名> <类型> key=val``（``ac1 ac start=...``、
+    ``sp1 sp ports=...``），类型取第二 token；手写的首 token 即类型
+    （``sp sp ports=...``）仍兼容。实例的第二 token 是节点列表
+    （以 ``(`` 开头），所以不会把 ``sp (a b) capacitor`` 当成分析。
+    """
+    toks = str(code or "").lower().split()
+    if not toks or toks[0] in _NON_ANALYSIS_HEADS:
+        return None
+    if len(toks) > 1 and toks[1] in _ANALYSES:
+        return toks[1]
+    if toks[0] in _ANALYSES and not (
+            len(toks) > 1 and toks[1].startswith("(")):
+        return toks[0]
+    return None
 
 
 def _extract_testbench(text):
@@ -651,7 +718,7 @@ def _extract_testbench(text):
         if not code or code.startswith(("//", "*", ";", "#")):
             continue
         low = code.lower()
-        if re.match(r"subckt\b", low):
+        if re.match(r"(?:inline\s+)?subckt\b", low):
             depth += 1
             continue
         if re.match(r"ends\b", low):
@@ -663,10 +730,12 @@ def _extract_testbench(text):
         if first in ("include", "ahdl_include", "inc"):
             if "pex.netlist" not in low:
                 includes.append(code)
-        elif first in _ANALYSES:
-            analyses.append((first, code))
         elif first == "save":
             saves.append(code)
+        else:
+            kind = _analysis_kind(code)
+            if kind:
+                analyses.append((kind, code))
     return {"includes": includes, "analyses": analyses, "saves": saves}
 
 
@@ -685,24 +754,21 @@ def merge_testbench(new_text, old_text):
     new_lines = new_text.splitlines()
     existing = set(_normalize_stmt(raw) for _s, _e, raw in
                    _logical_lines(new_lines))
-    existing_first = set()
-    for _s, _e, raw in _logical_lines(new_lines):
-        code = raw.strip()
-        if code and not code.startswith(("//", "*", ";", "#")):
-            existing_first.add(code.lower().split(None, 1)[0])
 
     add_includes = []
     for code in old["includes"]:
         if _normalize_stmt(code) not in existing:
             add_includes.append(code)
     add_analyses = []
-    existing_names = set()
+    existing_types = set()
     for _s, _e, raw in _logical_lines(new_lines):
-        code = raw.strip().lower()
-        if code and code.split(None, 1)[0] in _ANALYSES:
-            existing_names.add(code.split(None, 1)[0])
+        code = raw.strip()
+        if code and not code.startswith(("//", "*", ";", "#")):
+            kind = _analysis_kind(code)
+            if kind:
+                existing_types.add(kind)
     for name, code in old["analyses"]:
-        if name not in existing_names and _normalize_stmt(code) not in existing:
+        if name not in existing_types and _normalize_stmt(code) not in existing:
             add_analyses.append(code)
     add_saves = [code for code in old["saves"]
                  if _normalize_stmt(code) not in existing]
@@ -1378,6 +1444,150 @@ def _t_auto_mode():
     assert _auto_mode("weird") == "auto"
 
 
+def _t_merge_testbench():
+    old = (
+        "simulator lang=spectre\n"
+        "parameters fin=36G\n"
+        "include \"/pdk/models.lib\" section=tt\n"
+        "subckt s a b\nends s\n"
+        "sp1 sp ports=[PORT0 PORT1] start=16G stop=56G lin=81\n"
+        "ac1 ac start=1G stop=56G dec=10\n"
+        "sweep1 sweep param=pin start=-20 stop=10 step=1 {\n"
+        "  hb hb fundfreqs=[(fin)]\n"
+        "}\n"
+        "save PORT1:p\n"
+        "include \"/proj/cell.pex.netlist\"\n")
+    new = (
+        "simulator lang=spectre\n"
+        "global 0\n"
+        "parameters fin=36G\n"
+        "subckt s a b\nends s\n"
+        "I0 (a b) s\n"
+        "include \"/proj/cell.pex.netlist\"\n")
+    merged, tb = merge_testbench(new, old)
+    assert sorted(tb["analyses"]) == ["ac", "sp", "sweep"], tb
+    assert tb["includes"] == 1, tb
+    assert "sp1 sp ports=[PORT0 PORT1]" in merged
+    assert "ac1 ac start=1G" in merged
+    assert "sweep1 sweep param=pin" in merged
+    assert merged.count('include "/proj/cell.pex.netlist"') == 1, merged
+
+    # 语句关键字和名为 sp 的实例都不能算分析；save sp 仍按 save 合并。
+    tb2 = _extract_testbench(
+        "save sp\nparameters sp\nsubckt sp (a b)\nends sp\n"
+        "sp (a b) capacitor c=1p\n")
+    assert tb2["analyses"] == [], tb2
+    assert tb2["saves"] == ["save sp"], tb2
+    # 首 token 即类型的手写形式（hb hb ...）仍然可用。
+    assert _analysis_kind("hb hb fundfreqs=[(fin)]") == "hb"
+
+    # 新 deck 已含 ac 时按类型去重，旧 ac 不再插入；其它分析照常合并。
+    new_ac = new + "ac ac start=2G stop=3G dec=5\n"
+    merged2, tb3 = merge_testbench(new_ac, old)
+    assert "ac" not in tb3["analyses"], tb3
+    assert "ac1 ac start=1G" not in merged2, merged2
+    assert "sp1 sp ports=[PORT0 PORT1]" in merged2
+    assert "save PORT1:p" in merged2
+
+
+def _t_logical_lines_scope():
+    'Leading "+" continues; inline subckt is a scope; commented braces ignored.'
+    values, _blocks = _top_parameters(
+        "simulator lang=spectre\nparameters a=1\n    + b=2\n")
+    assert values == {"a": "1", "b": "2"}, values
+    merged, changes = carry_over_parameters(
+        "simulator lang=spectre\nparameters a b\n",
+        "simulator lang=spectre\nparameters a=1\n    + b=2\n")
+    assert "parameters a=1 b=2" in merged, merged
+    assert sorted(item["name"] for item in changes) == ["a", "b"], changes
+    inline = ("simulator lang=spectre\n"
+              "parameters w=1u\n"
+              "inline subckt foo (a b)\n"
+              "parameters Ls=1n\n"
+              "ends foo\n")
+    values, _blocks = _top_parameters(inline)
+    assert values == {"w": "1u"}, values
+    # 注释里的未配对 "{" 不能把余下全文并成一条注释语句。
+    braces = ("simulator lang=spectre\n"
+              "// note { unpaired\n"
+              "parameters a=1\n"
+              "ac1 ac start=1G stop=2G\n")
+    assert _top_parameters(braces)[0] == {"a": "1"}
+    tb = _extract_testbench(braces)
+    assert [kind for kind, _code in tb["analyses"]] == ["ac"], tb
+
+
+def _t_validate_netlist():
+    'Missing, too small and simulator-less decks are rejected with reasons.'
+    tmp = tempfile.mkdtemp(prefix="nc_val_")
+    try:
+        assert "路径为空" in _validate_netlist("")
+        assert "文件不存在" in _validate_netlist(os.path.join(tmp, "nope.scs"))
+        small = os.path.join(tmp, "small.scs")
+        _write_text(small, "x\n")
+        assert "文件过小" in _validate_netlist(small)
+        bad = os.path.join(tmp, "bad.scs")
+        _write_text(bad, "global 0\n" + "// pad\n" * 30)
+        assert "simulator lang=spectre" in _validate_netlist(bad)
+        good = os.path.join(tmp, "good.scs")
+        _write_text(good, "simulator lang=spectre\n" + "// pad\n" * 30)
+        assert _validate_netlist(good) == ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _t_merge_named_write_back():
+    'A config-view createNetlist drops analyses; ADE-named ones merge back.'
+    tmp = tempfile.mkdtemp(prefix="nc_merge_")
+    try:
+        state = os.path.join(tmp, "ade")
+        os.makedirs(state)
+        sim_root = os.path.join(tmp, "sim")
+        _fake_ade(state, "LibA", "CellA", "schematic", project=sim_root)
+        expected = os.path.join(sim_root, "CellA", "spectre", "schematic",
+                                "netlist", "input.scs")
+        os.makedirs(os.path.dirname(expected))
+        old = "\n".join([
+            "simulator lang=spectre",
+            'include "/pdk/models.lib" section=tt',
+            "parameters L1=1n",
+            "ac1 ac start=1G stop=2G dec=10",
+            "save V(out)",
+            "saveOptions options save=selected",
+            "// pad\n" * 20,
+            "",
+        ])
+        _write_text(expected, old)
+        new = "\n".join([
+            "simulator lang=spectre",
+            "global 0",
+            "parameters L1=2n",
+            "subckt cell (a b)",
+            "ends cell",
+            "X1 (a b) cell",
+            "saveOptions options save=selected",
+            "// new pad\n" * 10,
+            "",
+        ])
+
+        def runner(cmd, cwd, env, timeout):
+            _write_text(expected, new)
+            return 0, 'OPT_NETLIST_OK "%s"\n' % (
+                expected.replace("\\", "/")), ""
+
+        report = create_netlist({"state_dir": state, "work_dir": tmp},
+                                runner=runner)
+        assert report["status"] == "ok", report
+        assert report["testbench_merge"]["analyses"] == ["ac"], report
+        text = _read_text(expected)
+        assert "ac1 ac start=1G stop=2G dec=10" in text, text
+        assert 'include "/pdk/models.lib" section=tt' in text, text
+        assert "save V(out)" in text, text
+        assert "parameters L1=2n" in text, text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _force_utf8_stdio():
     'locale 把 stdio 留成 ASCII 时重包成 UTF-8（与 optimizer 一致）。'
     try:
@@ -1413,6 +1623,10 @@ def _selftest():
         ("ensure fallback", _t_ensure_fallback),
         ("ensure fail/skip", _t_ensure_fail_and_skip),
         ("auto_netlist 取值", _t_auto_mode),
+        ("测试台合并", _t_merge_testbench),
+        ("续行与作用域", _t_logical_lines_scope),
+        ("网表校验分支", _t_validate_netlist),
+        ("合并命名分析写回", _t_merge_named_write_back),
     ]
     failed = 0
     for name, func in tests:
