@@ -649,7 +649,6 @@ class EmLibrary(object):
                 except ValueError:
                     d[key] = raw
         d[_F.USABLE] = bool(d.get("usable", 1))
-        d.pop("usable", None)
         return d
     # nearest（热启动，list + distance）
     def nearest(self, device_type, target_fingerprint, k=5, tech=None,
@@ -874,6 +873,11 @@ class EmBridge(object):
         if self.mode == "track" and not prior and dev in self._last_geom:
             prior = self._last_geom[dev]
         sreq = dict(req)
+        # resolve 已解析出 dev/f0；补回请求，避免 solve 因缺 device_type/f_op
+        # 直接返回 error（真实路径等价于“0 次 EM 评估”）。
+        sreq.setdefault("device_type", dev)
+        if sreq.get("f_op") is None and f0 is not None:
+            sreq["f_op"] = f0
         sreq["geom_prior"] = prior
         sreq["budget"] = dict(req.get("budget") or {})
         try:
@@ -883,6 +887,11 @@ class EmBridge(object):
         if not entry:
             return _empty_result("miss", target, ["em_opt empty"])
         rec = dict(entry)
+        if rec.get(_F.STATUS) in ("error", "miss") and not rec.get(_F.ACTUAL):
+            # 硬失败不得当作 best_effort 入库（否则库里多一条 usable 的假结果）。
+            return _empty_result(rec.get(_F.STATUS), target,
+                                 list(rec.get(_F.WARNS) or []),
+                                 message=rec.get("reason") or rec.get(_F.STATUS))
         rec.setdefault(_F.DEVICE, dev)
         rec.setdefault(_F.TECH, tech)
         rec.setdefault(_F.CFG_HASH, cfg_hash)
@@ -891,13 +900,23 @@ class EmBridge(object):
         rec[_F.REQUEST] = dict(target)
         rec.setdefault(_F.USABLE, True)
         rec.setdefault(_F.SOURCE, "optimization")
+        # em_opt 用 "snp" 键带回 sNp 路径；契约列名是 snp_path。
+        snp_src = rec.get(_F.SNP_PATH) or rec.get("snp")
+        if snp_src:
+            # 先登记（内容寻址拷贝并算 sha1）再入库，否则行里 sha1 为空，
+            # put() 的幂等键永远命中不了，同一 sNp 会重复入库。
+            try:
+                reg = self.library.register_snp(snp_src)
+            except Exception as exc:
+                reg = None
+                rec.setdefault(_F.WARNS, []).append("snp: %s" % exc)
+            if reg:
+                rec[_F.SNP_SHA1], rec[_F.SNP_PATH] = reg
+            else:
+                rec[_F.SNP_PATH] = snp_src
         try:
             rid = self.library.put(rec)
             rec[_F.RECORD_ID] = rid
-            if rec.get(_F.SNP_PATH):
-                reg = self.library.register_snp(rec[_F.SNP_PATH])
-                if reg:
-                    rec[_F.SNP_SHA1], rec[_F.SNP_PATH] = reg
         except Exception as exc:
             rec.setdefault(_F.WARNS, []).append("put: %s" % exc)
         ac = rec.get(_F.ACTUAL) or {}
@@ -940,13 +959,25 @@ class EmBridge(object):
                 continue
             metric = dev_cfg.get("metric") or "L0"
             target = {metric: values[var]}
+            try:
+                f_op = _as_hz(dev_cfg.get("f_op") or dev_cfg.get("f0"))
+            except (TypeError, ValueError) as exc:
+                # 配置校验只保证非空；坏频率不能杀掉整次电路优化。
+                em_actual[var] = {
+                    "requested": values[var], "target": target,
+                    _F.STATUS: "error", _F.DISTANCE: None,
+                    _F.SNP_PATH: None, "snp": None, "record": None,
+                    "source": "error", "weak_hit": False, "clipped": False,
+                    "warns": ["f_op 解析失败: %s" % exc],
+                }
+                continue
             req = {
                 "schema": REQUEST_SCHEMA,
                 _F.DEVICE: dev_cfg.get(_F.DEVICE, "ind"),
                 "target": target,
                 "tolerances": dev_cfg.get("tolerances") or dev_cfg.get("tol")
                 or DEFAULT_TOL,
-                "f_op": _as_hz(dev_cfg.get("f_op") or dev_cfg.get("f0")),
+                "f_op": f_op,
                 _F.TECH: dev_cfg.get(_F.TECH),
                 _F.CFG_HASH: dev_cfg.get(_F.CFG_HASH),
                 _F.GRID_SPEC: dev_cfg.get(_F.GRID_SPEC) or DEFAULT_GRID_SPEC,
@@ -962,13 +993,19 @@ class EmBridge(object):
                 if isinstance(dv, (int, float)) and math.isfinite(float(dv)):
                     values_actual[var] = float(dv)
             em_actual[var] = {
-                "requested": target.get(next(iter(target))),
+                "requested": target.get(metric),
+                # GUI「EM 融合」页按 QueryResult 契约读取 target/status/
+                # snp_path/record；缺这些键时 requested 列与 snp 行恒为空。
+                "target": dict(target),
+                _F.STATUS: qr.get(_F.STATUS),
                 _F.GRID_KEY: qr.get(_F.GRID_KEY),
                 _F.DELIVERED: delivered,
                 _F.ACTUAL: qr.get(_F.ACTUAL),
                 _F.DELTA: qr.get(_F.DELTA),
                 _F.DISTANCE: qr.get(_F.DISTANCE),
+                _F.SNP_PATH: qr.get(_F.SNP_PATH),
                 "snp": qr.get(_F.SNP_PATH),
+                "record": qr.get("record"),
                 "source": qr.get(_F.SOURCE),
                 "weak_hit": bool(qr.get(_F.DISTANCE) is not None and
                                  float(qr.get(_F.DISTANCE)) > 1.0),

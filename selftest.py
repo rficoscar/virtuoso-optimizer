@@ -1397,6 +1397,146 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertAlmostEqual(eb["devices"][0]["tolerances"]["L0"], 0.02)
         self.assertAlmostEqual(eb["em_opt"]["budget"]["max_em"], 20)
 
+    def test_solve_registers_snp_before_put(self):
+        """em_opt 用 "snp" 带回路径：入库前先内容寻址登记，行里有 sha1。"""
+        import shutil
+        import em_bridge
+        tmp = tempfile.mkdtemp(prefix="em_snp_")
+        try:
+            lib = em_bridge.EmLibrary(os.path.join(tmp, "lib.sqlite3"))
+            src = os.path.join(tmp, "dev.s2p")
+            with open(src, "w") as f:
+                f.write("# Hz S RI R 50\n1e9 0 0 0 0 0 0 0 0\n")
+            class _Opt(object):
+                def solve(self, req):
+                    return {"device_type": "ind", "geom": {"n": 2.5},
+                            "actual_fingerprint": {"L0": 1e-9},
+                            "source": "optimization", "snp": src}
+            br = em_bridge.EmBridge({"em_bridge": {}}, em_optimizer=_Opt(),
+                                    library=lib)
+            qr = br._solve({}, "ind", {"L0": 1e-9}, {}, None, None,
+                           {"step_rel": 0.01}, 1e9)
+            self.assertEqual(qr["status"], "hit_nearest")
+            self.assertTrue(qr["snp_path"].startswith(lib.snp_dir))
+            self.assertTrue(os.path.isfile(qr["snp_path"]))
+            rec = lib.get_by_key(qr["grid_key"])
+            self.assertIsNotNone(rec)
+            self.assertTrue(rec.get("snp_sha1"))
+            self.assertEqual(rec.get("snp_path"), qr["snp_path"])
+            lib.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_run_payload_has_gui_query_fields(self):
+        """EmBridge.run 的 em_actual 必须带 GUI 读取的 target/status/snp_path/record。"""
+        import em_bridge
+        class _Result(object):
+            pass
+        class _Delegate(object):
+            def run(self, values, iter_dir):
+                res = _Result()
+                res.values = dict(values)
+                return res
+        class _Lib(object):
+            def close(self):
+                pass
+        qr = {"status": "hit_nearest", "distance": 0.2, "delivered": 2e-9,
+              "actual_fingerprint": {"L0": 2e-9}, "delta_vs_request": {"L0": 1.0},
+              "snp_path": os.path.join("work", "x.s2p"),
+              "grid_key": "ind:L0=2e-09", "source": "catalog",
+              "record": {"geom": {"n": 2.0}}, "clipped": False}
+        cfg = {"em_bridge": {"devices": [
+            {"device_type": "ind", "target_var": "L1", "metric": "L0"}]}}
+        br = em_bridge.EmBridge(cfg, delegate=_Delegate(), library=_Lib())
+        br.resolve = lambda req: qr
+        res = br.run({"L1": 1e-9}, os.path.join("work", "iter_0000"))
+        ea = res.em_actual["L1"]
+        self.assertEqual(ea["target"], {"L0": 1e-9})
+        self.assertEqual(ea["status"], "hit_nearest")
+        self.assertEqual(ea["snp_path"], qr["snp_path"])
+        self.assertEqual(ea["snp"], qr["snp_path"])
+        self.assertEqual(ea["record"], qr["record"])
+        self.assertEqual(res.values["L1"], 2e-9)
+
+    def test_solve_injects_dev_f0_and_skips_hard_failures(self):
+        """_solve 必须把解析后的 dev/f0 补进请求；error/miss 不得入库。"""
+        import shutil
+        import em_bridge
+        tmp = tempfile.mkdtemp(prefix="em_solve_")
+        try:
+            lib = em_bridge.EmLibrary(os.path.join(tmp, "lib.sqlite3"))
+            class _Cap(object):
+                def __init__(self):
+                    self.seen = None
+                    self.entry = {}
+                def solve(self, req):
+                    self.seen = dict(req)
+                    return dict(self.entry)
+            opt = _Cap()
+            br = em_bridge.EmBridge({"em_bridge": {}}, em_optimizer=opt,
+                                    library=lib)
+            gspec = {"step_rel": 0.01}
+            opt.entry = {"status": "error", "reason": "f_op 缺失"}
+            qr = br._solve({}, "tl", {"Z0": 50.0}, {}, None, None, gspec, 2e9)
+            self.assertEqual(qr["status"], "error")
+            self.assertEqual(opt.seen.get("device_type"), "tl")
+            self.assertEqual(opt.seen.get("f_op"), 2e9)
+            self.assertIsNone(lib.get_by_key("tl:Z0=50"))
+            opt.entry = {"status": "miss"}
+            qr2 = br._solve({}, "tl", {"Z0": 50.0}, {}, None, None, gspec, 2e9)
+            self.assertEqual(qr2["status"], "miss")
+            self.assertIsNone(lib.get_by_key("tl:Z0=50"))
+            lib.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_sqlite_records_keep_usable_key(self):
+        """_row_to_rec 不能删掉 _F.USABLE（SQLite 与 JSONL 记录字段一致）。"""
+        import shutil
+        import em_bridge
+        tmp = tempfile.mkdtemp(prefix="em_usable_")
+        try:
+            lib = em_bridge.EmLibrary(os.path.join(tmp, "lib.sqlite3"))
+            rec = {"device_type": "ind", "grid_key": "ind:L0=1e-09",
+                   "actual_fingerprint": {"L0": 1e-9},
+                   "request_fingerprint": {"L0": 1e-9}, "source": "catalog"}
+            lib.put(dict(rec))
+            got = lib.get_by_key("ind:L0=1e-09")
+            self.assertIn("usable", got)
+            self.assertTrue(got["usable"])
+            bad = dict(rec)
+            bad["usable"] = False
+            bad["grid_key"] = "ind:L0=2e-09"
+            bad["actual_fingerprint"] = {"L0": 2e-9}
+            lib.put(bad)
+            self.assertIsNone(lib.get_by_key("ind:L0=2e-09"))
+            lib.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_run_bad_f_op_does_not_abort(self):
+        """坏 f_op 只标记该器件 error，不得让整次电路优化抛异常。"""
+        import em_bridge
+        class _Result(object):
+            pass
+        class _Delegate(object):
+            def run(self, values, iter_dir):
+                res = _Result()
+                res.values = dict(values)
+                return res
+        class _Lib(object):
+            def close(self):
+                pass
+        cfg = {"em_bridge": {"devices": [
+            {"device_type": "ind", "target_var": "L1",
+             "f_op": "not-a-frequency"}]}}
+        br = em_bridge.EmBridge(cfg, delegate=_Delegate(), library=_Lib())
+        res = br.run({"L1": 1e-9}, os.path.join("work", "iter_0000"))
+        ea = res.em_actual["L1"]
+        self.assertEqual(ea["status"], "error")
+        self.assertTrue(any("f_op" in w for w in ea["warns"]))
+        self.assertEqual(res.values["L1"], 1e-9)
+
 
 class TestV12Modules(unittest.TestCase):
     """V12: auto netlist, scoped parameter patching, EM two-stage alignment."""

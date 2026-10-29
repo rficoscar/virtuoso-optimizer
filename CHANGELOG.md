@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.4.5 — 2026-10-30
+
+EM 链路（`em_align` / `em_opt` / `em_bridge`）的验收语义与真实路径修复：跨 stage
+选优与 `status` 同口径、`Q@f0` 按请求频点求值、sNp 与 GUI 字段贯通，均带回归
+测试；搜索预算与接口形状不变。
+
+- **跨 stage 选优口径不一致**：`solve()` 直接用各 stage 子目标的 J 跨级比较，
+  而子目标键集随 stage 增大，J 单调变大，后一级几乎必然“胜出”；`status` 又取
+  最后一个 stage 的子集距离，于是 `tl` 目标会出现 θ=1.2°、d=17.76 却报
+  `hit_grid`。现在每级返回的指纹都用**全目标**重算 `full_distance/full_J`
+  再选优，`status` 只由全目标距离决定；`stages` 行同时保留子集与全目标数值。
+- **`Q@f0` 用错频点**：`distance_of`/`J_of` 只从 `target["f0"]` 取频点，请求里的
+  `f_op` 没传进来；真实指纹只有 `Qcurve` 时按缺失键记 99，优化器永远认为没达标。
+  两个函数新增可选 `f0=` 参数，`solve`/搜索循环/`_result` 均传 `request.f_op`。
+  已知答案：`Qcurve=[[1e9,7],[2e10,9]]`、目标 `Q@f0=8`、`f_op=1e10` 的归一化
+  距离为 0.032895（与 `em_bridge` 一致），旧实现为 99。
+- **元数据键与 `None` 目标计分**：`target` 里混入 `kind/ports/f0/band/band_hi`
+  时被当成指标（字符串比较或 `float(None)` 崩溃，`theta: None` 直接 TypeError）。
+  现在 `distance_of`/`J_of` 跳过元数据键、`None`/布尔/非数值目标，与
+  `em_bridge.distance_of` 同口径；没有任何可验收指标时返回 `inf` 而不是 0，
+  避免空目标被当成已达标。
+- **几何缓存串味**：缓存键只有几何哈希，同一几何在 2 GHz/5 GHz、或 ind/ct
+  之间复用同一条指纹（mock 与真实路径也互换）。键改为
+  `device_type|f_op|geom_hash|mock/real`，cell 名仍只用几何哈希保持稳定。
+- **真实路径丢 sNp**：`make_layout_emx` 返回的 `out["snp"]` 被丢弃，指纹按扫描
+  首点提取；`em_bridge` 又只认 `snp_path`，于是 GUI 的 sNp 列恒空、库中
+  `snp_sha1` 恒空导致幂等键失效。现在按 `f_op` 从 sNp 重提取指纹并带回路径，
+  `EmBridge._solve` 先内容寻址登记 sNp 再入库。
+- **GUI 契约缺字段**：`EmBridge.run` 的 `em_actual[var]` 只有 requested/grid_key，
+  GUI 读取的 `target/status/snp_path/record` 全缺。已补齐，并让单器件 `f_op`
+  解析失败只标记该器件 `error`，不再让整次电路优化抛异常；省略
+  `device_type` 的请求不再 KeyError；`error/miss` 结果不再写成 `usable` 记录，
+  SQLite 读回保留 `usable` 键。
+- **搜索失败记账**：`infra_streak` 成功后不清零（三次累计误判 `infra_fail`），
+  持续 `dnc` 又不占预算，会空转到 `time_cap`。现在成功即清零，非 infra 的每次
+  尝试都计入预算。
+- 自测：`selftest.py` 新增 5 条 em_bridge 回归；`em_opt --selftest` 新增 9 组
+  回归断言（全目标选优、`Q@f0`、元数据/`None`、缓存分离、省略 device_type、
+  非数值/空目标、dnc 预算、infra 清零、真实路径 sNp/f_op）。全量：selftest 119、
+  netlist_create 16、netlist_params 103、em_align 108、em_opt PASS、
+  librf_opt 123、proc_cross_section 31 全部通过；`--gui-smoke` OK。
+
 ## 1.4.4 — 2026-10-30
 
 版图几何生成（`librf`）的正确性与预检修复：耦合线奇偶模端口对齐、器件元数据
