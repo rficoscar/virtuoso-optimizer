@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 1.4.0 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Virtuoso Optimizer 1.4.2 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Windows failures: none.
@@ -33,7 +33,7 @@ from optimizer import (  # noqa: F401
     resolve_netlist_path, resolve_prog, resolve_run_dir,
     rewrite_netlist_parameters,
     run_em_align, run_optimization, stop_all_runners,
-    suggest_bounds, tool_report,
+    suggest_bounds, tool_report, to_jsonable, from_jsonable,
 )
 from optimizer import (  # private helpers referenced by the suite
     _TOOL_CACHE, _archive_aside, _log_mode_of, _native_open, _read_text,
@@ -1790,6 +1790,125 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         self.assertIn("分析语句", str(ctx.exception))
 
 
+class TestSearchStrategyFixes(unittest.TestCase):
+    """1.4.2: grid resume, scalariser wiring and CMA h_sigma scale."""
+
+    def test_grid_resume_rebuilds_grid(self):
+        # A snapshot taken with levels=8 used to be restored next to a
+        # grid rebuilt from the new (smaller) budget: the restored order
+        # indices then ran off the end and ask() raised IndexError.
+        import algorithm as A
+        old = A.create("grid", ["a", "b"], [(0.0, 1.0)] * 2, seed=1,
+                       budget=100)
+        for _ in range(5):
+            pt = old.ask(1)[0]
+            old.tell([pt], [sum(v * v for v in pt)])
+        state = from_jsonable(json.loads(
+            json.dumps(to_jsonable(old.snapshot()))))
+        resumed = A.create("grid", ["a", "b"], [(0.0, 1.0)] * 2, seed=1,
+                           budget=10)
+        self.assertNotEqual(len(resumed._grid), len(old._grid))
+        resumed.restore(state)
+        self.assertEqual(resumed.levels, old.levels)
+        self.assertEqual(len(resumed._grid), len(old._grid))
+        allowed = set(tuple(p) for p in resumed._grid)
+        for _ in range(20):
+            pt = resumed.ask(1)[0]
+            self.assertIn(tuple(pt), allowed)
+
+    def test_worstspec_scalarises_the_objective_vector(self):
+        tr = Transform([
+            {"name": "a", "init": 0.5, "min": 0.0, "max": 1.0},
+            {"name": "b", "init": 0.5, "min": 0.0, "max": 1.0}])
+        algo = build_optimizer("worstspec", tr, {"a": 0.5, "b": 0.5},
+                               ["a", "b"], seed=1, n_obj=2)
+        self.assertEqual(algo.inner.n_obj, 2)
+        algo.ask()
+        algo.tell(1.0, F=[0.2, 0.9], G=[])
+        # worstspec = max of the objectives, not their sum (1.1).
+        self.assertAlmostEqual(algo.inner.inner.best_y, 0.9)
+
+    def test_weighted_uses_target_weights(self):
+        work = tempfile.mkdtemp()
+        cfg = example_config()
+        cfg["output_dir"] = os.path.join(work, "out")
+        cfg["settings"] = {"strategy": "weighted", "mode": "pareto",
+                           "max_iter": 3, "seed": 1, "patience": 99}
+        cfg["targets"] = [
+            {"output": "S21 dB20", "metric": "band_min",
+             "band": ["24G", "44G"], "op": ">=", "goal": 6, "tol": 0.5,
+             "role": "objective", "weight": 1.0},
+            {"output": "S21 dB20", "metric": "band_flatness",
+             "band": ["24G", "44G"], "op": "<=", "goal": 0.2, "tol": 0.2,
+             "role": "objective", "weight": 3.0}]
+        opt = Optimization(cfg, mock=True, max_iter=3)
+        import algorithm as A
+        self.assertIsInstance(opt.algo.inner, A.WeightedScalar)
+        self.assertEqual(opt.algo.inner.weights, [1.0, 3.0])
+        opt.algo.ask()
+        opt.algo.tell(1.0, F=[0.2, 0.9], G=[])
+        self.assertAlmostEqual(opt.algo.inner.inner.best_y,
+                               (0.2 + 3.0 * 0.9) / 4.0)
+        # All-zero weights keep the equal-weight fallback instead of
+        # raising "weights sum to zero" in the middle of a run.
+        cfg["output_dir"] = os.path.join(work, "out_zero")
+        for target in cfg["targets"]:
+            target["weight"] = 0.0
+        opt0 = Optimization(cfg, mock=True, max_iter=3)
+        self.assertIsNone(opt0.algo.inner.weights)
+        opt0.algo.ask()
+        opt0.algo.tell(1.0, F=[0.2, 0.9], G=[])
+        self.assertAlmostEqual(opt0.algo.inner.inner.best_y, 0.55)
+
+    def test_scalar_wrapper_restart_reaches_inner(self):
+        import algorithm as A
+        for name in ("weighted", "worstspec"):
+            algo = A.create(name, ["a", "b"], [(0.0, 1.0)] * 2, seed=2,
+                            budget=100)
+            for _ in range(20):
+                pt = algo.ask(1)[0]
+                algo.tell([pt], [sum((v - 0.4) ** 2 for v in pt)])
+            best = algo.best()[1]
+            algo.restart(spread=0.25)
+            self.assertEqual(algo.inner.restarts, 1)
+            self.assertAlmostEqual(algo.inner.last_restart_radius, 0.25)
+            self.assertEqual(algo.best()[1], best)  # inner best survives
+
+    def test_constraint_vector_reaches_inner_as_one_point(self):
+        # SpaceAdapter handed the flat per-point G straight to engines
+        # that index G[i], so G[0] was a float: spec/pareto runs with a
+        # constraint or error-role target raised TypeError at tell.
+        tr = Transform([
+            {"name": "a", "init": 0.5, "min": 0.0, "max": 1.0},
+            {"name": "b", "init": 0.5, "min": 0.0, "max": 1.0}])
+        for name in ("lshade", "cmaes", "tpe", "nsga2"):
+            algo = build_optimizer(name, tr, {"a": 0.5, "b": 0.5},
+                                   ["a", "b"], seed=1, n_obj=1,
+                                   n_constr=1)
+            algo.ask()
+            algo.tell(0.3, F=[0.3], G=[0.25])
+        # Deb feasibility still applies: infeasible points never win.
+        algo = build_optimizer("lshade", tr, {"a": 0.5, "b": 0.5},
+                               ["a", "b"], seed=1, n_obj=1, n_constr=1)
+        algo.ask()
+        algo.tell(0.3, F=[0.3], G=[0.25])
+        self.assertIsNone(algo.inner.best_y)
+        algo.ask()
+        algo.tell(0.2, F=[0.2], G=[0.0])
+        self.assertAlmostEqual(algo.inner.best_y, 0.2)
+
+    def test_cmaes_hsig_uses_generation_scale(self):
+        import algorithm as A
+        algo = A.create("cmaes", ["x%d" % i for i in range(5)],
+                        [(0.0, 1.0)] * 5, x0=[0.5] * 5, seed=1)
+        algo._gen_count = 2
+        # A path length modestly above the random-selection expectation
+        # is a normal step: the canonical 2*(g+1) denominator gives
+        # hsig=1, while the old 2*g/lambda scale forced hsig=0 here.
+        self.assertEqual(algo._hsig(1.4 * algo.chiN), 1.0)
+        self.assertEqual(algo._hsig(10.0 * algo.chiN), 0.0)
+
+
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
     TestStopSemantics, TestResumeIdentity,
@@ -1797,7 +1916,7 @@ _TEST_CLASSES = (
     TestResumeEquivalenceV05, TestV06Hooks, TestToolDiscovery,
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
     TestS3EmBridge, TestAuditTrail, TestV12Modules,
-    TestPreflightAndCurveGuard,
+    TestPreflightAndCurveGuard, TestSearchStrategyFixes,
 )
 
 

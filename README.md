@@ -4,7 +4,7 @@
 自动重生成网表 → 直连 spectre 迭代 → 收敛报告。版图侧可按工艺角色生成电感 /
 传输线 / 变压器 / 耦合线，接 EMX 做几何迭代。
 
-`Version 1.4.1 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
+`Version 1.4.2 · MIT · Python 3.6+（纯标准库；matplotlib 仅用于可选收敛图）`
 
 ## 特点
 
@@ -15,7 +15,7 @@
   不会跑满预算才发觉得分全是惩罚。
 - **config / 层次网表改写**：不只改顶层 `parameters`，还处理子电路默认值与被实例
   覆盖的参数；变量在网表里找不到就报错，不“改了没用”。
-- **13 种搜索策略**：simplex / coordinate / global / de / lshade / cmaes /
+- **14 种搜索策略**：simplex / coordinate / global / de / lshade / cmaes /
   cmaes_ipop / tpe / nsga2 / weighted / worstspec / portfolio / random / grid，
   支持多目标（scalar / spec / pareto）。
 - **断点续跑与历史热启动**：snapshot + events 精确还原算法状态；没有快照时把历史

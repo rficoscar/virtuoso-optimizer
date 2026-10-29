@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.2 — 2026-10-30
+
+搜索策略与引擎接口的若干缺陷修复（续跑崩溃、约束向量形状、多目标策略标量化
+失效、CMA-ES 步长路径），均带回归测试；CLI / 配置语义不变。
+
+- **grid 续跑越界崩溃**：快照恢复了 `levels` 与网格遍历顺序，`_grid` 却仍按本次
+  构造参数（新的 `max_iter`）重算；续跑把预算改小时旧顺序下标落到新网格之外，
+  `ask()` 抛 `IndexError`（100 → 10 实测必现）。现在 `restore()` 用快照里的 `levels`
+  重建网格，并对越界顺序回退为顺序遍历。
+- **worstspec / weighted 没有做自己的标量化**：`optimizer._SCALAR_ONLY` 把这两个
+  包装器也强制成单目标，`SpaceAdapter` 先把目标向量求和再下发，`worstspec` 的
+  `max()` 与 `weighted` 的目标权重从未执行（F=[0.2, 0.9] 时两者都按 1.1 记分）。
+  现在二者接收原始目标向量；`weighted` 还接收目标页配置的权重。已知答案验证：
+  `worstspec` 得 0.9，权重 [1, 3] 的加权和为 0.725。
+- **CMA-ES 的 h_sigma 分母用了 g/λ**：标准式是
+  `sqrt(1-(1-c_sigma)^(2(g+1)))`，代码写成 `2g/λ`，把代际尺度缩小 √λ 倍，使
+  前若干代几乎恒判 `hsig=0`、协方差 rank-one 路径不更新（5 维凸问题上 20 代里
+  5 代被误判）。改为 2g，并抽出 `_hsig()` 做已知答案断言。
+- **约束向量形状错位**：`SpaceAdapter` 把单点的扁平 `G` 直接下发给按行取 `G[i]`
+  的引擎，`G[0]` 成了 float；spec/pareto 模式下只要存在 constraint 或 error 角色
+  目标，lshade / cmaes / tpe / nsga2 在第一次成功迭代就抛
+  `TypeError: 'float' object is not iterable`。现在按点包一层；不可行点仍按 Deb
+  规则排除在最优之外。
+- **标量化包装器的 restart 不进内层**：停滞重启对 weighted/worstspec 原本是空
+  操作；现在转发给内层引擎并回报其 `simplex_size()`。
+- README 策略计数 13 → 14（实际注册 14 个）。
+- 自测 109 用例全绿（新增 6 条）；netlist_create 16、netlist_params 103、
+  em_align 108、em_opt PASS、librf_opt 106、proc_cross_section 31 全部通过。
+
 ## 1.4.1 — 2026-10-30
 
 网表预检与零曲线守卫的三处缺陷修复，均带回归测试；引擎算法与配置语义不变。

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Virtuoso Optimizer.'
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 import argparse
 import csv
 import glob
@@ -1294,7 +1294,10 @@ class SpaceAdapter(object):
             f = F[0] if (F and isinstance(F[0], (list, tuple))) else F
             if isinstance(f, (list, tuple)):
                 f = sum(f)
-        self.inner.tell([z], [f], G if G else None)
+        # Inner engines take one constraint vector per point (G[i]), so
+        # wrap this point's flat vector.  Passing G as-is made G[0] a
+        # float and crashed constraint engines in spec/pareto mode.
+        self.inner.tell([z], [f], [list(G)] if G else None)
 
     def snapshot(self):
         return {"name": self.name, "inner": self.inner.snapshot()}
@@ -1307,8 +1310,10 @@ class SpaceAdapter(object):
         self.inner.restart(spread)
 # Strategies that only ever see one scalar objective (simplex and global
 # included: their registry ports score scalar F[0] like the old classes).
+# weighted/worstspec are NOT here: their job is to scalarise the objective
+# vector themselves, so they must receive it unscaled.
 _SCALAR_ONLY = ("random", "grid", "simplex", "global", "de", "lshade",
-                "cmaes", "cmaes_ipop", "tpe", "weighted", "worstspec")
+                "cmaes", "cmaes_ipop", "tpe")
 
 def build_optimizer(strategy, transform, x0_values, all_names, seed=0,
                     n_obj=1, n_constr=0, budget=None, **opts):
@@ -3044,6 +3049,13 @@ class Optimization:
         n_constr = len(con_t) + (len(err_t)
                                  if self.settings.mode != "scalar" else 0)
         opts = {}
+        if strat == "weighted" and self.settings.mode != "scalar" and obj_t:
+            # The weighted strategy combines objective errors itself; give
+            # it the same per-target weights the scalar total would use.
+            # All-zero weights fall back to equal weighting (as before).
+            weights = [_weight_of(t) for t in obj_t]
+            if sum(weights) > 0.0:
+                opts["weights"] = weights
         port = self.cfg.get("settings", {}).get("portfolio") or {}
         if port:
             opts["members"] = port.get("members")

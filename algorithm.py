@@ -249,11 +249,7 @@ class GridSearch(_LhsFallback, AlgorithmBase):
         if self._fallback:
             return
         self.levels = self._pick_levels()
-        axes = []
-        for lo, hi in self.bounds:
-            axes.append([lo + (hi - lo) * k / (self.levels - 1)
-                         for k in range(self.levels)])
-        self._grid = self._build_grid(axes)
+        self._rebuild_grid()
         self._order = list(range(len(self._grid)))
         self._pos = 0
     def _pick_levels(self):
@@ -271,6 +267,16 @@ class GridSearch(_LhsFallback, AlgorithmBase):
                     nxt.append(base + [v])
             pts = nxt
         return pts
+    def _rebuild_grid(self):
+        """Recompute the grid from `levels` (also after a resume)."""
+        if self._fallback:
+            self._grid = []
+            return
+        levels = max(2, int(self.levels))
+        self.levels = levels
+        axes = [[lo + (hi - lo) * k / (levels - 1) for k in range(levels)]
+                for lo, hi in self.bounds]
+        self._grid = self._build_grid(axes)
     def ask(self, n=1):
         count = int(n)
         if count <= 0:
@@ -306,6 +312,12 @@ class GridSearch(_LhsFallback, AlgorithmBase):
         self.levels = int(state.get("levels", self.levels))
         self._order = list(state.get("order", self._order))
         self._pos = int(state.get("pos", 0))
+        # The grid is derived state: rebuild it from the snapshot's levels
+        # so restored order indices stay in range after a config change.
+        self._rebuild_grid()
+        if self._order and max(self._order) >= len(self._grid):
+            self._order = list(range(len(self._grid)))
+            self._pos = 0
 register("random", RandomSearch)
 register("grid", GridSearch)
 
@@ -1633,12 +1645,7 @@ class CmaEs(AlgorithmBase):
         ps_norm = math.sqrt(sum(v * v for v in self.p_sigma))
         # h_sigma indicator (pc update only along a successful path).
         self._gen_count += 1
-        denom = math.sqrt(1.0 - (1.0 - cs)
-                          ** (2.0 * self._gen_count / self.lam))
-        hsig = 1.0
-        if denom <= 0.0 or (ps_norm / denom / self.chiN
-                            >= (1.4 + 2.0 / (n + 1.0))):
-            hsig = 0.0
+        hsig = self._hsig(ps_norm)
         cc = self.cc
         pc = self.p_c
         cscale = math.sqrt(cc * (2.0 - cc) * self.mueff)
@@ -1682,6 +1689,22 @@ class CmaEs(AlgorithmBase):
             # the updated C; Jacobi on n<=50 is cheap enough in pure python.
             self._decompose()
         self._track_stagnation(ranked[0], ps_norm)
+    def _hsig(self, ps_norm):
+        """h_sigma indicator (1 = normal step, 0 = outlier).
+
+        The denominator is the expected ||p_sigma|| scale with the
+        canonical 2*(g+1) exponent.  `_gen_count` is the 1-based
+        generation index at this point, so the exponent is 2*g; using
+        g/lambda (the old code) shrank the scale by sqrt(lambda) and
+        disabled the rank-one covariance path for the first generations.
+        """
+        cs = self.csigma
+        denom = math.sqrt(max(0.0, 1.0 - (1.0 - cs)
+                              ** (2.0 * self._gen_count)))
+        if denom <= 0.0:
+            return 0.0
+        return 1.0 if (ps_norm / denom / self.chiN
+                       < (1.4 + 2.0 / (self.n + 1.0))) else 0.0
     def _track_stagnation(self, top, ps_norm):
         """Update tolfunhist / ps-stagnation bookkeeping (IPOP trigger)."""
         self._hist.append(self.best_y if self.best_y is not None
@@ -2523,6 +2546,13 @@ class _ScalarWrapper(AlgorithmBase):
             self.inner.seed_history(fwd)
     def best(self):
         return self.inner.best()
+    def restart(self, spread=0.15):
+        'Restart the inner engine, not only the wrapper counters.'
+        self.restarts += 1
+        self.last_restart_radius = spread
+        self.inner.restart(spread)
+    def simplex_size(self):
+        return self.inner.simplex_size()
     def snapshot(self):
         state = AlgorithmBase.snapshot(self)
         state["rng"] = _rng_pack(state["rng"])
