@@ -1929,7 +1929,7 @@ def _cpl_port_indices(ports, n):
             role[key] = low.index(key)
     if len(role) == 4:
         return role["a1"], role["a2"], role["b1"], role["b2"]
-    # librf 自己的 cpl 版图端口序（librf.il lriBuildCpl）：p01/p02 = 线 1 左/右，
+    # librf 自己的 cpl 版图端口序（librf.il librfBuildCpl）：p01/p02 = 线 1 左/右，
     # p03 = 线 2 右，p04 = 线 2 左。混模分解要求 b1 与 a1 同端（近端）、b2 为远端，
     # 所以 b1=p04、b2=p03。按名字排序会把近/远端对调：偶模反射取到隔离端、
     # 奇偶模直通对调，Ze/Zo/θ 全部偏离（已知答案 60/35Ω、60°/80° 实测
