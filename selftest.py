@@ -28,7 +28,7 @@ from optimizer import (  # noqa: F401
     compact_netlist_file, compact_spectre_log, discover_tools, find_prog,
     format_eng, gzip_file_in_place, make_run_dir, parse_em_bridge_cfg,
     config_fingerprint, load_previous, parse_eng, parse_netlist_parameters,
-    MockRunner, netlist_analyses, preflight_netlist, prepare_netlist,
+    MockRunner, netlist_analyses, preflight_netlist,
     read_manifest, reconstruct_input_scs,
     resolve_netlist_path, resolve_prog, resolve_run_dir,
     rewrite_netlist_parameters,
@@ -743,8 +743,16 @@ class TestToolDiscovery(unittest.TestCase):
         finally:
             _TOOL_CACHE.clear()
             _TOOL_CACHE.update(saved)
-        self.assertEqual(resolve_prog("virtuoso", "virtuoso"),
-                         resolve_prog("virtuoso", "virtuoso"))
+        # Restored cache: a name with no probe entry still returns the
+        # explicit value instead of the discovered path of another tool.
+        saved = dict(_TOOL_CACHE)
+        try:
+            self.assertEqual(
+                resolve_prog("no_such_tool_xyz", "/explicit/tool"),
+                "/explicit/tool")
+        finally:
+            _TOOL_CACHE.clear()
+            _TOOL_CACHE.update(saved)
     def test_discover_tools_shape(self):
         tools = discover_tools()
         for key in ("spectre", "virtuoso", "emx", "dbaccess", "strmout", "ocean"):
@@ -947,13 +955,12 @@ class TestCompactLog(_CompactBase):
     def test_full_mode_leaves_netlist_and_log_alone(self):
         run_dir = self._run_dir()
         params_line = "parameters L1=1 L2=2 k0=3 cin=4"
-        iter_dir, text = self._write_iter(run_dir, 0, params_line)
+        _iter_dir, text = self._write_iter(run_dir, 0, params_line)
         cfg = {"log_mode": "full"}
         self.assertEqual(_log_mode_of(cfg), LOG_MODE_FULL)
-        # full mode: the compaction policy is a no-op.
-        if _log_mode_of(cfg) == LOG_MODE_COMPACT:
-            compact_netlist_file(iter_dir, text, params_line)
-        self.assertTrue(os.path.isfile(os.path.join(iter_dir, "input.scs")))
+        # full mode: the compaction policy is a no-op, so the per-iteration
+        # netlist stays in place and no shared base netlist is written.
+        self.assertTrue(os.path.isfile(os.path.join(_iter_dir, "input.scs")))
         self.assertFalse(os.path.isfile(os.path.join(run_dir, NETLIST_BASE_NAME)))
         # A full-mode iteration reconstructs straight from the on-disk netlist.
         self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], text)
@@ -1020,7 +1027,7 @@ class TestCompactLog(_CompactBase):
                 logger.log_iteration(i, {"L1": "1p"}, {"total": total, "errors": {}}, status)
             logger.finalize()
             return run_dir, walk_size(run_dir, True), walk_size(run_dir, False)
-        run_full, full_live, full_all = build(LOG_MODE_FULL, 1)
+        _run_full, full_live, full_all = build(LOG_MODE_FULL, 1)
         run_cmp, cmp_live, cmp_all = build(LOG_MODE_COMPACT, 2)
         self.assertLess(cmp_live, full_live)
         self.assertLessEqual(cmp_live, full_live * 0.5)
@@ -1365,15 +1372,15 @@ class TestS3EmBridge(unittest.TestCase):
                 sys.modules.pop("em_bridge", None)
     def test_s3_iso_07_layout_em_still_works(self):
         """S3-ISO-07 em_bridge absent + layout_em on -> GeomRunner (v07 behaviour)."""
+        try:
+            import librf_opt  # noqa: F401 - layout_em needs the optional module
+        except Exception as exc:
+            self.skipTest("librf_opt unavailable (%s)" % exc)
         cfg = self._base_cfg(layout_em={"enabled": True, "type": "ind", "mock": True,
                                         "geom_vars": [], "cell": "t", "work": "work"})
         opt = self._opt(cfg, parsed=False)
-        try:
-            runner = opt._build_runner(mock=True)
-            self.assertEqual(type(runner).__name__, "GeomRunner")
-        except Exception as exc:
-            # Without librf_opt loading may fail, but never via EmBridge.
-            self.assertNotIn("EmBridge", type(exc).__name__)
+        runner = opt._build_runner(mock=True)
+        self.assertEqual(type(runner).__name__, "GeomRunner")
     def test_parse_rejects_invalid(self):
         """Bad mode / missing f_op / sparse grid all raise ValueError."""
         cases = (
@@ -1724,6 +1731,7 @@ class TestV12Modules(unittest.TestCase):
             "I0 (a b) s\n"
             "sp1 sp ports=[PORT0 PORT1] start=16G stop=56G lin=81\n"
             "sweep1 sweep param=pin start=-20 stop=10 step=1 {\n"
+            "  // bias sweep\n"
             "  hb hb fundfreqs=[(fin)]\n"
             "}\n"
             "save PORT1:p\n"
@@ -2241,6 +2249,18 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         self.assertIsNone(bad._collect_cfg())
 
 
+class TestSuiteRegistry(unittest.TestCase):
+    """A new Test* class that is not listed below silently never runs."""
+
+    def test_all_test_classes_are_registered(self):
+        module = sys.modules[__name__]
+        defined = set(name for name, obj in vars(module).items()
+                      if name.startswith("Test") and isinstance(obj, type)
+                      and issubclass(obj, unittest.TestCase))
+        registered = set(cls.__name__ for cls in _TEST_CLASSES)
+        self.assertEqual(sorted(defined - registered), [])
+
+
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
     TestStopSemantics, TestResumeIdentity,
@@ -2249,7 +2269,7 @@ _TEST_CLASSES = (
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
     TestS3EmBridge, TestAuditTrail, TestV12Modules,
     TestPreflightAndCurveGuard, TestSearchStrategyFixes,
-    TestGuiConfigRoundTrip,
+    TestGuiConfigRoundTrip, TestSuiteRegistry,
 )
 
 
@@ -2258,8 +2278,17 @@ def run_selftests():
     # GUI classes stay here so a headless CLI run never imports tkinter.
     global OptimizerGui, PlotCanvas
     from gui import OptimizerGui, PlotCanvas
+    # The proc cross-section suite lives in its own module; run it when the
+    # optional module is deployed (same fallback as librf_opt).
+    try:
+        import test_proc_cross_section as proc_tests
+    except Exception:
+        proc_tests = None
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([loader.loadTestsFromTestCase(cls) for cls in _TEST_CLASSES])
+    if proc_tests is not None:
+        suite.addTests(loader.loadTestsFromTestCase(
+            proc_tests.ProcCrossSectionTest))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return len(result.failures) + len(result.errors)
 

@@ -18,6 +18,7 @@
 
 import ast
 import io
+import math
 import os
 
 __all__ = ["ProcParseError", "DEFAULT_FLOW", "flow_from_profile",
@@ -86,8 +87,15 @@ def _comment_name(comment, fallback):
     return bits[0], (bits[1].strip() if len(bits) > 1 else "")
 
 
+def _finite(value):
+    """Finite float for a number-like value; None for inf/nan/overflow/text."""
+    try: value = float(value)
+    except (TypeError, ValueError, OverflowError): return None
+    return value if math.isfinite(value) else None
+
+
 def _safe_eval(expr, env):
-    """只允许数字/名字/四则运算的安全求值；失败返回 None。"""
+    """只允许数字/名字/四则运算的安全求值；失败或非有限数返回 None。"""
     try: tree = ast.parse(expr, mode="eval")
     except (SyntaxError, ValueError, TypeError): return None
     allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd, ast.Load, ast.Num, ast.Name)
@@ -96,28 +104,38 @@ def _safe_eval(expr, env):
         if isinstance(node, allowed): continue
         if const is not None and isinstance(node, const) and isinstance(node.value, (int, float)): continue
         return None
+    # Cap powers: 9**9**9 or nested powers would be computed in full first.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Pow): continue
+        raw = getattr(node.right, "n", getattr(node.right, "value", None))
+        if not isinstance(raw, (int, float)) or abs(raw) > 64: return None
+        if isinstance(node.left, ast.BinOp) and isinstance(node.left.op, ast.Pow): return None
     try: value = eval(compile(tree, "<proc>", "eval"), {"__builtins__": {}}, env)
     except Exception: return None
     if isinstance(value, bool) or not isinstance(value, (int, float)): return None
-    return float(value)
+    return _finite(value)
 
 
 def _numeric_env(defines):
-    env = {"dtemp": 0.0}
+    env = {}
     for _round in range(3):
         changed = False
         for name, expr in (defines or {}).items():
-            value = _safe_eval(expr, env) if name not in env else None
-            if value is not None: env[name] = value; changed = True
+            value = _safe_eval(expr, env)
+            if value is not None and env.get(name) != value:
+                env[name] = value; changed = True
         if not changed: break
+    # Default only when the proc did not define it; an explicit
+    # `define dtemp = 25` must drive temperature-dependent rho.
+    env.setdefault("dtemp", 0.0)
     return env
 
 
 def _as_number(text, defines, lineno, what, path=None):
-    try: value = float(text)
-    except (TypeError, ValueError): value = _safe_eval(text, _numeric_env(defines))
+    value = _finite(text)
+    if value is None: value = _safe_eval(text, _numeric_env(defines))
     if value is None: raise ProcParseError("%s 不是有效数字: %r" % (what, text), line=lineno, path=path)
-    return float(value)
+    return value
 
 
 def _stack_entry(entry, kind, order):
@@ -155,7 +173,7 @@ def parse_proc(path):
             data["defines"][name] = expr; recognized += 1
         elif key == "layer":
             if len(tokens) < 3: raise ProcParseError("layer 行至少需要厚度和介电常数", line=lineno, path=path)
-            is_inf = tokens[1].lower() == "infinity"
+            is_inf = tokens[1].lower() in ("infinity", "inf")
             if is_inf: thickness = None
             else:
                 thickness = _as_number(tokens[1], data["defines"], lineno, "layer 厚度", path)
@@ -233,10 +251,9 @@ def _int_map(raw):
         for key, value in raw.items():
             name = str(key).strip()
             if not name: continue
-            try: out[name] = int(value)
-            except (TypeError, ValueError):
-                try: out[name] = int(float(value))
-                except (TypeError, ValueError): continue
+            number = _finite(value)
+            if number is None: continue
+            out[name] = int(number)
     return out
 
 
@@ -246,8 +263,9 @@ def _float_map(raw):
         for key, value in raw.items():
             name = str(key).strip()
             if not name: continue
-            try: out[name] = float(value)
-            except (TypeError, ValueError): continue
+            number = _finite(value)
+            if number is None: continue
+            out[name] = number
     return out
 
 
@@ -266,8 +284,8 @@ def _pair_list(raw):
     for item in raw or ():
         if not isinstance(item, (list, tuple)) or len(item) < 3: continue
         low, high = str(item[0]).strip(), str(item[1]).strip()
-        try: value = float(item[2])
-        except (TypeError, ValueError): continue
+        value = _finite(item[2])
+        if value is None: continue
         if low and high: out.append((low, high, value))
     return tuple(out)
 
@@ -344,8 +362,8 @@ def _gap_items(expected_gaps, flow_gaps):
             out = []
             for key, value in expected_gaps.items():
                 if isinstance(key, (tuple, list)) and len(key) == 2:
-                    try: out.append((str(key[0]), str(key[1]), float(value)))
-                    except (TypeError, ValueError): pass
+                    number = _finite(value)
+                    if number is not None: out.append((str(key[0]), str(key[1]), number))
             return out
         out = []
         for item in expected_gaps:
@@ -379,7 +397,9 @@ def validate_flow_stack(proc_data, layermap_data=None, expected_gaps=None, tol=0
     if actual != present:
         errors.append("流程金属顺序错误: 实际 %s，应为 %s" % (" -> ".join(actual), " -> ".join(metals)))
     for pair in _gap_items(expected_gaps, spec["gaps"]):
-        low, high, want = pair[0], pair[1], float(pair[2])
+        want = _finite(pair[2])
+        if want is None: continue
+        low, high = pair[0], pair[1]
         ent_low, ent_high = flow_map.get(low), flow_map.get(high)
         if not ent_low or not ent_high or ent_low.get("z1") is None or ent_high.get("z0") is None: continue
         gap = ent_high["z0"] - ent_low["z1"]

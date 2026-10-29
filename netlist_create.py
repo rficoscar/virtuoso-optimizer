@@ -516,29 +516,50 @@ def _scan_lines(text):
 
 
 def _brace_opens(text):
-    'Unclosed { } count, ignoring // comments, /* */ and quoted text.'
+    'Unclosed { } count, ignoring comments and quoted text.'
     depth = 0
     quote = None
+    at_line_start = True
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
-        if quote:
+        if ch in "\r\n":
+            at_line_start = True
+        elif quote:
             if ch == quote:
                 quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            break
-        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
-            end = text.find("*/", i + 2)
+        elif at_line_start and ch in " \t":
+            pass
+        elif at_line_start and ch in "#;*":
+            # Comment lines use the same prefixes the deck parsers skip;
+            # a "{" in prose must not swallow the rest of the deck.
+            end = text.find("\n", i + 1)
             if end < 0:
                 break
-            i = end + 1
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
+            i = end
+            at_line_start = True
+        else:
+            at_line_start = False
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+                # A line comment hides only the rest of its own physical line;
+                # the "}" closing a brace block may be on a later line.
+                end = text.find("\n", i + 2)
+                if end < 0:
+                    break
+                i = end
+                at_line_start = True
+            elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+                end = text.find("*/", i + 2)
+                if end < 0:
+                    break
+                i = end + 1
         i += 1
     return depth
 
@@ -563,7 +584,9 @@ def _logical_lines(lines):
             i += 1
             if plus:
                 nxt = nxt[1:]
-            text = text.rstrip().rstrip("\\") + " " + nxt
+            # Keep physical line breaks: _brace_opens scans the accumulated
+            # text, and "//" must not hide the rest of later lines.
+            text = text.rstrip().rstrip("\\") + "\n" + nxt
         yield start, i, text
         i += 1
 
@@ -752,21 +775,21 @@ def merge_testbench(new_text, old_text):
     """
     old = _extract_testbench(old_text)
     new_lines = new_text.splitlines()
-    existing = set(_normalize_stmt(raw) for _s, _e, raw in
-                   _logical_lines(new_lines))
+    existing = set()
+    existing_types = set()
+    for _s, _e, raw in _logical_lines(new_lines):
+        existing.add(_normalize_stmt(raw))
+        code = raw.strip()
+        if code and not code.startswith(("//", "*", ";", "#")):
+            kind = _analysis_kind(code)
+            if kind:
+                existing_types.add(kind)
 
     add_includes = []
     for code in old["includes"]:
         if _normalize_stmt(code) not in existing:
             add_includes.append(code)
     add_analyses = []
-    existing_types = set()
-    for _s, _e, raw in _logical_lines(new_lines):
-        code = raw.strip()
-        if code and not code.startswith(("//", "*", ";", "#")):
-            kind = _analysis_kind(code)
-            if kind:
-                existing_types.add(kind)
     for name, code in old["analyses"]:
         if name not in existing_types and _normalize_stmt(code) not in existing:
             add_analyses.append(code)
@@ -1515,6 +1538,50 @@ def _t_logical_lines_scope():
     assert _top_parameters(braces)[0] == {"a": "1"}
     tb = _extract_testbench(braces)
     assert [kind for kind, _code in tb["analyses"]] == ["ac"], tb
+    # 花括号块内的行注释不能吞掉闭合 "}" 以及块之后的 save/分析。
+    commented = ("simulator lang=spectre\n"
+                 "sweep1 sweep param=pin {\n"
+                 "  // bias\n"
+                 "  hb hb fundfreqs=[(fin)]\n"
+                 "}\n"
+                 "save V(out)\n"
+                 "ac1 ac start=1G\n")
+    assert _top_parameters(commented)[0] == {}
+    tb = _extract_testbench(commented)
+    assert [kind for kind, _code in tb["analyses"]] == ["sweep", "ac"], tb
+    assert tb["saves"] == ["save V(out)"], tb
+    # 引号与块注释里的花括号同样不算块语法。
+    quoted = ("simulator lang=spectre\n"
+              'parameters p="a{b"\n'
+              "ac1 ac start=1G\n")
+    assert _top_parameters(quoted)[0] == {"p": '"a{b"'}, _top_parameters(quoted)
+    assert [kind for kind, _code in _extract_testbench(quoted)["analyses"]] == ["ac"]
+    blockcmt = ("simulator lang=spectre\n"
+                "/* { note */\n"
+                "parameters a=1\n"
+                "ac1 ac start=1G\n")
+    assert _top_parameters(blockcmt)[0] == {"a": "1"}
+    # inline subckt 里的分析/save 不是顶层测试台语句。
+    inline_tb = ("simulator lang=spectre\n"
+                 "inline subckt foo (a b)\n"
+                 "sp1 sp ports=[a b]\n"
+                 "save V(x)\n"
+                 "ends foo\n"
+                 "ac2 ac start=2G\n")
+    tb = _extract_testbench(inline_tb)
+    assert [kind for kind, _code in tb["analyses"]] == ["ac"], tb
+    assert tb["saves"] == [], tb
+    # #/;/* 注释行里的 "{" 同样不能吞掉后续网表（与顶层解析器的注释前缀一致）。
+    for prefix in ("#", ";", "*"):
+        comment = ("simulator lang=spectre\n"
+                   "%s old sweep block { unpaired\n" % prefix +
+                   "parameters a=1\n"
+                   "save V(out)\n"
+                   "ac1 ac start=1G\n")
+        assert _top_parameters(comment)[0] == {"a": "1"}, prefix
+        tb = _extract_testbench(comment)
+        assert [kind for kind, _code in tb["analyses"]] == ["ac"], (prefix, tb)
+        assert tb["saves"] == ["save V(out)"], (prefix, tb)
 
 
 def _t_validate_netlist():

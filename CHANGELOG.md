@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.4.7 — 2026-10-30
+
+网表行解析与工艺横截面模块的修复：花括号块内的行注释不再吞掉块后网表
+（1.4.6 自引入回归），proc 的溢出表达式与非有限数不再逃出解析器或静默
+污染叠层；`--selftest` 纳入横截面套件。接口形状不变。
+
+- **花括号块内的注释吞掉后续网表**：`_brace_opens` 在累计文本里遇到
+  `//`（以及顶层解析器同样视为注释的 `#` / `;` / `*` 行首）直接结束扫描，
+  而 `_logical_lines` 用空格拼接多行，物理行边界已经丢失。于是
+  `sweep1 ... { // note ... }` 里的闭合 `}` 不再被计数，块之后
+  的 `save`、`ac1 ac`、`include` 全被并进同一条逻辑语句；从 config view
+  重建网表时 `merge_testbench` 看不到这些语句，分析/保存再次丢失。现在
+  逻辑语句保留物理换行，注释只隐藏本行其余部分；`selftest.py` 的合并
+  用例在块内加注释（修复前 `save PORT1:p` 丢失），`netlist_create`
+  `_t_logical_lines_scope` 断言 analyses 为 `["sweep","ac"]`、saves 保留，
+  并覆盖 `#`/`;`/`*` 三种注释前缀。
+- **proc 非有限数与溢出**：`_safe_eval` 在 `float(10**400)` 处抛
+  OverflowError（不在 except 内），`layer 10**400` / `define T=10**400`
+  会让 `parse_proc` 抛出未捕获异常，而 GUI 横截面 `redraw` 只捕
+  ProcParseError；`layer 1e999` / `layer nan` 被当成有限厚度，`layer inf`
+  产生无限厚度，后续 z 全变 inf、绘图出现 NaN 坐标却返回 `ok=True`。
+  新增 `_finite` 统一拒绝 inf/nan/溢出：`_safe_eval`、`_as_number`、
+  `_int_map`、`_float_map`、`_pair_list` 都走它；`inf` 与 `infinity` 同义
+  （无限半空间），其余非有限值抛 ProcParseError（含行号）。`_safe_eval`
+  对幂运算设上限（常量指数 ≤64、禁止嵌套幂），`9**9**9` 不再长时间卡住
+  GUI 重绘；`_numeric_env` 不再预置 `dtemp`，proc 里显式的
+  `define dtemp = 25` 会真正参与温度相关 ρ（已知答案：0.08×(1+0.003×25)
+  = 0.086）。验证：`test_proc_cross_section` 新增非有限输入、flow 映射、
+  `_safe_eval`、`dtemp` 回归（31→40 条）。
+- **测试门禁与覆盖**：部署了横截面模块时，`python optimizer.py --selftest`
+  会同时运行 `test_proc_cross_section` 套件（README 承诺的回归入口不再
+  漏掉横截面模块；模块缺失时与 `librf_opt` 一样降级跳过）；新增
+  `TestSuiteRegistry`，未登记进 `_TEST_CLASSES` 的 `Test*` 类会直接失败；
+  移除恒真的 `resolve_prog` 自比较断言、未使用的 `prepare_netlist` 导入
+  与 full 模式测试里的死分支；Tk 不可用时改为 `skipTest` 而不是静默通过；
+  补齐 `flow_from_profile` 列表写法、layermap 缺金属/文字层、间距容差、
+  绘图异常兜底、assume/capacitor/define 等分支；移除横截面测试里恒真的
+  dash 断言。验证：`--selftest` 119→160 条，`test_proc_cross_section`
+  31→40 条，其余模块自测条数不变。
+
 ## 1.4.6 — 2026-10-30
 
 网表模块（`netlist_create` / `netlist_params`）的解析与写回修复：ADE 命名的

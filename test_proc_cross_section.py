@@ -194,6 +194,14 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(flow["metals"], ("MA", "MB"))
         self.assertEqual(flow["gds"]["MB"], 102)
 
+    def test_flow_from_profile_accepts_name_list(self):
+        # Documented shorthand: an ordered list of metal names.
+        flow = pcs.flow_from_profile(["MA", "MB"])
+        self.assertEqual(flow["metals"], ("MA", "MB"))
+        self.assertEqual(flow["vias"], ())
+        self.assertEqual(flow["gds"], {})
+        self.assertEqual(flow["via_res"], {})
+
     # -------------------------------------------------------------- parse
     def test_parse_proc_fixture(self):
         data = self.proc
@@ -374,6 +382,31 @@ class ProcCrossSectionTest(unittest.TestCase):
         _errors, warnings = pcs.validate_flow_stack(self.proc, layermap)
         self.assertTrue([w for w in warnings if "M5TXT" in w and
                          "文字层" in w], warnings)
+        # A layer missing from the layermap is an error; a missing text
+        # layer is only a warning.
+        layermap = copy.deepcopy(self.layermap)
+        del layermap["by_name"]["M2"]
+        errors, _warnings = pcs.validate_flow_stack(self.proc, layermap)
+        self.assertTrue([e for e in errors if "缺少流程金属 M2" in e], errors)
+        layermap = copy.deepcopy(self.layermap)
+        del layermap["by_name"]["M5TXT"]
+        _errors, warnings = pcs.validate_flow_stack(self.proc, layermap)
+        self.assertTrue([w for w in warnings if "缺少文字层 M5TXT" in w],
+                        warnings)
+
+    def test_validate_tolerance(self):
+        # A 0.01 um deviation is quiet at the default 0.02, loud at 0.005.
+        data = copy.deepcopy(self.proc)
+        for entry in data["stack"]:
+            if entry.get("kind") == "dielectric" and \
+                    entry.get("name") == "IMD1":
+                entry["thickness"] = 0.31
+        _errors, warnings = pcs.validate_flow_stack(
+            data, self.layermap, tol=0.02)
+        self.assertFalse([w for w in warnings if "M1→M2" in w], warnings)
+        _errors, warnings = pcs.validate_flow_stack(
+            data, self.layermap, tol=0.005)
+        self.assertTrue([w for w in warnings if "M1→M2" in w], warnings)
 
     def test_validate_without_layermap(self):
         errors, warnings = pcs.validate_flow_stack(self.proc, None)
@@ -402,6 +435,23 @@ class ProcCrossSectionTest(unittest.TestCase):
         errors, _warnings = pcs.validate_flow_stack(data)
         self.assertTrue([e for e in errors if "缺少流程金属" in e], errors)
 
+    def test_parse_assume_capacitor_and_define(self):
+        # assume-only input must parse; an unknown assume is ignored.
+        data = pcs.parse_proc(self._write(
+            "assume.proc", "assume micron\nassume bogus\n"))
+        self.assertEqual(data["assumes"]["units"], "microns")
+        self.assertTrue([line for _no, line in data["ignored"]
+                         if "assume bogus" in line], data["ignored"])
+        # capacitor rows are parsed, not silently dropped into ignored.
+        data = pcs.parse_proc(self._write(
+            "cap.proc", "capacitor M1 M2 0.5*area\nlayer 1 4\n"))
+        self.assertEqual(data["capacitors"][0]["bottom"], "M1")
+        self.assertEqual(data["capacitors"][0]["top"], "M2")
+        self.assertEqual(data["capacitors"][0]["expr"], "0.5*area")
+        for text in ("capacitor M1 M2\n", "define x 1\n"):
+            with self.assertRaises(pcs.ProcParseError):
+                pcs.parse_proc(self._write("badstmt.proc", text))
+
     def test_parse_layermap_bad_lines(self):
         path = self._write("bad.layermap",
                            "M1 drawing 61 0\nbadline\nM2 drawing xx 0\n"
@@ -411,6 +461,58 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(result["by_name"]["V1"], (70, 0))
         self.assertNotIn("M2", result["by_name"])
         self.assertEqual(len(result["bad_lines"]), 2)
+
+    def test_parse_rejects_non_finite_numbers(self):
+        # "inf" is the infinity keyword; it must not become an infinite
+        # thickness that turns every later z coordinate into inf.
+        data = pcs.parse_proc(self._write(
+            "inf.proc", "layer inf 4 #air\nconductor 0.5 0.1 MA\n"))
+        self.assertIsNone(data["dielectrics"][0]["thickness"])
+        self.assertAlmostEqual(pcs.build_stack(data)["top"], 0.5)
+        # A non-finite resistivity is unknown, not a crash (rho=None).
+        rho = pcs.parse_proc(self._write(
+            "rhonf.proc", "conductor 0.5 nan MA\nlayer 1 4\n"))
+        self.assertIsNone(rho["conductors"][0]["rho"])
+        bad = ("layer 1e999 4\n", "layer nan 4\n", "layer 10**400 4\n",
+               "layer 0 4\n", "layer -1 4\n",
+               "conductor 10**400 0.1 MA\n", "conductor nan 0.1 MA\n",
+               "conductor 0 0.1 MA\n",
+               "via MA MB 1e999 VA\n", "via MA MB -1 VA\n")
+        for text in bad:
+            with self.assertRaises(pcs.ProcParseError):
+                pcs.parse_proc(self._write("badnum.proc", text))
+
+    def test_safe_eval_rejects_unsafe_and_non_finite(self):
+        for expr in ("__import__('os')", "open('/etc/passwd')", "1/0",
+                     "10**400", "1e999", "nan",
+                     "9**9**9", "(9**64)**64", "2**65"):
+            self.assertIsNone(pcs._safe_eval(expr, {}), expr)
+        self.assertEqual(pcs._safe_eval("2*3+1", {}), 7.0)
+        self.assertEqual(pcs._safe_eval("2**10", {}), 1024.0)
+
+    def test_define_dtemp_overrides_default(self):
+        # dtemp defaults to 0, but an explicit define must drive rho:
+        # 0.08 * (1 + 0.003 * 25) = 0.086.
+        data = pcs.parse_proc(self._write(
+            "dtemp.proc", "define dtemp = 25\ndefine r0 = 0.08\n"
+            "define rho1 = r0*(1+0.003*dtemp)\n"
+            "conductor 0.5 rho1 MA\nlayer 1 4\n"))
+        self.assertAlmostEqual(data["conductors"][0]["rho"], 0.086)
+
+    def test_flow_maps_skip_non_finite(self):
+        flow = pcs.flow_from_profile({"flow": {
+            "metals": ["MA", "MB"],
+            "vias": [["MA", "MB", "VA"]],
+            "gaps": [["MA", "MB", float("inf")], ["MA", "MB", 0.5]],
+            "gds": {"MA": 101, "MB": 10 ** 400},
+            "via_gds": {"VA": 1e999},
+            "text": {"MATXT": float("nan")},
+            "via_res": {"VA": float("nan")}}})
+        self.assertEqual(flow["gaps"], (("MA", "MB", 0.5),))
+        self.assertEqual(flow["gds"], {"MA": 101})
+        self.assertEqual(flow["via_gds"], {})
+        self.assertEqual(flow["text"], {})
+        self.assertEqual(flow["via_res"], {})
 
     # -------------------------------------------------------------- draw
     def test_draw_cross_section(self):
@@ -427,7 +529,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         fills = set(r.get("fill") for r in rects)
         self.assertEqual(set(pcs.METAL_COLORS.values()) & fills,
                          set(pcs.METAL_COLORS.values()))
-        self.assertFalse([r for r in rects if "dash" in r])
 
         texts = _texts(canvas)
         for name in pcs.FLOW_METALS:
@@ -461,8 +562,33 @@ class ProcCrossSectionTest(unittest.TestCase):
         for name in ("MA", "MB"):
             self.assertTrue(_has_label(texts, name), name)
         self.assertIn("VA", texts)
+        # Without a layermap the drawing falls back to the flow's GDS map.
+        self.assertTrue([t for t in texts if t.startswith("MA ") and
+                         "101/0" in t], texts)
+        self.assertTrue([t for t in texts if t.startswith("MB ") and
+                         "102/0" in t], texts)
         fills = set(r.get("fill") for r in _rects(canvas))
         self.assertTrue(set(pcs.EXTRA_METAL_COLORS[:2]) <= fills, fills)
+
+    def test_draw_uses_layermap_gds(self):
+        layermap = copy.deepcopy(self.layermap)
+        layermap["by_name"]["M5"] = (165, 0)
+        canvas = FakeCanvas(900, 520)
+        result = pcs.draw_cross_section(canvas, self.proc, layermap)
+        self.assertTrue(result["ok"], result)
+        m5 = [t for t in _texts(canvas) if t.startswith("M5 ")]
+        self.assertTrue(m5 and "165/0" in m5[0], m5)
+        self.assertNotIn(" 65/0", m5[0])
+
+    def test_draw_wraps_canvas_errors(self):
+        class BadCanvas(FakeCanvas):
+            def create_rectangle(self, *args, **kwargs):
+                raise RuntimeError("tk boom")
+        result = pcs.draw_cross_section(BadCanvas(900, 520), self.proc,
+                                        self.layermap)
+        self.assertFalse(result["ok"])
+        self.assertTrue([e for e in result["errors"] if "绘图异常" in e],
+                        result["errors"])
 
     def test_draw_narrow(self):
         canvas = FakeCanvas(260, 180)
@@ -542,13 +668,11 @@ class ProcCrossSectionTest(unittest.TestCase):
         try:
             import tkinter as tk
         except Exception as exc:
-            print("SKIP: tkinter unavailable (%s)" % exc)
-            return
+            self.skipTest("tkinter unavailable (%s)" % exc)
         try:
             root = tk.Tk()
         except Exception as exc:
-            print("SKIP: no Tk display (%s)" % exc)
-            return
+            self.skipTest("no Tk display (%s)" % exc)
         root.withdraw()
         try:
             class FakeVar(object):
