@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.4.4 — 2026-10-30
+
+版图几何生成（`librf`）的正确性与预检修复：耦合线奇偶模端口对齐、器件元数据
+贯通、DRC 预检与 SKILL 同口径，均带回归测试；配置与搜索语义不变。
+
+- **耦合线奇偶模取错端**：`_cpl_port_indices()` 在端口名不是 a1/a2/b1/b2 时按
+  字母序取前四个，b1 落到 `p03`（线 2 东端）、b2 落到 `p04`（西端），与
+  `p01`（西）/`p02`（东）取向相反；带 gnd 的 5 端口预设排序后甚至会把地当 a1。
+  现在按 `lriBuildCpl` 的 p01..p04 名字定位（b1=p04、b2=p03），并支持 sNp
+  Port order 重排。已知答案：Ze/Zo=60/35Ω、θe/θo=60°/80° 现在精确还原，
+  旧映射实测 55.2/38.0Ω、56.0°/84.7°。
+- **器件元数据只读不写**：「EM 仿真」页按 `<cell>.meta.json` 判断端口与器件
+  类型，但全仓库没有写入方：4 端口耦合线/变压器一律按 2 端口电感处理，
+  输出 `.s2p` 且结束后报「kind=ind 需要 2 端口」；2 端口传输线被当电感输出
+  L0/SRF。「查看 sNp」还漏传 `kind`，必然 TypeError。现在生成版图时落盘
+  type/kind/ports/bbox/geom，EM 页按它定 sNp 端口数、指纹口径与曲线类型，
+  无元数据的 4 端口器件给出明确提示。
+- **DRC 预检比 SKILL 宽松**：Python 预检不查 `drc.min_w/max_w`，且只在
+  `w>=8` 时要求 `s>=2*min_s`；SKILL 的 `librfDrcParams(w s t ...)` 对电感区
+  无条件要求 `s>=2*min_s`，同一几何预览放行、生成时才报 DRC；阈值还写死在
+  常量里，不随工艺 profile 变化。现在 `_drc_veto()` 与 SKILL 同口径、阈值取
+  `tech.drc`，版图页预检与 `make_layout_emx` 共用同一份工艺。
+- **默认 cell 名非法且重名**：未填 cell 时取 `geom_key(...)[:8]`，得到
+  `ind|{"H` 这类含引号/花括号的固定前缀（Virtuoso cell 名不合法），且不同
+  几何同名、后一次覆盖前一个 cell。现在用整串 geom 键的 sha1 前 8 位。
+- 自测 123 用例（新增 17 条：cpl 已知答案与端口重排、器件元数据往返/缺失、
+  kind 推断、指纹摘要、DRC 拒绝/边界/随工艺变化、默认 cell 名）；optimizer
+  114、netlist_create 16、netlist_params 103、em_align 108、em_opt PASS、
+  proc_cross_section 31 全部通过；`--gui-smoke` OK。
+
 ## 1.4.3 — 2026-10-30
 
 图形界面的配置往返与仿真设置展示三处缺陷修复，均带回归测试；引擎与配置语义不变。

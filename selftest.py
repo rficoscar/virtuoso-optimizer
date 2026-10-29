@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 1.4.3 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Virtuoso Optimizer 1.4.4 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Windows failures: none.

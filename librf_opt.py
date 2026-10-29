@@ -1929,6 +1929,14 @@ def _cpl_port_indices(ports, n):
             role[key] = low.index(key)
     if len(role) == 4:
         return role["a1"], role["a2"], role["b1"], role["b2"]
+    # librf 自己的 cpl 版图端口序（librf.il lriBuildCpl）：p01/p02 = 线 1 左/右，
+    # p03 = 线 2 右，p04 = 线 2 左。混模分解要求 b1 与 a1 同端（近端）、b2 为远端，
+    # 所以 b1=p04、b2=p03。按名字排序会把近/远端对调：偶模反射取到隔离端、
+    # 奇偶模直通对调，Ze/Zo/θ 全部偏离（已知答案 60/35Ω、60°/80° 实测
+    # 55.2/38.0Ω、56.0°/84.7°）。sNp 的 Port order 可能重排，按名取下标。
+    if n >= 4 and all(k in low for k in ("p01", "p02", "p03", "p04")):
+        return (low.index("p01"), low.index("p02"),
+                low.index("p04"), low.index("p03"))
     order = sorted(range(n), key=lambda i: str(names[i]))
     a1, a2, b1, b2 = order[0], order[1], order[2], order[3]
     return a1, a2, b1, b2
@@ -2141,6 +2149,23 @@ def fingerprint_from_snp(snp_path, kind, ports=None, f0=None):
     freqs, S, _z0, file_ports = read_snp(snp_path)
     use_ports = ports if ports else file_ports
     return extract_fingerprint(kind, use_ports, freqs, S, freq_of_interest=f0)
+def fprint_summary(fpr):
+    """按器件类型给出指纹摘要；变压器/耦合线不是 L0，别硬套电感口径。"""
+    fpr = fpr or {}
+    kind = fpr.get("kind")
+    if kind == "tl":
+        return "Z0=%sΩ  θ=%s°  IL=%s dB" % (
+            fmt_eng(fpr.get("Z0")), fmt_eng(fpr.get("theta")),
+            fmt_eng(fpr.get("IL")))
+    if kind == "xfmr":
+        return "Lp=%sH  Ls=%sH  k=%s" % (
+            fmt_eng(fpr.get("Lp")), fmt_eng(fpr.get("Ls")),
+            fmt_eng(fpr.get("k")))
+    if kind == "cpl":
+        return "Ze=%sΩ  Zo=%sΩ  θe=%s°  θo=%s°" % (
+            fmt_eng(fpr.get("Ze")), fmt_eng(fpr.get("Zo")),
+            fmt_eng(fpr.get("theta_e")), fmt_eng(fpr.get("theta_o")))
+    return "L0=%sH  SRF=%s" % (fmt_eng(fpr.get("L0")), fmt_eng(fpr.get("SRF")))
 # ---- 几何缓存 / 一键管线 make_layout_emx ----
 def _round_geom(geom, nd=2):
     out = {}
@@ -2156,6 +2181,17 @@ def _round_geom(geom, nd=2):
 def geom_key(typ, geom, extra=None):
     return "%s|%s|%s" % (typ, json.dumps(_round_geom(geom), sort_keys=True),
                          json.dumps(extra or {}, sort_keys=True))
+def default_cell_name(typ, geom):
+    """未指定 cell 时的默认名：<typ>_<geom 键 sha1 前 8 位>。
+
+    旧实现取 geom_key(...)[:8]，那 8 个字符是 'ind|{"H"' 这类固定前缀：
+    带引号/花括号（Virtuoso cell 名不合法），且不同几何算出同一个名字，
+    后一次生成会覆盖前一个 cell。
+    """
+    import hashlib as _hashlib
+    typ_s = re.sub(r"[^A-Za-z0-9_]", "_", str(typ or "ind")) or "ind"
+    tag = _hashlib.sha1(geom_key(typ, geom).encode("utf-8")).hexdigest()[:8]
+    return "librf_%s_%s" % (typ_s, tag)
 def _kind_of(typ, geom, port_names):
     """type+geom+端口 -> 指纹 kind（ind/ct/xfmr/tl/cpl）"""
     t = (typ or "ind").lower()
@@ -2174,6 +2210,43 @@ def _kind_of(typ, geom, port_names):
     if t in ("cpl", "coupler"):
         return "cpl"
     return "ind"
+def device_meta_path(work, cell):
+    return os.path.join(os.path.abspath(os.path.expanduser(work or "work")),
+                        "%s.meta.json" % cell)
+def write_device_meta(work, cell, payload):
+    """记录器件类型 / 端口序 / 几何，供「EM 仿真」页按同一口径解析 sNp。
+
+    没有这份元数据时 EM 页只能按 2 端口电感猜，4 端口的变压器/耦合线
+    要么报「kind=ind 需要 2 端口」，要么算错口径。元数据是附加产物，
+    写失败不影响版图/EMX 主流程。
+    """
+    path = device_meta_path(work, cell)
+    try:
+        atomic_write_json(path, payload)
+    except (IOError, OSError, LibrfError) as exc:
+        _eprint("WARN 写入器件元数据失败 %s: %s" % (path, exc))
+        return None
+    return path
+def load_device_meta(work, cell):
+    try:
+        data = read_json(device_meta_path(work, cell))
+    except (IOError, OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+def fingerprint_kind_for_device(meta, nports):
+    """EM 页选指纹口径：优先版图元数据；无元数据只敢认 2/3 端口。
+
+    返回 None 表示无法判定（4 端口且无元数据），调用方应提示先在版图页
+    生成该 cell，而不是硬按 ind 解析或猜 xfmr/cpl。
+    """
+    kind = (meta or {}).get("kind")
+    if kind:
+        return kind
+    if nports == 2:
+        return "ind"
+    if nports == 3:
+        return "ct"
+    return None
 def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
                     freq=DEF_FREQ, tools=None, emx_opts=None,
                     views_mode="emx", snp_out=None, no_views=False,
@@ -2183,18 +2256,19 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
     """一键管线：layout -> strmout -> EMX -> views -> 指纹。"""
     if on_step is None:
         on_step = lambda msg: None
-    # ind：统一规范化 + 提交前可行性校验（失败中文报错，不静默降级）。
-    # 拓扑 key = geom["kind"]（se/diff/f8/sym），req.update(geom) 会带进 driver。
-    if typ == "ind" and isinstance(geom, dict):
-        geom = lri_norm_geom(geom)
-        _ok, _msg = lri_validate(geom)
-        if not _ok:
-            raise LibrfError("电感几何不可行：%s" % _msg)
     emx_opts = emx_opts or {}
     st = skill_timeout or DEF_SKILL_TIMEOUT
     et = emx_timeout or DEF_EMX_TIMEOUT
     if tech is None:
         tech = load_tech_profile(work=work)
+    # ind：统一规范化 + 提交前可行性校验（失败中文报错，不静默降级）。
+    # 拓扑 key = geom["kind"]（se/diff/f8/sym），req.update(geom) 会带进 driver。
+    # 校验用同一份工艺 DRC：否则预检放行、dbAccess 里才报 DRC。
+    if typ == "ind" and isinstance(geom, dict):
+        geom = lri_norm_geom(geom)
+        _ok, _msg = lri_validate(geom, tech=tech)
+        if not _ok:
+            raise LibrfError("电感几何不可行：%s" % _msg)
     # 每轮可覆盖金属角色：metal_override = {"spiral": "M4", ...}
     if metal_override:
         tech = _deep_merge(tech, {"layers": dict(metal_override)})
@@ -2212,7 +2286,7 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
     if loc.get("refresh"):
         _eprint("已向工作空间 cds.lib 追加 DEFINE %s——请在 Library Manager " "Refresh 可见" % lib_name)
     if cell is None:
-        cell = "librf_%s_%s" % (typ, geom_key(typ, geom)[:8].replace("|", ""))
+        cell = default_cell_name(typ, geom)
     # 1) layout
     on_step("生成版图 %s ..." % cell)
     _assert_cell_writable(libdir, cell)
@@ -2238,6 +2312,11 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
            "type": typ, "geom": geom, "bbox": res["bbox"], "ports": ports,
            "ports_detail": res["ports"], "layers": res["layers"], "views": {},
            "warn": None, "tech_warnings": tech_warns}
+    # 端口序/器件类型落盘：EM 仿真页按它选指纹口径，不看文件名猜。
+    out["kind"] = _kind_of(typ, geom, ports)
+    write_device_meta(work_dir, cell, {"type": typ, "kind": out["kind"],
+                                       "ports": ports, "bbox": res["bbox"],
+                                       "geom": geom})
     # 2) GDS
     gds_path = None
     if not no_gds:
@@ -2271,7 +2350,6 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
         mode = "+p01-p02"
     if no_emx or no_gds:
         # 仅出图：不跑 EMX/views/指纹，GDS 仍产出供渲染目视
-        out["kind"] = _kind_of(typ, geom, ports)
         return out
     on_step("EMX 仿真 ...")
     if not out.get("gds"):
@@ -2287,8 +2365,7 @@ def make_layout_emx(typ, geom, cell=None, work=None, ws=None, lib=None,
         out["warn"] = emx_res["warn"]
     # 4) 指纹
     on_step("提取指纹 ...")
-    kind = _kind_of(typ, geom, ports)
-    out["kind"] = kind
+    kind = out["kind"]
     out["fingerprint"] = fingerprint_from_snp(out["snp"], kind, ports=ports)
     # 5) views（EMX create-view 优先）
     if not no_views:
@@ -3076,17 +3153,51 @@ def lri_norm_geom(g):
     return g
 
 
-def lri_validate(g):
-    """可行性校验 -> (ok, msg)。空 msg = 通过"""
+def _drc_limits(tech=None):
+    """工艺 DRC 阈值 (min_w, max_w, min_s)，缺项回落内建默认。"""
+    drc = tech_drc(tech) or {}
+
+    def _num(key, dflt):
+        try:
+            return float(drc.get(key, dflt))
+        except (TypeError, ValueError):
+            return float(dflt)
+    return _num("min_w", 1.0), _num("max_w", 30.0), _num("min_s", 1.0)
+
+
+def _drc_veto(w, s, tech=None):
+    """与 SKILL librfDrcParams(w s t ...) 同口径的几何门禁。
+
+    返回错误文案；None 表示通过。SKILL 对电感区一律要求 s >= 2*min_s，
+    旧版 Python 只在 w>=8 时检查，导致预览/预检放行、真正生成时才报
+    「DRC: 电感区间距 ... < ...」。
+    """
+    min_w, max_w, min_s = _drc_limits(tech)
+    if w < min_w:
+        return "线宽 w=%g 小于工艺最小线宽 %g（drc.min_w）" % (w, min_w)
+    if w > max_w:
+        return "线宽 w=%g 超过工艺最大线宽 %g（drc.max_w）" % (w, max_w)
+    if s < min_s:
+        return "间距 s=%g 小于工艺最小间距 %g（drc.min_s）" % (s, min_s)
+    if s < 2.0 * min_s:
+        return "电感区间距 s=%g 需 >= 2*min_s=%g" % (s, 2.0 * min_s)
+    if w >= 30.0 and s < 1.5 * min_s:
+        return "大块金属 w=%g(>=30) 间距 s=%g 需 >= 1.5*min_s=%g" % (
+            w, s, 1.5 * min_s)
+    return None
+
+
+def lri_validate(g, tech=None):
+    """可行性校验 -> (ok, msg)。空 msg = 通过。tech 用于取工艺 DRC 阈值。"""
     kind0 = str(g.get("kind", "se")).strip().lower()
     if kind0 == "sym":
         dout = float(g.get("dout", g.get("W", 160.0)))
         w = float(g.get("w", 10.0))
         s = float(g.get("s", 3.2))
         n = float(g.get("n", 3.0))
-        if s < LRI_WIDE_S and w >= LRI_WIDE_W:
-            return False, ("宽金属(w>=%g)间距需 >= %.2f (当前 s=%g)"
-                           % (LRI_WIDE_W, LRI_WIDE_S, s))
+        msg = _drc_veto(w, s, tech)
+        if msg:
+            return False, msg
         try:
             lri_sym_arm(dout, n, w, s)
         except ValueError as exc:
@@ -3102,8 +3213,9 @@ def lri_validate(g):
         return False, "W/H/w/s 必须 > 0"
     if w >= min(W, H):
         return False, "线宽 w=%g 不小于外径" % w
-    if s < LRI_WIDE_S and w >= LRI_WIDE_W:
-        return False, "宽金属(w>=%g)间距需 >= %.2f (当前 s=%g)" % (LRI_WIDE_W, LRI_WIDE_S, s)
+    msg = _drc_veto(w, s, tech)
+    if msg:
+        return False, msg
     p = w + s
     a0, b0 = (W - w) / 2.0, (H - w) / 2.0
     units = 1.0 if kind != "diff" else 2.0
@@ -3226,10 +3338,8 @@ SYM_VIA_ENCL = float(DEFAULT_TECH["drc"]["via"]["enclosure"])
 SYM_VIA_PAD = SYM_VIA_CUT + 2.0 * SYM_VIA_ENCL   # 单 cut 外框
 SYM_VIA_EDGE = SYM_VIA_CUT / 2.0 + SYM_VIA_ENCL  # 金属端→孔中心
 SYM_IND_S = 2.5
-# 宽金属间距规则（工艺无关的通用口径）：线宽 >= LRI_WIDE_W 时，
-# 间距需 >= LRI_WIDE_S（默认取 drc.min_s 的 2 倍）；分档细则按你的 PDK 收紧。
-LRI_WIDE_W = 8.0
-LRI_WIDE_S = 2.0 * float(DEFAULT_TECH["drc"]["min_s"])
+# 间距门禁统一走 _drc_veto()：与 SKILL librfDrcParams 同口径（电感区
+# s >= 2*min_s、w>=30 时 s >= 1.5*min_s），阈值取工艺 profile 的 drc 段。
 
 
 def lri_sym_via_width(w):
@@ -4048,7 +4158,7 @@ class _EmOptTab(object):
         try:
             geom = self._collect_geom()
             if self.a_type.get() == "ind":
-                _ok, _msg = lri_validate(geom)
+                _ok, _msg = lri_validate(geom, tech=self._collect_tech())
                 if not _ok:
                     raise LibrfError(_msg)
         except LibrfError as e:
@@ -4075,9 +4185,8 @@ class _EmOptTab(object):
         if payload.get("gds"):
             self._log(self.a_log, "GDS: %s" % payload["gds"])
         if payload.get("snp"):
-            fpr = payload.get("fingerprint") or {}
-            self._log(self.a_log, "sNp: %s  L0=%s H  SRF=%s"
-                      % (payload["snp"], fmt_eng(fpr.get("L0")), fmt_eng(fpr.get("SRF"))))
+            self._log(self.a_log, "sNp: %s  %s"
+                      % (payload["snp"], fprint_summary(payload.get("fingerprint"))))
         if payload.get("views"):
             self._log(self.a_log, "views: %s" % payload["views"])
         self.b_cell.set(payload.get("cell") or "")
@@ -4154,14 +4263,8 @@ class _EmOptTab(object):
             tools = find_tools(proc=proc_arg)
             freqs = parse_freq_spec(self.b_freq.get().strip() or DEF_FREQ)
             loc = resolve_work(work=work, tools=tools)
-            ports = None
-            meta_path = os.path.join(loc["work"], "%s.meta.json" % cell)
-            if os.path.isfile(meta_path):
-                try:
-                    meta = read_json(meta_path)
-                    ports = meta.get("ports")
-                except Exception:
-                    pass
+            meta = load_device_meta(loc["work"], cell)
+            ports = meta.get("ports") or None
             nports = max(2, len(ports or []))
             out_snp = os.path.join(loc["work"], "snps", "%s.s%dp" % (cell, nports))
             res = run_emx(gds, cell, tools["proc"]["path"], freqs, out_snp,
@@ -4169,11 +4272,19 @@ class _EmOptTab(object):
                           three_d=self.b_3d.get().strip() or None,
                           mode=self.b_mode.get().strip() or None,
                           ports=ports, timeout=DEF_EMX_TIMEOUT)
-            kind = "ct" if (ports and any(str(p).lower().startswith("ct")
-                                          for p in ports)) else "ind"
-            fpr = fingerprint_from_snp(res["out_snp"], kind, ports=ports)
-            return {"snp": res["out_snp"], "cmd": res["cmd"],
-                    "fingerprint": fpr, "warn": res.get("warn")}
+            val = res.get("validate") or {}
+            kind = fingerprint_kind_for_device(meta, val.get("nports") or nports)
+            payload = {"snp": res["out_snp"], "cmd": res["cmd"],
+                       "warn": res.get("warn")}
+            if kind:
+                payload["fingerprint"] = fingerprint_from_snp(
+                    res["out_snp"], kind, ports=ports)
+            else:
+                payload["note"] = (
+                    "缺少 %s.meta.json，无法判定 %d 端口器件的类型（变压器/耦合线），"
+                    "未提取指纹。请先在「版图生成」页重新生成该 cell 再仿真。"
+                    % (cell, nports))
+            return payload
         self._log(self.b_log, "EM 仿真开始 ...")
         self._run_bg(worker, {}, self.b_log, self._emx_done)
     def _emx_done(self, payload):
@@ -4182,25 +4293,49 @@ class _EmOptTab(object):
             return
         fpr = payload.get("fingerprint") or {}
         self._log(self.b_log, "完成 sNp: %s" % payload.get("snp"))
-        self._log(self.b_log, "L0=%s H  SRF=%s" % (fmt_eng(fpr.get("L0")), fmt_eng(fpr.get("SRF"))))
+        if payload.get("note"):
+            self._log(self.b_log, payload["note"])
+        if fpr:
+            self._log(self.b_log, self._fprint_summary(fpr))
         if payload.get("warn"):
             self._log(self.b_log, "WARN %s" % payload["warn"])
         if self.curve:
             self._plot_fprint(fpr)
+    def _fprint_summary(self, fpr):
+        return fprint_summary(fpr)
     def _plot_fprint(self, fpr):
         if not self.curve or not fpr:
             return
-        lc = fpr.get("Lcurve") or []
-        qc = fpr.get("Qcurve") or []
         series = []
-        if lc:
-            series.append(("L(f) H", ([p[0] for p in lc], [p[1] for p in lc]), "#2266cc"))
-        if qc:
-            series.append(("Q(f)", ([p[0] for p in qc], [p[1] for p in qc]), "#22aa44"))
+
+        def _curve(key, label, color):
+            pts = fpr.get(key) or []
+            if pts:
+                series.append((label, ([p[0] for p in pts], [p[1] for p in pts]), color))
+
+        kind = fpr.get("kind") or "ind"
+        if kind == "tl":
+            _curve("Z0curve", "Z0(f) Ω", "#2266cc")
+            _curve("thetacurve", "θ(f)°", "#22aa44")
+            _curve("ILcurve", "IL(f) dB", "#c05a00")
+        elif kind == "xfmr":
+            _curve("Lpcurve", "Lp(f) H", "#2266cc")
+            _curve("Lscurve", "Ls(f) H", "#22aa44")
+            _curve("kcurve", "k(f)", "#c05a00")
+        elif kind == "cpl":
+            _curve("Zecurve", "Ze(f) Ω", "#2266cc")
+            _curve("Zocurve", "Zo(f) Ω", "#22aa44")
+            _curve("theta_e_curve", "θe(f)°", "#c05a00")
+            _curve("theta_o_curve", "θo(f)°", "#7a3cb0")
+        else:
+            _curve("Lcurve", "L(f) H", "#2266cc")
+            _curve("Qcurve", "Q(f)", "#22aa44")
         srf = fpr.get("SRF")
         try:
             self.curve.set_series(series, srf=srf)
-            self._set_health(_health_judge(fpr))
+            # 健康判读按 L/Q 口径写，只适用于电感/中心抽头
+            if kind in ("ind", "ct"):
+                self._set_health(_health_judge(fpr))
         except Exception:
             pass
     def _set_health(self, msgs):
@@ -4217,12 +4352,21 @@ class _EmOptTab(object):
         if not os.path.isdir(d):
             self._log(self.b_log, "未找到 snps 目录")
             return
+        meta = load_device_meta(work, cell)
         for fn in sorted(os.listdir(d)):
             if fn.startswith(cell) and fn.endswith(("s2p", "s3p", "s4p", "s5p")):
                 try:
-                    fpr = fingerprint_from_snp(os.path.join(d, fn))
-                    self._log(self.b_log, "%s: L0=%s SRF=%s"
-                              % (fn, fmt_eng(fpr.get("L0")), fmt_eng(fpr.get("SRF"))))
+                    path = os.path.join(d, fn)
+                    files, S, _z0, _ports = read_snp(path)
+                    n_ports = len(S[0]) if S else 0
+                    kind = fingerprint_kind_for_device(meta, n_ports)
+                    if not kind:
+                        self._log(self.b_log, "%s: 缺少 %s.meta.json，无法判定 "
+                                  "%d 端口器件类型（变压器/耦合线）" % (fn, cell, n_ports))
+                        continue
+                    fpr = fingerprint_from_snp(path, kind,
+                                               ports=(meta.get("ports") or None))
+                    self._log(self.b_log, "%s: %s" % (fn, self._fprint_summary(fpr)))
                     self._plot_fprint(fpr)
                 except Exception as e:
                     self._log(self.b_log, "%s 解析失败: %s" % (fn, e))
@@ -4584,9 +4728,85 @@ def _selftest():
                                [[0.02j, 0.85], [0.85, 0.02j]], [[0.03j, 0.8], [0.8, 0.03j]]])
     check("fingerprint L0", fpr.get("L0") is not None and fpr["L0"] > 0)
     check("fingerprint keys", "SRF" in fpr and "Qcurve" in fpr)
+    # 已知答案：由 Ze=60/Zo=35Ω、θe=60°/θo=80° 的偶/奇模线段合成 4 端口 S，
+    # 按 librf 自己的 cpl 版图端口序（p01/p02=线1 左/右，p03=线2 右，p04=线2 左）
+    # 排成矩阵。提取必须还原这四个量；把 b1/b2 当名字序会得到 55.2/38.0Ω、56/84.7°。
+    def _tl_s2(_z, _th, _z0=50.0):
+        _a = math.cos(_th)
+        _b = 1j * _z * math.sin(_th)
+        _c = 1j * math.sin(_th) / _z
+        _d = math.cos(_th)
+        _den = _a + _b / _z0 + _c * _z0 + _d
+        return [[(_a + _b / _z0 - _c * _z0 - _d) / _den, 2 * (_a * _d - _b * _c) / _den],
+                [2 / _den, (-_a + _b / _z0 - _c * _z0 + _d) / _den]]
+    _se = _tl_s2(60.0, math.radians(60.0))
+    _so = _tl_s2(35.0, math.radians(80.0))
+    _s11 = (_se[0][0] + _so[0][0]) / 2.0
+    _st = (_se[1][0] + _so[1][0]) / 2.0
+    _sc = (_se[0][0] - _so[0][0]) / 2.0
+    _si = (_se[1][0] - _so[1][0]) / 2.0
+    _s4 = [[0j, _st, _si, _sc],
+           [_st, 0j, _sc, _si],
+           [_si, _sc, 0j, _st],
+           [_sc, _si, _st, 0j]]
+    for _i in range(4):
+        _s4[_i][_i] = _s11
+    _fpr4 = extract_fingerprint("cpl", ["p01", "p02", "p03", "p04"],
+                                [1e9], [_s4], freq_of_interest=1e9)
+    check("cpl 端口映射 Ze/Zo", abs(_fpr4.get("Ze", 0) - 60.0) < 1e-3
+          and abs(_fpr4.get("Zo", 0) - 35.0) < 1e-3,
+          "Ze=%s Zo=%s" % (_fpr4.get("Ze"), _fpr4.get("Zo")))
+    check("cpl 端口映射 θe/θo", abs(_fpr4.get("theta_e", 0) - 60.0) < 1e-3
+          and abs(_fpr4.get("theta_o", 0) - 80.0) < 1e-3,
+          "θe=%s θo=%s" % (_fpr4.get("theta_e"), _fpr4.get("theta_o")))
+    check("cpl 端口映射 a1/b1 同端", _cpl_port_indices(["p01", "p02", "p03", "p04"], 4)
+          == (0, 1, 3, 2))
+    check("cpl 端口映射随 Port order 重排",
+          _cpl_port_indices(["p03", "p01", "p04", "p02"], 4) == (1, 3, 2, 0))
+    _mp = write_device_meta(tmp, "dev1", {"type": "xfmr", "kind": "xfmr",
+                                          "ports": ["p01", "p02", "p03", "p04"]})
+    _m = load_device_meta(tmp, "dev1")
+    check("device meta roundtrip", bool(_mp) and _m.get("kind") == "xfmr"
+          and _m.get("ports") == ["p01", "p02", "p03", "p04"], str(_m))
+    check("device meta missing", load_device_meta(tmp, "nope") == {})
+    check("fingerprint kind 由元数据决定", fingerprint_kind_for_device({"kind": "cpl"}, 4) == "cpl")
+    check("fingerprint kind 无元数据兜底", fingerprint_kind_for_device({}, 2) == "ind"
+          and fingerprint_kind_for_device({}, 3) == "ct"
+          and fingerprint_kind_for_device({}, 4) is None)
+    check("kind_of tl/cpl", _kind_of("tl", {}, ["p01", "p02"]) == "tl"
+          and _kind_of("cpl", {}, ["p01", "p02", "p03", "p04"]) == "cpl")
+    check("指纹摘要按器件类型", "Z0=" in fprint_summary(
+        {"kind": "tl", "Z0": 50, "theta": 90, "IL": 0.2})
+          and "Ze=" in fprint_summary(
+              {"kind": "cpl", "Ze": 60, "Zo": 35, "theta_e": 60, "theta_o": 80})
+          and "L0=" in fprint_summary({"kind": "ind", "L0": 1e-9, "SRF": 1e10}))
+    # 工艺 DRC 门禁与 SKILL librfDrcParams 同口径：s>=2*min_s（电感区）、
+    # min_w<=w<=max_w，阈值随 tech 走。
+    _vd = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 4, "s": 1.5})
+    _vd_ok, _vd_msg = lri_validate(_vd)
+    check("DRC 电感区间距 s<2*min_s 拒绝", not _vd_ok, _vd_msg)
+    _vo = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 4, "s": 2.0})
+    _vo_ok, _vo_msg = lri_validate(_vo)
+    check("DRC 边界 s=2*min_s 放行", _vo_ok, _vo_msg)
+    _vm = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 0.5, "s": 3.0})
+    _vm_ok, _vm_msg = lri_validate(_vm)
+    check("DRC min_w 拒绝", not _vm_ok, _vm_msg)
+    _vx = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 31, "s": 5.0})
+    _vx_ok, _vx_msg = lri_validate(_vx)
+    check("DRC max_w 拒绝", not _vx_ok, _vx_msg)
+    _vs = lri_norm_geom({"kind": "sym", "dout": 200, "n": 2.5, "w": 4, "s": 1.5})
+    _vs_ok, _vs_msg = lri_validate(_vs)
+    check("DRC sym 间距拒绝", not _vs_ok, _vs_msg)
+    _loose = build_tech(base=DEFAULT_TECH, drc={"min_s": 0.5})
+    check("DRC 阈值随 tech", lri_validate(_vd, tech=_loose)[0])
     k1 = geom_key("ind", {"dout": 150.001, "n": 2.5})
     k2 = geom_key("ind", {"n": 2.5, "dout": 150.0001})
     check("geom_key round", k1 == k2)
+    _c1 = default_cell_name("ind", {"dout": 150, "n": 2.5})
+    _c2 = default_cell_name("ind", {"dout": 250, "n": 2.5})
+    check("默认 cell 名合法且随几何变化",
+          re.match(r"^[A-Za-z0-9_]+$", _c1) is not None and _c1 != _c2,
+          "%r vs %r" % (_c1, _c2))
     st = default_emx_settings()
     opts = emx_settings_to_opts(st)
     check("emx opts freq", "1e9" in opts["freq"] or "1000000000" in opts["freq"]

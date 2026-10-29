@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Virtuoso Optimizer.'
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 import argparse
 import csv
 import glob
