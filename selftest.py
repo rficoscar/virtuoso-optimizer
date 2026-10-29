@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 1.4.2 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
+"""Virtuoso Optimizer 1.4.3 regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
 
 Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
 code is the failure count. Windows failures: none.
@@ -1909,6 +1909,184 @@ class TestSearchStrategyFixes(unittest.TestCase):
         self.assertEqual(algo._hsig(10.0 * algo.chiN), 0.0)
 
 
+class _GVar(object):
+    """Minimal StringVar stand-in for headless GUI tests."""
+
+    def __init__(self, text=""):
+        self.text = text
+
+    def get(self):
+        return self.text
+
+    def set(self, value):
+        self.text = str(value)
+
+
+class _GTree(object):
+    """Minimal Treeview stand-in (rows are tuples of strings)."""
+
+    def __init__(self, rows=()):
+        self.rows = [tuple(r) for r in rows]
+
+    def get_children(self):
+        return [str(i) for i in range(len(self.rows))]
+
+    def item(self, iid, what):
+        if what == "values":
+            return self.rows[int(iid)]
+        raise KeyError(what)
+
+    def delete(self, iid):
+        self.rows.pop(int(iid))
+
+    def insert(self, _parent, _index, values=()):
+        self.rows.append(tuple(values))
+        return str(len(self.rows) - 1)
+
+    def selection(self):
+        return []
+
+
+def _fake_gui(**attrs):
+    """OptimizerGui methods without creating a Tk root."""
+    import gui
+
+    class _Fake(gui.OptimizerGui):
+        def __init__(self):
+            self.__dict__.update(attrs)
+
+    fake = _Fake()
+    fake._dialog = lambda *a, **k: None
+    fake._set_status = lambda *a, **k: None
+    return fake
+
+
+def _gui_fields(**overrides):
+    keys = ("name", "library", "cell", "view", "state", "state_dir",
+            "work_dir", "virtuoso_bin", "output_dir", "analyses", "save_raw",
+            "sim_timeout", "netlist", "sim_root", "netlist_view")
+    fields = {key: _GVar("") for key in keys}
+    fields.update({"name": _GVar("t"), "analyses": _GVar("sp"),
+                   "save_raw": _GVar("1"), "sim_timeout": _GVar("3600")})
+    for key, value in overrides.items():
+        fields[key] = _GVar(value)
+    return fields
+
+
+def _collect_cfg_stub(**overrides):
+    """A GUI whose _collect_cfg() can run without widgets."""
+    attrs = {
+        "fields": _gui_fields(),
+        "spectre_bin_var": _GVar("spectre"),
+        "path_append_var": _GVar(""),
+        "env_fields": {},
+        "env_extra_text": type("T", (), {"get": lambda self, *a: ""})(),
+        "var_extra": {},
+        "var_tree": _GTree(),
+        "fix_tree": _GTree(),
+        "target_tree": _GTree(),
+        "target_specs": {},
+        "auto_netlist_var": _GVar(False),
+        "set_fields": {},
+        "extra_settings": {},
+        "extra": {},
+        "em_align_fields": {},
+        "em_align_extra": {},
+        "tech_tab": None,
+    }
+    attrs.update(overrides)
+    return _fake_gui(**attrs)
+
+
+class TestGuiConfigRoundTrip(unittest.TestCase):
+    """GUI form round-trips: the run must see what the page shows."""
+
+    def test_simset_netlist_uses_runtime_view_preference(self):
+        import gui
+        root = tempfile.mkdtemp()
+        picks = {}
+        for view, mtime in (("schematic", 2000), ("config", 1000)):
+            d = os.path.join(root, "lib", "cell", "spectre", view)
+            os.makedirs(d)
+            p = os.path.join(d, "input.scs")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("parameters a=1\n")
+            os.utime(p, (mtime, mtime))
+            picks[view] = p
+        g = _collect_cfg_stub(fields=_gui_fields(
+            sim_root=root, library="lib", cell="cell",
+            view="schematic", netlist_view="config"))
+        got = g._simset_netlist_path(rescan=True)
+        want = resolve_netlist_path({
+            "sim_root": root, "library": "lib", "cell": "cell",
+            "view": "schematic", "netlist_view": "config"})
+        # The newest deck is schematic, but the run prefers netlist_view.
+        self.assertEqual(os.path.normcase(got), os.path.normcase(want))
+        self.assertEqual(os.path.normcase(got), os.path.normcase(picks["config"]))
+        g.fields["netlist_view"].set("schematic")
+        got2 = g._simset_netlist_path(rescan=True)
+        self.assertEqual(os.path.normcase(got2), os.path.normcase(picks["schematic"]))
+
+    def test_simset_signature_tracks_target_edits(self):
+        fields = _gui_fields(state_dir="", sim_root=tempfile.mkdtemp())
+        spec = {"output": "S21", "metric": "band_min", "op": ">=",
+                "goal": 3, "band": ["24G", "44G"]}
+        g = _collect_cfg_stub(fields=fields,
+                              target_specs={"iid1": dict(spec)})
+        sig1 = g._simset_signature()
+        g.target_specs = {"iid1": dict(spec, band=["40G", "60G"])}
+        sig2 = g._simset_signature()
+        self.assertNotEqual(sig1, sig2)
+        # Same definitions keep the 2 s refresh quiet.
+        g.target_specs = {"iid1": dict(spec, band=["40G", "60G"])}
+        self.assertEqual(sig2, g._simset_signature())
+
+    def test_variable_metadata_survives_rename_and_undo(self):
+        import gui
+        extra = gui._var_extra_rename(
+            {"w": {"scale": "log", "integer": True}}, "w", "w2")
+        self.assertEqual(extra["w2"], {"scale": "log", "integer": True})
+        self.assertNotIn("w", extra)
+        self.assertEqual(gui._var_extra_drop(extra, ["w2"]), {})
+        g = _collect_cfg_stub(
+            var_tree=_GTree([("w2", "1u", "0.1u", "10u")]),
+            var_extra=extra)
+        cfg = g._collect_cfg(validate=False)
+        self.assertEqual(cfg["variables"][0]["scale"], "log")
+        self.assertIs(cfg["variables"][0]["integer"], True)
+        # Undo must restore the metadata together with the row.
+        g._vars_push_undo()
+        g.var_extra = {}
+        g._vars_restore(g._vars_undo_stack.pop())
+        self.assertEqual(g.var_extra["w2"]["scale"], "log")
+
+    def test_tech_fields_reset_and_stay_out_of_extra(self):
+        import gui
+        for key in ("techlib", "techlib_dir", "layermap", "proc", "cds_lib"):
+            self.assertIn(key, gui._MANAGED_CFG_KEYS)
+        tab = object.__new__(gui._TechTab)
+        tab.vars = {k: _GVar(default) for k, _l, default, _k in gui._TechTab.FIELDS}
+        tab.fill_from_cfg({"layermap": "/a.map", "proc": "/a.proc"})
+        tab.fill_from_cfg({"cell": "x"})
+        self.assertEqual(tab.vars["layermap"].get(), "")
+        self.assertEqual(tab.vars["proc"].get(), "")
+        self.assertEqual(tab.vars["techlib"].get(), "RFCMOS")
+        # A cleared tech field must not be resurrected from the old config.
+        class _Tech(object):
+            def tech_cfg_keys(self):
+                return {}
+        g = _collect_cfg_stub(extra={}, tech_tab=_Tech())
+        self.assertNotIn("layermap", g._collect_cfg(validate=False))
+
+    def test_collect_cfg_runs_validation(self):
+        rows = _GTree([("w", "1", "0", "2")])
+        dup = _collect_cfg_stub(var_tree=rows, fix_tree=_GTree([("w", "1")]))
+        self.assertIsNone(dup._collect_cfg())
+        bad = _collect_cfg_stub(var_tree=_GTree([("w", "1", "0", "2")]),
+                                set_fields={"max_iter": _GVar("0")})
+        self.assertIsNone(bad._collect_cfg())
+
+
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
     TestStopSemantics, TestResumeIdentity,
@@ -1917,6 +2095,7 @@ _TEST_CLASSES = (
     TestTextEncoding, TestCompactLog, TestCompactRobust, TestTechProfile,
     TestS3EmBridge, TestAuditTrail, TestV12Modules,
     TestPreflightAndCurveGuard, TestSearchStrategyFixes,
+    TestGuiConfigRoundTrip,
 )
 
 

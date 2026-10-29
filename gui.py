@@ -23,6 +23,7 @@ from optimizer import (  # noqa: E402
     load_config,
     parse_eng,
     parse_netlist_parameters,
+    resolve_netlist_path,
     resolve_run_dir,
     run_optimization,
     stop_all_runners,
@@ -34,6 +35,17 @@ from optimizer import (  # noqa: E402
 _SET_DEFAULTS = {"max_iter": 100, "patience": 10, "improve_rel": 0.001,
                  "fail_limit": 5, "max_restarts": 2, "seed": 0,
                  "strategy": "simplex"}
+# Config keys the form owns. Everything else is passed through untouched
+# in self.extra; owning these here keeps a cleared tech field from being
+# resurrected by the previous config's value.
+_MANAGED_CFG_KEYS = (
+    "name", "library", "cell", "view", "state", "state_dir",
+    "work_dir", "virtuoso_bin", "output_dir", "analyses", "save_raw",
+    "sim_timeout", "variables", "fixed_variables", "targets", "settings",
+    "netlist", "sim_root", "spectre_bin", "env", "path_append",
+    "auto_netlist", "netlist_view", "em_align",
+    "techlib", "techlib_dir", "layermap", "proc", "cds_lib",
+)
 _VAR_PALETTE = ("#c23b22", "#2266cc", "#2a9d3a", "#d17a00",
                 "#7a3cb0", "#00a0a0", "#d4368c", "#5a5a5a")
 _AGE_OLD_RGB = (0xCC, 0xCC, 0xCC)  # #cccccc
@@ -1255,6 +1267,34 @@ def _auto_netlist_on(value):
         return value.strip().lower() in ("1", "true", "yes", "on", "auto", "always")
     return bool(value)
 
+def _var_extra_rename(extra, old, new):
+    """Move per-variable metadata (scale/integer/...) to the new name."""
+    out = {k: dict(v) for k, v in (extra or {}).items()}
+    if old != new and old in out:
+        out[new] = out.pop(old)
+    return out
+
+def _var_extra_drop(extra, names):
+    """Forget metadata of variables removed from the optimized table."""
+    drop = set(names or ())
+    return {k: v for k, v in (extra or {}).items() if k not in drop}
+
+def _targets_signature(target_specs):
+    """Stable digest of target definitions for the 2 s sim-settings refresh.
+
+    The count alone misses edits to an existing target's band/goal, which
+    leaves the coverage hint stale forever.
+    """
+    try:
+        items = []
+        for iid, spec in (target_specs or {}).items():
+            items.append((str(iid), json.dumps(spec, sort_keys=True,
+                                               ensure_ascii=False, default=str)))
+        items.sort()
+        return tuple(items)
+    except Exception:
+        return None
+
 def netlist_report_text(report):
     """Human-readable summary of netlist_create.ensure_netlist() output."""
     if not isinstance(report, dict):
@@ -1408,10 +1448,15 @@ class _TechTab:
         if path:
             self.vars[key].set(path)
     def fill_from_cfg(self, cfg):
-        """配置载入时回填 5 个键（缺省不动，保留当前默认）。"""
-        for key, _label, _default, _kind in self.FIELDS:
-            if key in cfg and cfg[key] is not None:
-                self.vars[key].set(str(cfg[key]))
+        """配置载入时回填 5 个键；配置里没有的键回到该字段默认值。
+
+        必须清空缺省键，否则打开另一份不含工艺段的配置（或点「新建」）
+        会沿用上一份配置的 layermap/proc，工艺门禁与保存结果都串味。
+        """
+        cfg = cfg if isinstance(cfg, dict) else {}
+        for key, _label, default, _kind in self.FIELDS:
+            val = cfg.get(key)
+            self.vars[key].set(default if val is None else str(val))
     def collect_tech(self):
         """本页输入 -> tech dict（显式项覆盖 profile，留空沿用 profile）。"""
         import librf_opt
@@ -2296,15 +2341,24 @@ class OptimizerGui:
         self._simset_refresh(force=True)
         self._simset_after_id = self.root.after(2000, self._simset_tick)
     def _simset_netlist_path(self, rescan=False):
-        """Resolved netlist path: form field, else newest input.scs."""
-        path = self.fields["netlist"].get().strip() if self.fields else ""
-        path = os.path.expanduser(path) if path else ""
-        if path and os.path.isfile(path):
-            return path
-        root = os.path.expanduser((self.fields["sim_root"].get().strip() if self.fields else "") or "~/simulation")
-        lib = self.fields["library"].get().strip() if self.fields else ""
-        cell = self.fields["cell"].get().strip() if self.fields else ""
-        key = (path, root, lib, cell)
+        """The deck a real run will read, from the shared resolver.
+
+        The 仿真设置 page exists to show the settings of the deck that will
+        actually be simulated, so discovery (explicit path, newest
+        input.scs, netlist_view preference) must be the runner's rules,
+        not a second copy that picks a different view.
+        """
+        def field(key):
+            try:
+                return self.fields[key].get().strip()
+            except Exception:
+                return ""
+        raw = field("netlist")
+        path = os.path.expanduser(raw) if raw else ""
+        root = os.path.expanduser(field("sim_root") or "~/simulation")
+        lib, cell = field("library"), field("cell")
+        view, nl_view = field("view"), field("netlist_view")
+        key = (path, root, lib, cell, view, nl_view)
         now = time.time()
         cache = getattr(self, "_simset_nl_cache", None)
         if (not rescan) and cache and cache.get("key") == key:
@@ -2321,15 +2375,14 @@ class OptimizerGui:
                 if dmt is not None and dmt == cache.get("dir_mtime"):
                     cache["t"] = now
                     return cached
-        base = os.path.join(root, lib, cell) if (lib and cell) else root
-        hit = path or None
+        cfg = {"netlist": path, "sim_root": root, "library": lib,
+               "cell": cell, "view": view, "netlist_view": nl_view}
         try:
-            hits = glob.glob(os.path.join(base, "**", "input.scs"), recursive=True)
-            if hits:
-                hits.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-                hit = hits[0]
+            hit = resolve_netlist_path(cfg) or None
         except Exception:
-            pass
+            # Display only: a deck disappearing mid-scan must not break
+            # the 2 s refresh chain.
+            hit = None
         dir_mtime = None
         if hit:
             try:
@@ -2360,10 +2413,10 @@ class OptimizerGui:
             except OSError:
                 sig.append((path, None, None))
         try:
-            n_targets = len(self.target_specs)
+            sig.append(("__targets__", _targets_signature(self.target_specs)))
         except Exception:
-            n_targets = -1
-        sig.append(("__targets__", n_targets))
+            n_targets = len(self.target_specs)
+            sig.append(("__targets__", n_targets))
         try:
             sig.append(("__netlist_field__", self.fields["netlist"].get().strip()))
         except Exception:
@@ -3007,11 +3060,7 @@ class OptimizerGui:
         self.cfg_path_var.set(path)
         self._dialog("另存为", f"已保存到 {path}")
     def _load_cfg_to_ui(self, cfg):
-        managed = ("name", "library", "cell", "view", "state", "state_dir",
-                   "work_dir", "virtuoso_bin", "output_dir", "analyses", "save_raw",
-                   "sim_timeout", "variables", "fixed_variables", "targets", "settings",
-                   "netlist", "sim_root", "spectre_bin", "env", "path_append",
-                   "auto_netlist", "netlist_view", "em_align")
+        managed = _MANAGED_CFG_KEYS
         self.extra = {k: v for k, v in cfg.items() if k not in managed}
         tech = getattr(self, "tech_tab", None)
         if tech is not None:
@@ -3150,9 +3199,10 @@ class OptimizerGui:
     def _vars_snapshot(self):
         var_rows = [tuple(self.var_tree.item(i, "values")) for i in self.var_tree.get_children()]
         fix_rows = [tuple(self.fix_tree.item(i, "values")) for i in self.fix_tree.get_children()]
-        return (var_rows, fix_rows)
+        extra = {k: dict(v) for k, v in (getattr(self, "var_extra", {}) or {}).items()}
+        return (var_rows, fix_rows, extra)
     def _vars_restore(self, snap):
-        var_rows, fix_rows = snap
+        var_rows, fix_rows, extra = snap
         for iid in self.var_tree.get_children():
             self.var_tree.delete(iid)
         for row in var_rows:
@@ -3161,6 +3211,7 @@ class OptimizerGui:
             self.fix_tree.delete(iid)
         for row in fix_rows:
             self.fix_tree.insert("", "end", values=row)
+        self.var_extra = {k: dict(v) for k, v in (extra or {}).items()}
     def _vars_push_undo(self):
         """Record the pre-change state. Call BEFORE every mutation."""
         if not hasattr(self, "_vars_undo_stack"):
@@ -3207,9 +3258,13 @@ class OptimizerGui:
         sel = tree.selection()
         if not sel:
             return "break"
+        names = [tree.item(i, "values")[0] for i in sel]
         self._vars_push_undo()
         for iid in sel:
             tree.delete(iid)
+        if tree is self.var_tree:
+            self.var_extra = _var_extra_drop(
+                getattr(self, "var_extra", {}) or {}, names)
         self._set_status("已删除 %d 个变量 (Ctrl+Z 撤销)" % len(sel))
         return "break"
     def _on_undo_key(self, event):
@@ -3252,18 +3307,24 @@ class OptimizerGui:
         if not sel:
             self._dialog("变量", "请先选择一行", error=True)
             return
+        old_name = self.var_tree.item(sel[0], "values")[0]
         vals = self._var_values()
         if vals is None:
             return
         self._vars_push_undo()
         self.var_tree.item(sel[0], values=vals)
+        self.var_extra = _var_extra_rename(
+            getattr(self, "var_extra", {}) or {}, old_name, vals[0])
     def _var_delete(self):
         sel = self.var_tree.selection()
         if not sel:
             return
+        names = [self.var_tree.item(i, "values")[0] for i in sel]
         self._vars_push_undo()
         for iid in sel:
             self.var_tree.delete(iid)
+        self.var_extra = _var_extra_drop(
+            getattr(self, "var_extra", {}) or {}, names)
     def _var_values(self):
         e = {k: v.get().strip() for k, v in self.var_edit.items()}
         try:
@@ -3330,6 +3391,8 @@ class OptimizerGui:
         self._vars_push_undo()
         self.fix_tree.insert("", "end", values=(name, init))
         self.var_tree.delete(sel[0])
+        self.var_extra = _var_extra_drop(
+            getattr(self, "var_extra", {}) or {}, [name])
     def _fix_move_to_opt(self):
         sel = self.fix_tree.selection()
         if not sel:
