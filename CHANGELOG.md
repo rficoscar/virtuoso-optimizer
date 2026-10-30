@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.9 — 2026-10-30
+
+跨模块一致性：补完 1.4.8 的续跑语义与空值配置链路，统一目标区间/频段与网表分析
+类型在四个模块间的口径。接口形状不变。
+
+- **`"resume": false` 仍会继承旧快照**：1.4.8 只归档 history/manifest/iter_*，
+  `snapshot*.json` 与 `events.jsonl` 原样保留，`run()` 又无条件还原快照——新开
+  一轮实际沿用旧算法状态，之后的续跑还会按新快照的 `index_next` 把上一轮更大的
+  事件重新 ask/tell 灌进算法。现在 fresh 起点同时归档快照与事件，且显式新开时
+  不再查询快照；快照记录已折叠的事件序号，续跑只补演其后的 kick/restart/评估
+  事件（快照写在本轮停滞动作之前，按迭代号过滤会漏掉该轮 kick）。
+- **`state_dir: null` 延迟崩溃**：1.4.8 的 loader 保留 null，`_ensure_eval` 与
+  `--dump-state` 随后 `expanduser(None)` 抛 TypeError，GUI 载入还会显示成字符串
+  `"None"` 并写回。现在 loader 把 null/空串/非字符串统一归一为 `""`，两个消费端
+  按字符串处理，`--dump-state` 缺状态目录时给出可操作提示而不是 traceback，GUI
+  空值回填为空行。
+- **区间/频段反向与形状**：`Target` 的 band 反向（如 `["3G","1G"]`）会切空所有点、
+  整轮恒为 BIG_ERROR；band 只有一个值时报 IndexError；`value_at` 的 freq 落在
+  band 外同样永远无解。现在 band 接受二元列表并归一为升序（与
+  `em_align._parse_band` 一致），形状错误给出 ValueError，freq 越界在配置期报错；
+  `op=range` 的 goal/goal2 反向也归一为升序。
+- **分析类型口径**：`dcop` 只在网表合并器 `_ANALYSES` 里，预检会判“无分析”、参数
+  改写会把 `dcop1 dcop ...` 当实例；现在三张分析表一致，漂移测试由子集断言改为
+  对称差断言。
+
 ## 1.4.8 — 2026-10-30
 
 文档与配置一致性：修复 1.4.7 引入的两处 proc 解析回归（隐式 `dtemp`、负/表达式

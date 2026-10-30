@@ -3066,7 +3066,8 @@ class OptimizerGui:
         if tech is not None:
             tech.fill_from_cfg(cfg)
         for key, var in self.fields.items():
-            var.set(str(cfg.get(key, "")))
+            val = cfg.get(key, "")
+            var.set("" if val is None else str(val))
         env_map = cfg.get("env") or {}
         for name, var in self.env_fields.items():
             var.set(str(env_map.get(name, "")))

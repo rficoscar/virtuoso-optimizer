@@ -107,6 +107,58 @@ class TestTargets(unittest.TestCase):
         spec = {"output": "S21 dB20", "curve_op": "above",
                 "limit": {"x": [1, 2, 3], "y": [0, 4, 1]}}
         self.assertGreater(self.error(spec), 0.0)
+    def test_band_metrics_known_answers(self):
+        """Band metrics on a known curve: min 1, max 5, flatness 4, mean 8/3."""
+        base = {"output": "S21 dB20", "op": ">=", "goal": 0,
+                "band": ["1G", "3G"]}
+        cases = (("band_min", 1.0), ("band_max", 5.0),
+                 ("band_flatness", 4.0), ("band_mean", 8.0 / 3.0))
+        for metric, want in cases:
+            spec = dict(base, metric=metric)
+            self.assertAlmostEqual(Target(spec).metric_value(self.curves),
+                                   want, msg=metric)
+        # A band that keeps only the last two points: y = 5, 2.
+        narrow = dict(base, metric="band_mean", band=["2G", "3G"])
+        self.assertAlmostEqual(Target(narrow).metric_value(self.curves), 3.5)
+    def test_value_at_known_answer(self):
+        """Linear interpolation midway between 1e9 (1.0) and 2e9 (5.0)."""
+        spec = {"output": "S21 dB20", "metric": "value_at", "op": ">=",
+                "goal": 0, "freq": "1.5G"}
+        self.assertAlmostEqual(Target(spec).metric_value(self.curves), 3.0)
+    def test_band_order_is_normalized(self):
+        """Reversed band must sample the same points as the ordered one.
+
+        em_align._parse_band already swaps lo/hi; the engine used to keep
+        the reversed order, cut every point and return BIG_ERROR forever.
+        """
+        good = {"output": "S21 dB20", "metric": "band_mean", "op": ">=",
+                "goal": 1, "tol": 1, "band": ["1G", "3G"]}
+        rev = dict(good, band=["3G", "1G"])
+        self.assertEqual(Target(rev).band, Target(good).band)
+        self.assertAlmostEqual(Target(rev).error(self.curves),
+                               Target(good).error(self.curves))
+    def test_range_goal_order_is_normalized(self):
+        """Swapped range bounds must not make the target unsatisfiable."""
+        spec = {"output": "S21 dB20", "metric": "band_min", "op": "range",
+                "goal": 5, "goal2": 1, "tol": 0.5, "band": ["1G", "3G"]}
+        target = Target(spec)
+        self.assertEqual((target.goal, target.goal2), (1.0, 5.0))
+        self.assertLessEqual(target.error(self.curves), 0.0)
+
+    def test_bad_band_shape_is_actionable(self):
+        """One-value / string bands raise ValueError, not IndexError."""
+        for band in (["1G"], "1G 3G", {"lo": "1G", "hi": "3G"}, []):
+            spec = {"output": "S21 dB20", "metric": "band_mean", "band": band}
+            with self.assertRaises(ValueError) as ctx:
+                Target(spec)
+            self.assertIn("band", str(ctx.exception), band)
+    def test_value_at_must_lie_in_band(self):
+        """value_at outside its own band can never resolve; fail early."""
+        spec = {"output": "S21 dB20", "metric": "value_at", "op": ">=",
+                "goal": 0, "freq": "4G", "band": ["1G", "3G"]}
+        with self.assertRaises(ValueError) as ctx:
+            Target(spec)
+        self.assertIn("band", str(ctx.exception))
 
 
 class TestAlgorithm(unittest.TestCase):
@@ -276,6 +328,51 @@ class TestPipeline(unittest.TestCase):
         # JSON string form is accepted as well.
         cfg["resume"] = "false"
         self.assertEqual(run_optimization(cfg, mock=True)["iterations"], 7)
+    def test_fresh_run_archives_journal_and_ignores_snapshot(self):
+        """`"resume": false` must not inherit algorithm state or events.
+
+        A fresh start archived history/manifest/iter_* but kept
+        snapshot.json and events.jsonl, so run() restored the old
+        algorithm state and a later resume replayed the discarded
+        run's events.
+        """
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        run_optimization(mock_config(out, 12), mock=True, resume=False)
+        snap = os.path.join(out, "snapshot.json")
+        events = os.path.join(out, "events.jsonl")
+        self.assertTrue(os.path.exists(snap))
+        self.assertTrue(os.path.exists(events))
+        opt = Optimization(mock_config(out, 7), mock=True, resume=False)
+        restored = []
+        opt._try_restore_snapshot = lambda: restored.append(True) or True
+        opt.run()
+        self.assertEqual(restored, [], "fresh run consulted the old snapshot")
+        self.assertTrue(glob.glob(snap + ".old-*"), "snapshot not archived")
+        self.assertTrue(glob.glob(events + ".old-*"), "events not archived")
+
+    def test_snapshot_replays_only_events_after_it(self):
+        """Kicks already folded into the snapshot must not run twice.
+
+        The snapshot is written before the stall action of that
+        iteration, so replay must be trimmed by event sequence, not by
+        iteration index (a kick at the snapshot iteration is newer).
+        """
+        work = tempfile.mkdtemp()
+        out = os.path.join(work, "out")
+        opt = Optimization(mock_config(out, 20), mock=True, resume=False)
+        names = opt.names
+        opt.journal.log_event({"type": "kick", "index": 0,
+                               "points": [dict((n, 0.1) for n in names)]})
+        opt._write_snapshot()
+        opt.journal.log_event({"type": "kick", "index": 1,
+                               "points": [dict((n, 0.9) for n in names)]})
+        state = opt.journal.load_latest()
+        self.assertEqual(state.get("events"), 1)
+        opt2 = Optimization(mock_config(out, 20), mock=True, resume=True)
+        self.assertTrue(opt2._try_restore_snapshot())
+        self.assertEqual(len(getattr(opt2.algo, "_inject", [])), 1)
+
     def test_simulation_failures_stop_the_run(self):
         work = tempfile.mkdtemp()
         cfg = mock_config(os.path.join(work, "out"), 20)
@@ -518,15 +615,25 @@ class TestRunDirs(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
             return load_config(path)
-        # "" / null mean "not set": they must not become the config folder,
-        # or auto_netlist would try to regenerate from a non-existent state.
+        # "" / null / non-string mean "not set": they must not become the
+        # config folder, and must not reach expanduser() as None either.
         self.assertEqual(load({"state_dir": ""})["state_dir"], "")
-        self.assertIsNone(load({"state_dir": None})["state_dir"])
+        self.assertEqual(load({"state_dir": None})["state_dir"], "")
+        self.assertEqual(load({"state_dir": 123})["state_dir"], "")
         self.assertNotIn("state_dir", load({}))
         # Relative stays anchored to the config file; absolute is untouched.
         self.assertEqual(load({"state_dir": "ade"})["state_dir"],
                          os.path.join(work, "ade"))
         self.assertEqual(load({"state_dir": work})["state_dir"], work)
+        # The consumers of a "not set" value must fail cleanly, not with
+        # TypeError/KeyError deep inside expanduser().
+        from optimizer import dump_state
+        for cfg in (load({"state_dir": None}), load({})):
+            with self.assertRaises(SystemExit) as ctx:
+                dump_state(cfg)
+            self.assertIn("state_dir", str(ctx.exception))
+        runner = RealRunner({"state_dir": None}, ".", env={})
+        self.assertFalse(runner._ensure_eval())
     def test_make_run_dir_layout_and_collision(self):
         root = tempfile.mkdtemp()
         path = make_run_dir(root, "cc")
@@ -1738,16 +1845,16 @@ class TestV12Modules(unittest.TestCase):
         for line in ("save sp\n", "sp (a 0) capacitor c=1p\n",
                      "// ac1 ac start=1\n"):
             self.assertEqual(list(netlist_analyses(line)), [], line)
-        # 分析类型集必须覆盖预检关键字，否则合法网表会被判无分析；
-        # 语句关键字集也必须覆盖 optimizer 的指令集，否则 save sp 等
-        # 会因第二 token 恰好是分析名而误判。
+        # 三个分析类型集必须完全一致：少一个会让合法网表被预检判无分析、
+        # 或让分析行的参数被当成设计变量改写；多一个也会让预检口径漂移。
+        # 语句关键字集只需覆盖 optimizer 的指令集（merger 还认 `inc`）。
         import netlist_create
         import netlist_params
         from optimizer import _ANALYSIS_KEYWORDS, _NETLIST_DIRECTIVES
-        missing = sorted(set(_ANALYSIS_KEYWORDS) - netlist_create._ANALYSES)
-        self.assertEqual(missing, [], missing)
-        missing = sorted(set(_ANALYSIS_KEYWORDS) - set(netlist_params._ANALYSIS))
-        self.assertEqual(missing, [], missing)
+        drift = sorted(set(_ANALYSIS_KEYWORDS) ^ netlist_create._ANALYSES)
+        self.assertEqual(drift, [], drift)
+        drift = sorted(set(_ANALYSIS_KEYWORDS) ^ set(netlist_params._ANALYSIS))
+        self.assertEqual(drift, [], drift)
         missing = sorted(set(_NETLIST_DIRECTIVES)
                          - netlist_create._NON_ANALYSIS_HEADS)
         self.assertEqual(missing, [], missing)
@@ -2019,6 +2126,25 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             preflight_netlist(cfg)
         self.assertIn("没有任何分析语句", str(ctx.exception))
+
+    def test_dcop_analysis_consistent_across_modules(self):
+        """The deck merger accepts dcop; preflight/patcher must agree.
+
+        A deck whose only analysis is ``dcop1 dcop ...`` was accepted by
+        netlist_create but rejected by preflight as "no analysis", and
+        netlist_params would patch its options as design parameters.
+        """
+        tmp = tempfile.mkdtemp(prefix="v141_dcop_")
+        deck = os.path.join(tmp, "input.scs")
+        with open(deck, "w") as f:
+            f.write('simulator lang=spectre\n'
+                    'dcop1 dcop write="spectre.dc"\n')
+        self.assertEqual(list(netlist_analyses("dcop1 dcop\n")), ["dcop"])
+        self.assertIn("dcop", preflight_netlist({"netlist": deck}))
+        import netlist_create
+        import netlist_params
+        self.assertIn("dcop", netlist_create._ANALYSES)
+        self.assertIn("dcop", netlist_params._ANALYSIS)
 
     def test_run_optimization_preflight_rejects_bad_deck(self):
         # The rejection must fire through the real entry point, not only

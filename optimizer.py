@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 'Virtuoso Optimizer.'
-VERSION = "1.4.8"
+VERSION = "1.4.9"
 import argparse
 import csv
 import glob
@@ -391,7 +391,15 @@ class Target:
         if self.role not in ("error", "constraint", "objective"):
             raise ValueError("bad role: %s" % self.role)
         band = spec.get("band")
-        self.band = [parse_eng(band[0]), parse_eng(band[1])] if band else None
+        self.band = None
+        if band is not None:
+            if not isinstance(band, (list, tuple)) or len(band) != 2:
+                raise ValueError("band must be [lo, hi]: %r" % (band,))
+            lo, hi = parse_eng(band[0]), parse_eng(band[1])
+            # Same order normalization as em_align._parse_band: a swapped
+            # band used to cut every point and peg the target at BIG_ERROR
+            # for the whole run.
+            self.band = [min(lo, hi), max(lo, hi)]
         self.op = spec.get("op", ">=")
         self.goal = parse_eng(spec.get("goal", 0))
         self.goal2 = parse_eng(spec["goal2"]) if "goal2" in spec else None
@@ -401,6 +409,11 @@ class Target:
         if self.metric == "value_at" and self.freq is None \
                 and not spec.get("curve_op"):
             raise ValueError("value_at target needs a freq")
+        if self.metric == "value_at" and self.freq is not None \
+                and self.band is not None and not spec.get("curve_op") \
+                and not (self.band[0] <= self.freq <= self.band[1]):
+            raise ValueError("value_at freq %r is outside band %s"
+                             % (spec.get("freq"), self.band))
         # curve target fields
         self.curve_op = spec.get("curve_op")
         self.limit = spec.get("limit")
@@ -409,6 +422,11 @@ class Target:
         if self.op not in (">=", "<=",
                            "==", "range"):
             raise ValueError("bad op: %s" % self.op)
+        if self.op == "range" and self.goal2 is not None \
+                and self.goal > self.goal2:
+            # Same idea as the band normalization: a user who swaps the
+            # two range bounds used to get a target no value can satisfy.
+            self.goal, self.goal2 = self.goal2, self.goal
         if self.metric not in ("scalar", "band_min",
                                "band_max", "band_flatness",
                                "band_mean", "value_at"):
@@ -1562,7 +1580,7 @@ def rewrite_netlist_parameters(text, line):
 # (netlist_params._ANALYSIS); a type missing here makes preflight reject
 # a valid deck.
 _ANALYSIS_KEYWORDS = frozenset((
-    "ac", "acmatch", "acnoise", "dc", "dcmatch", "disto", "envlp",
+    "ac", "acmatch", "acnoise", "dc", "dcmatch", "dcop", "disto", "envlp",
     "fourier", "hb", "hbac", "hbnoise", "hbsp", "montecarlo", "mpde",
     "noise", "pac", "pacnoise", "pnoise", "pss", "pstb", "psp", "pz",
     "ql", "sens", "sp", "spnoise", "stb", "sweep", "sweephb", "tf",
@@ -1929,9 +1947,9 @@ class RealRunner:
         """Start the output eval serve when it is not running."""
         if self.proc is not None and self.proc.poll() is None:
             return True
+        state_dir = self.config.get("state_dir") or ""
         outputs_state = os.path.join(
-            os.path.expanduser(self.config.get("state_dir", "")),
-            "outputs.state")
+            os.path.expanduser(str(state_dir)), "outputs.state")
         if not os.path.exists(outputs_state):
             return False
         try:
@@ -2516,11 +2534,16 @@ class RunLogger:
         self._pending_index = None
         if fresh:
             # 新起点不接旧数据，但铁律是不删除已有文件 —— 只归档改名。
+            # The journal is part of the old run too: a stale snapshot
+            # would be restored by run() and later resumes would replay
+            # events above the new snapshot's index_next.
             try:
-                if os.path.exists(self.history_path):
-                    _archive_aside(self.history_path)
-                if os.path.exists(self.manifest_path):
-                    _archive_aside(self.manifest_path)
+                for name in (self.history_path, self.manifest_path,
+                             os.path.join(out_dir, "events.jsonl")):
+                    if os.path.exists(name):
+                        _archive_aside(name)
+                for name in glob.glob(os.path.join(out_dir, "snapshot*.json")):
+                    _archive_aside(name)
                 for name in glob.glob(os.path.join(out_dir, "iter_*")):
                     _archive_aside(name)
             except OSError:
@@ -2955,6 +2978,9 @@ class Optimization:
         self.cfg = cfg
         self.on_event = on_event
         self.stop_check = stop_check
+        # Explicit fresh start: never restore algorithm state or replay
+        # events from the previous run in this folder.
+        self._fresh = (resume is False)
         self.settings = Settings(cfg.get("settings", {}))
         self.max_iter = (self.settings.max_iter if max_iter is None
                          else int(max_iter))
@@ -3198,7 +3224,7 @@ class Optimization:
 
     def run(self):
         """Run the iteration loop. Return the stop reason."""
-        if not self._try_restore_snapshot():
+        if self._fresh or not self._try_restore_snapshot():
             self._seed_from_history()
         fails = 0
         for it in range(self.start, self.max_iter):
@@ -3319,6 +3345,13 @@ class Optimization:
         except Exception as exc:
             print(f"event replay read failed: {exc}")
             return True
+        # Only replay events logged after the snapshot. The snapshot is
+        # taken before the stall action of that iteration, so an
+        # index-based filter cannot tell a kick/restart already folded
+        # into the snapshot from one applied just after it.
+        seq = state.get("events")
+        if isinstance(seq, int) and seq >= 0:
+            events = events[seq:]
         replayed = 0
         for ev in events:
             if ev.get("type") == "kick":
@@ -3356,6 +3389,9 @@ class Optimization:
                 "restarts": self.restarts,
                 "no_improve": self.no_improve,
                 "index_next": getattr(self, "_last_it", -1) + 1,
+                # Everything logged so far is folded into algo/best;
+                # a resume replays only the tail after this point.
+                "events": len(self.journal.read_events()),
             })
         except Exception as exc:
             print(f"snapshot write failed: {exc}")
@@ -3557,9 +3593,15 @@ def load_config(path):
     base = os.path.dirname(os.path.abspath(path))
     for key in ("state_dir",):
         value = cfg.get(key)
-        # "" / null mean "not set"; joining them to the config folder would
-        # make auto_netlist treat that folder as a real state_dir.
-        if isinstance(value, str) and value.strip() and not os.path.isabs(value):
+        # null / "" / non-string all mean "not set". Keeping None would
+        # crash every consumer at os.path.expanduser(None), and joining
+        # "" to the config folder would make auto_netlist treat that
+        # folder as a real state_dir.
+        if not isinstance(value, str) or not value.strip():
+            if key in cfg:
+                cfg[key] = ""
+            continue
+        if not os.path.isabs(value):
             cfg[key] = os.path.join(base, value)
     return cfg
 
@@ -3975,7 +4017,11 @@ def _all_at_bounds(values, names, bounds, tol=1e-6):
     return True
 
 def dump_state(cfg):
-    state_dir = os.path.expanduser(cfg["state_dir"])
+    raw = str(cfg.get("state_dir") or "").strip()
+    if not raw:
+        raise SystemExit("--dump-state 需要配置里的 state_dir（ADE 状态目录），"
+                         "当前为空或未设置。")
+    state_dir = os.path.expanduser(raw)
     info = summarize(state_dir)
     print(json.dumps(info, indent=2))
     return info

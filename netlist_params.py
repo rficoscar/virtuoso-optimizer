@@ -182,7 +182,7 @@ load pull correlate mismatch montecarlo
 # a named analysis look like an instance, so its options are treated as
 # design parameters.
 _ANALYSIS = frozenset("""
-ac acmatch acnoise dc dcmatch disto envlp fourier hb hbac hbnoise hbsp
+ac acmatch acnoise dc dcmatch dcop disto envlp fourier hb hbac hbnoise hbsp
 montecarlo mpde noise pac pacnoise pnoise pss pstb psp pz ql sens sp
 spnoise stb sweep sweephb tf tran xf
 """.split())
