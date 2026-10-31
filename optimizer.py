@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 命令行入口。
+"""Virtuoso Optimizer 图形界面入口。
 
-保留 `python optimizer.py <task.json>` 的调用方式；实现位于
-src/virtuoso_optimizer/cli.py。
+用法：`python3 optimizer.py`（直接打开界面）。实现位于
+src/virtuoso_optimizer/。
 """
 import os
 import sys

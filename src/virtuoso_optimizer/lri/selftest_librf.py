@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.selftest_librf — librf_opt 自测（python librf_opt.py --selftest）。"""
+"""lri.selftest_librf — librf_opt 自测（python3 src/librf_opt.py --selftest）。"""
 from __future__ import print_function
 
 import math

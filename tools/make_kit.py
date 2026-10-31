@@ -11,9 +11,9 @@
   MANIFEST.txt                分片校验和与重建命令
   probes/probe_08k.sh ...     粘贴上限标定用
 
-默认排除单元测试（tests/、lri/selftest_librf.py）与随附文档
-（CHANGELOG.md、docs/DEVELOPMENT_GUIDE.md）：交付包只带运行时功能，
-完整回归与版本历史留在开发仓库。用 --include-tests / --include-docs 可以打回去。
+默认排除单元测试（tests/、lri/selftest_librf.py）、开发文档（docs/）与剪贴板
+传输脚本本身（release/）：交付包只带运行时功能，完整回归与文档留在开发仓库。
+用 --include-tests / --include-docs 可以打回去。
 """
 import argparse, base64, fnmatch, gzip, hashlib, io, lzma, os, subprocess, sys, tarfile
 
@@ -33,8 +33,8 @@ def sh(cmd, cwd=None):
 
 # 交付包不含单测：测试文件只在开发仓库里，运行时功能不依赖它们。
 TESTS_EXCLUDE = ("tests/*", "src/virtuoso_optimizer/lri/selftest_librf.py")
-# 交付包不含随附文档：README/LICENSE 留着，版本历史与开发指南只在仓库里。
-DOCS_EXCLUDE = ("CHANGELOG.md", "docs/DEVELOPMENT_GUIDE.md")
+# 交付包不含随附文档与传输脚本：README/LICENSE 留着，开发文档与 release/ 只在仓库里。
+DOCS_EXCLUDE = ("docs/*", "release/*")
 
 def repo_files(repo):
     out = sh(["git", "-C", repo, "ls-files", "-z"])
@@ -101,7 +101,7 @@ def main():
     ap.add_argument("--include-tests", action="store_true",
                     help="把单元测试与 fixtures 也打进包（默认排除）")
     ap.add_argument("--include-docs", action="store_true",
-                    help="把 CHANGELOG.md、docs/DEVELOPMENT_GUIDE.md 也打进包（默认排除）")
+                    help="把 docs/ 与 release/ 也打进包（默认排除）")
     a = ap.parse_args()
 
     repo = os.path.abspath(a.repo)
@@ -170,7 +170,7 @@ def main():
     man.append("tests: %s" % ("included" if a.include_tests else
                               "excluded (tests/, src/virtuoso_optimizer/lri/selftest_librf.py)"))
     man.append("docs: %s" % ("included" if a.include_docs else
-                             "excluded (CHANGELOG.md, docs/DEVELOPMENT_GUIDE.md)"))
+                             "excluded (docs/, release/)"))
     man.append("chunks: %d at limit %d chars/paste" % (len(parts), a.limit))
     man.append("blob sha256: %s" % sha(blob))
     man.append("")

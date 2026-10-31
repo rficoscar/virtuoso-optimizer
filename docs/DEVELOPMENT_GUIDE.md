@@ -23,16 +23,19 @@
 | `lri/ui/` | 4260 | Tk 图形界面实现：plots / netlist / results / reports / tech_tab / main（11 个页面） | `run_gui` |
 | `data/librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
 | `data/lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
-| `librf_opt.py` | 30 | 兼容入口：再导出 `lri/` 的历史接口（自测按需导入） | `register` |
+| `src/librf_opt.py` | 30 | 兼容模块：再导出 `lri/` 的历史接口（脚本 import / 开发自测） | `register` |
+| `src/em_opt.py` | 17 | 兼容模块：再导出 `em/opt.py` 的自测入口 | `_selftest` |
 | `lri/` | 5276 | 版图器件生成 / EMX 迭代实现：common / tech / tools / skillio / snp / emx / device / runner / layout / ui_em / selftest_librf，含 i3 几何镜像与工艺门禁 | `register` |
 | `em/align.py` / `em/opt.py` / `em/bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
 | `netlist/create.py` / `netlist/cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
 | `tests/test_optimizer.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
 | `tests/test_proc_cross_section.py` | 713 | 工艺剖面测试（随主套件装载） | — |
 
-仓库根的 `optimizer.py` / `librf_opt.py` / `em_opt.py` 只是薄入口：把 `src/` 加进
-`sys.path` 后转发到包内实现，保住 `python optimizer.py <task.json>` 的部署契约。
-包内 `librf_opt.py` / `gui.py` 是再导出门面；实现放在 `lri/` 与 `lri/ui/`。新增代码按
+仓库根只留 `optimizer.py`（以及 `LICENSE`、`README.md`、`.gitignore`）：它把 `src/`
+加进 `sys.path` 后调用 `cli.main()`；无参数即打开图形界面，这是面向使用者的唯一入口
+（`python3 optimizer.py`）。`src/librf_opt.py`、`src/em_opt.py` 是包外的兼容模块，
+供 `import librf_opt` 的脚本与开发自测使用，不再是程序入口。包内 `gui.py` 是再导出
+门面；实现放在 `lri/` 与 `lri/ui/`。新增代码按
 职责进对应子模块，不要再往门面或大文件里堆；拆文件不增加文本包片数（片数只由压缩后
 的字节数决定）。
 
@@ -333,7 +336,7 @@ GUI 结果页读的是同一份 dict（`lri/ui/main.py` 的 report 展示处）�
    没有 Cadence 也能跑完主循环，看 `report.json` 里 `stop_reason`、`best_errors`、`summary` 是否合理
 3. 改网表逻辑时：拿 `inspect_netlist` 直接看解析结果，再用 `patch_netlist` 跑三组
    （默认 / 关掉子电路 / `scope_map`）对照 `counts` 与 `warnings`
-4. 改版图内核时：`python librf_opt.py --selftest`，再在装有 Virtuoso 的机器上跑
+4. 改版图内核时：`python3 src/librf_opt.py --selftest`，再在装有 Virtuoso 的机器上跑
    `python eval/bin/tech_smoke.py demo2m --config eval/config_demo2m.json`（换工艺冒烟）
    与 `python eval/bin/cli.py matrix --suite sym`（真 SKILL 扫掠，含 expect_fail）
 
@@ -452,10 +455,12 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
 - 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.7.0：69 文件、36.7 万字符）。
-- 只出全量包一种（全部功能，不裁剪）；单元测试与随附文档不进包（`make_kit.py` 的
-  `TESTS_EXCLUDE` 排除 `tests/*`、`src/virtuoso_optimizer/lri/selftest_librf.py`，
-  `DOCS_EXCLUDE` 排除 `CHANGELOG.md`、`docs/DEVELOPMENT_GUIDE.md`；`--include-tests` / `--include-docs` 可打回）；
-  每次发版重新出包并跑 `verify_kit.py`。
+- 只出全量包一种（全部功能，不裁剪）；单元测试、开发文档与传输脚本本身不进包
+  （`make_kit.py` 的 `TESTS_EXCLUDE` 排除 `tests/*`、
+  `src/virtuoso_optimizer/lri/selftest_librf.py`；`DOCS_EXCLUDE` 排除 `docs/*`、
+  `release/*`；`--include-tests` / `--include-docs` 可打回）；每次发版重新出包并跑
+  `verify_kit.py`，再把 `paste_*.sh`、`check.sh`、`unpack.sh`、`clip2file.py`、
+  `MANIFEST.txt` 拷到 `release/`。
 
 出包命令：
 

@@ -3666,7 +3666,9 @@ def main():
         from .gui import run_gui
         sys.exit(run_gui(args.config, smoke=args.gui_smoke))
     if not args.config:
-        ap.error("config file is required")
+        # 无参数直接进图形界面：这是面向射频工程师的唯一入口。
+        from .gui import run_gui
+        sys.exit(run_gui(None))
     cfg = load_config(args.config)
     if args.dump_state:
         dump_state(cfg)

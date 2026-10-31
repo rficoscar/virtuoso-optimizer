@@ -1,0 +1,19 @@
+version: v1.7.0
+files: 69  raw_tar: 1392640  xz: 271832  base64: 367213 chars
+tests: excluded (tests/, src/virtuoso_optimizer/lri/selftest_librf.py)
+docs: excluded (CHANGELOG.md, docs/DEVELOPMENT_GUIDE.md)
+chunks: 2 at limit 200000 chars/paste
+blob sha256: f1b5849a2149f6cb1237af126420617ec211a2ad13ac16a7a56065681d143313
+
+paste counts: 8k=47  16k=24  32k=12  64k=6  128k=3  256k=2  512k=1
+
+p001.b64    199960 chars  sha256=2f2a76730d879689743f07e8be87e07a6f1954fca7307ed4b9d244f3775ddc6c
+p002.b64    167254 chars  sha256=e5ba0aae3d8f74e381488adbe808fb1fe4ca515e1aa24abfa4965f2a1920924d
+
+A 终端粘贴: 依次粘贴 paste_001.sh .. paste_002.sh，再执行 sh check.sh && sh unpack.sh
+B 剪贴板落盘: 复制 raw_001.b64 .. raw_002.b64，每片在服务器执行
+  python3 clip2file.py p001.b64   (DISPLAY=:0，需图形会话)
+C 一次落盘: 复制 all.b64 -> python3 clip2file.py p000.b64 -> sh unpack.sh
+校验: 每片落盘后 sh check.sh；unpack.sh 还会校验整包 sha256
+注意: RealVNC 剪贴板上限 256kB，超限会整段粘贴失败并粘出上一次的旧内容；
+     若 check.sh 报某片不符，说明该次复制超限或粘到了旧内容，重新复制该片即可。

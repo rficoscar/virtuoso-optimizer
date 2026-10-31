@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """librf_opt.py — 版图/EM 自动化模块门面。
 
-1.6.0 起实现拆分到 lri/ 包；包内 `from virtuoso_optimizer.librf_opt import ...`
-与命令行 `python librf_opt.py --selftest` 均保持不变。
+实现拆分在 lri/ 包；包内 `from virtuoso_optimizer.librf_opt import ...` 保持
+不变，命令行自测走仓库的 `python3 src/librf_opt.py --selftest`。
 """
 from __future__ import print_function
 
@@ -28,4 +28,4 @@ if __name__ == "__main__":
             _sys.exit(2)
         _sys.exit(0 if _selftest() else 1)
     print("librf_opt.py — Virtuoso Optimizer 版图/EM 自动化模块")
-    print("用法: python librf_opt.py --selftest")
+    print("用法: python3 src/librf_opt.py --selftest")
