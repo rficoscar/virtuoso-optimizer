@@ -50,7 +50,8 @@ python3 optimizer.py
 后退出。收敛图需要 matplotlib（可选），版图截图需要 Pillow（可选）。真实仿真
 需要本机可用的 Virtuoso / spectre；没有 license 时可在界面里用 mock 走流程。
 
-开发自检：`python3 optimizer.py --selftest`、`python3 optimizer.py --gui-smoke`。
+开发自检（需要仓库内的 `tests/`）：`python3 optimizer.py --selftest`、
+`python3 optimizer.py --gui-smoke`。
 
 ## 界面
 
@@ -123,7 +124,7 @@ python3 bin/cli.py matrix --suite sym --config config_smic55.json --work runs/sy
 
 ## 无网络迁移（纯文本剪贴板）
 
-目标机不能传文件、只能通过 VNC 复制文本时，`release/` 里是现成的传输脚本：
+目标机不能传文件、只能通过 VNC 复制文本时，仓库的 `release/` 里是现成的传输脚本：
 
 1. 依次把 `release/paste_001.sh`、`release/paste_002.sh` 的内容粘贴到目标机终端；
 2. 执行 `sh check.sh && sh unpack.sh`，校验并解包。

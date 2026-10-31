@@ -1,14 +1,14 @@
-version: v1.7.0
-files: 69  raw_tar: 1392640  xz: 271832  base64: 367213 chars
+version: v1.7.1
+files: 69  raw_tar: 1433600  xz: 278772  base64: 376587 chars
 tests: excluded (tests/, src/virtuoso_optimizer/lri/selftest_librf.py)
-docs: excluded (CHANGELOG.md, docs/DEVELOPMENT_GUIDE.md)
+docs: excluded (docs/, release/)
 chunks: 2 at limit 200000 chars/paste
-blob sha256: f1b5849a2149f6cb1237af126420617ec211a2ad13ac16a7a56065681d143313
+blob sha256: d3c400a5af3dd45725cf7ed5f40ac6fd8b630670e58ee04fd0d0be159746ba0d
 
-paste counts: 8k=47  16k=24  32k=12  64k=6  128k=3  256k=2  512k=1
+paste counts: 8k=48  16k=24  32k=12  64k=6  128k=3  256k=2  512k=1
 
-p001.b64    199960 chars  sha256=2f2a76730d879689743f07e8be87e07a6f1954fca7307ed4b9d244f3775ddc6c
-p002.b64    167254 chars  sha256=e5ba0aae3d8f74e381488adbe808fb1fe4ca515e1aa24abfa4965f2a1920924d
+p001.b64    199960 chars  sha256=6a1bd9bfab545539b64bed0d748708b5e53508183cea50232d352f9f2d72d2af
+p002.b64    176628 chars  sha256=932c250869a623b0b515de66dd10b4629eedddbbc47179e50bcd5f973ac6ac95
 
 A 终端粘贴: 依次粘贴 paste_001.sh .. paste_002.sh，再执行 sh check.sh && sh unpack.sh
 B 剪贴板落盘: 复制 raw_001.b64 .. raw_002.b64，每片在服务器执行
