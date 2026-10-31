@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.6.1。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.6.2。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -446,10 +446,11 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.6.1：63 文件、39.8 万字符）。
-- 只出全量包一种（全部功能，不裁剪）；单元测试不进包（`make_kit.py` 的
-  `DEFAULT_EXCLUDE` 排除 `selftest.py`、`test_proc_cross_section.py`、
-  `lri/selftest_librf.py`、`fixtures/`，`--include-tests` 可打回）；
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.6.2：61 文件、36.5 万字符）。
+- 只出全量包一种（全部功能，不裁剪）；单元测试与随附文档不进包（`make_kit.py` 的
+  `TESTS_EXCLUDE` 排除 `selftest.py`、`test_proc_cross_section.py`、
+  `lri/selftest_librf.py`、`fixtures/`，`DOCS_EXCLUDE` 排除 `CHANGELOG.md`、
+  `DEVELOPMENT_GUIDE.md`；`--include-tests` / `--include-docs` 可打回）；
   每次发版重新出包并跑 `verify_kit.py`。
 
 出包命令：

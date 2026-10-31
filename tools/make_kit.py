@@ -12,8 +12,8 @@
   probes/probe_08k.sh ...     粘贴上限标定用
 
 默认排除单元测试（selftest.py、test_proc_cross_section.py、lri/selftest_librf.py、
-fixtures/）：交付包只带运行时功能；完整回归在开发仓库里跑。用 --include-tests
-可以把它们也打进去。
+fixtures/）与随附文档（CHANGELOG.md、DEVELOPMENT_GUIDE.md）：交付包只带运行时功能，
+完整回归与版本历史留在开发仓库。用 --include-tests / --include-docs 可以打回去。
 """
 import argparse, base64, fnmatch, gzip, hashlib, io, lzma, os, subprocess, sys, tarfile
 
@@ -32,8 +32,10 @@ def sh(cmd, cwd=None):
     return subprocess.check_output(cmd, cwd=cwd)
 
 # 交付包不含单测：测试文件只在开发仓库里，运行时功能不依赖它们。
-DEFAULT_EXCLUDE = ("selftest.py", "test_proc_cross_section.py",
-                   "lri/selftest_librf.py", "fixtures/*")
+TESTS_EXCLUDE = ("selftest.py", "test_proc_cross_section.py",
+                 "lri/selftest_librf.py", "fixtures/*")
+# 交付包不含随附文档：README/LICENSE 留着，版本历史与开发指南只在仓库里。
+DOCS_EXCLUDE = ("CHANGELOG.md", "DEVELOPMENT_GUIDE.md")
 
 def repo_files(repo):
     out = sh(["git", "-C", repo, "ls-files", "-z"])
@@ -99,12 +101,15 @@ def main():
     ap.add_argument("--exclude", default="", help="comma-separated paths or glob patterns to drop")
     ap.add_argument("--include-tests", action="store_true",
                     help="把单元测试与 fixtures 也打进包（默认排除）")
+    ap.add_argument("--include-docs", action="store_true",
+                    help="把 CHANGELOG.md、DEVELOPMENT_GUIDE.md 也打进包（默认排除）")
     a = ap.parse_args()
 
     repo = os.path.abspath(a.repo)
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
-    excl = [] if a.include_tests else list(DEFAULT_EXCLUDE)
+    excl = [] if a.include_tests else list(TESTS_EXCLUDE)
+    excl += [] if a.include_docs else list(DOCS_EXCLUDE)
     excl += [x.strip() for x in a.exclude.split(",") if x.strip()]
     files = [f for f in repo_files(repo) if not any(fnmatch.fnmatch(f, p) for p in excl)]
     if not files:
@@ -166,6 +171,8 @@ def main():
     man.append("tests: %s" % ("included" if a.include_tests else
                               "excluded (selftest.py, test_proc_cross_section.py, "
                               "lri/selftest_librf.py, fixtures/)"))
+    man.append("docs: %s" % ("included" if a.include_docs else
+                             "excluded (CHANGELOG.md, DEVELOPMENT_GUIDE.md)"))
     man.append("chunks: %d at limit %d chars/paste" % (len(parts), a.limit))
     man.append("blob sha256: %s" % sha(blob))
     man.append("")

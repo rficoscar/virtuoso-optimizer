@@ -4,7 +4,7 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 调用 spectre 迭代，输出收敛报告。版图部分按工艺角色生成电感、传输线、变压器
 和耦合线，可接 EMX 做几何迭代。
 
-`Version 1.6.1 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
+`Version 1.6.2 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
 
 ## 功能
 
@@ -90,8 +90,9 @@ python3 bin/cli.py matrix --suite sym --config config_smic55.json --work runs/sy
 
 目标机不能传文件、只能通过 VNC 复制文本时，用 `tools/` 把项目打成纯文本安装
 脚本：本地复制整段脚本，在目标机文本编辑器中粘贴保存，`sh` 执行即可，脚本自带
-sha256 校验与解包。只出全量包一种（全部功能，不裁剪）；单元测试不进包
-（`--include-tests` 可打回），包内 `--selftest` 会提示未附带测试：
+sha256 校验与解包。只出全量包一种（全部功能，不裁剪）；单元测试与
+CHANGELOG/DEVELOPMENT_GUIDE 不进包（`--include-tests` / `--include-docs` 可打回），
+包内 `--selftest` 会提示未附带测试：
 
 ```sh
 python3 tools/make_kit.py --repo . --out dist/kit --limit 200000 --format xz

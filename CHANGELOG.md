@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6.2 — 2026-10-31
+
+交付包不再携带 CHANGELOG 与开发指南；仓库与发版回归不变。`VERSION` 1.6.2。
+
+- **打包策略**：`tools/make_kit.py` 新增 `DOCS_EXCLUDE`，默认排除 `CHANGELOG.md`、
+  `DEVELOPMENT_GUIDE.md`，MANIFEST 记录 `docs: excluded`；`--include-docs` 可打回。
+  包内文件 63 → 61，base64 39.9 万 → **36.5 万字符**，仍是 2 片。
+- **不变**：仓库保留 CHANGELOG、DEVELOPMENT_GUIDE 和全部单测；README、LICENSE
+  继续随包发布。
+- **验证**：`verify_kit.py` PASS；解包后 `import librf_opt`、`--gui-smoke` 正常，
+  `VERSION` 为 1.6.2。
+
 ## 1.6.1 — 2026-10-31
 
 交付包不再携带单元测试；仓库里的测试与发版回归不变。`VERSION` 1.6.1。
