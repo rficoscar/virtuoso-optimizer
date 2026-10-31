@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.1 — 2026-10-31
+
+交付包不再携带单元测试；仓库里的测试与发版回归不变。`VERSION` 1.6.1。
+
+- **打包策略**：`tools/make_kit.py` 默认排除 `selftest.py`、
+  `test_proc_cross_section.py`、`lri/selftest_librf.py`、`fixtures/`，MANIFEST 记录
+  `tests: excluded`；`--include-tests` 可打回全量。包内文件 68 → 63，xz 从 3 片降到
+  **2 片**（39.8 万字符）。
+- **兼容入口**：`librf_opt.py` 不再在导入时加载自测模块，`--selftest` 改为按需导入；
+  包里没有测试时打印提示并以 2 退出。`optimizer.py --selftest` 同样提示“本包未附带单测”。
+- **不变**：仓库保留全部单测（179 + 124）作为发版回归；`eval/` 是电感评估框架，
+  属于功能，照常随包发布。
+- **验证**：仓库 `--selftest` 179 OK、`librf_opt.py --selftest` 124 ok/0 fail、
+  `--gui-smoke` OK；解包后的包内 `import librf_opt` 正常，两个 `--selftest` 均给出
+  提示并以非零码退出（librf_opt 为 2，optimizer 为 1）；`verify_kit.py` PASS。
+
 ## 1.6.0 — 2026-10-31
 
 源码按职责拆分，行为不变；交付仍是单一全量文本包。`VERSION` 1.6.0。

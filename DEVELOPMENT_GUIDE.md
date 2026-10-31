@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.6.0。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.6.1。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -22,7 +22,7 @@
 | `selftest.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
 | `librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
 | `lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
-| `librf_opt.py` | 26 | 兼容入口：再导出 `lri/` 的历史接口 | `register` |
+| `librf_opt.py` | 30 | 兼容入口：再导出 `lri/` 的历史接口（自测按需导入） | `register` |
 | `lri/` | 5276 | 版图器件生成 / EMX 迭代实现：common / tech / tools / skillio / snp / emx / device / runner / layout / ui_em / selftest_librf，含 i3 几何镜像与工艺门禁 | `register` |
 | `em_align.py` / `em_opt.py` / `em_bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
 | `netlist_create.py` / `proc_cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
@@ -446,8 +446,11 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 3 片（1.6.0：68 文件、43.6 万字符）。
-- 只出全量包一种（全部功能，不裁剪）；每次发版重新出包并跑 `verify_kit.py`。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.6.1：63 文件、39.8 万字符）。
+- 只出全量包一种（全部功能，不裁剪）；单元测试不进包（`make_kit.py` 的
+  `DEFAULT_EXCLUDE` 排除 `selftest.py`、`test_proc_cross_section.py`、
+  `lri/selftest_librf.py`、`fixtures/`，`--include-tests` 可打回）；
+  每次发版重新出包并跑 `verify_kit.py`。
 
 出包命令：
 

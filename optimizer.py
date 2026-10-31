@@ -1,4 +1,4 @@
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 import argparse
 import csv
 import glob
@@ -3565,7 +3565,8 @@ def run_selftests():
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "selftest.py")
     if not os.path.isfile(path):
-        print("selftest.py not found: %s" % path, file=sys.stderr)
+        print("本包未附带单测（%s）；完整回归请在开发仓库运行。" % path,
+              file=sys.stderr)
         return 2
     return subprocess.call([sys.executable, path])
 

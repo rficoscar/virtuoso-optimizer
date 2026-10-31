@@ -16,11 +16,15 @@ from lri.runner import *  # noqa: F401,F403
 from lri.layout import *  # noqa: F401,F403
 from lri.ui_em import *  # noqa: F401,F403
 
-from lri.selftest_librf import _selftest
-
 if __name__ == "__main__":
     import sys as _sys
     if len(_sys.argv) > 1 and _sys.argv[1] == "--selftest":
+        try:
+            from lri.selftest_librf import _selftest
+        except ImportError:
+            print("本包未附带自测（lri/selftest_librf.py）；完整回归请在开发仓库运行。",
+                  file=_sys.stderr)
+            _sys.exit(2)
         _sys.exit(0 if _selftest() else 1)
     print("librf_opt.py — optimizer_v06 版图/EM 自动化模块")
     print("用法: python librf_opt.py --selftest")
