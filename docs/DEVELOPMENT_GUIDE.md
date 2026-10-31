@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.7.0。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.7.1。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -454,7 +454,7 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.7.0：69 文件、36.7 万字符）。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.7.1：69 文件、37.7 万字符）。
 - 只出全量包一种（全部功能，不裁剪）；单元测试、开发文档与传输脚本本身不进包
   （`make_kit.py` 的 `TESTS_EXCLUDE` 排除 `tests/*`、
   `src/virtuoso_optimizer/lri/selftest_librf.py`；`DOCS_EXCLUDE` 排除 `docs/*`、
