@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 class _TechTab:
+    HIDDEN = ("cds_lib",)
     FIELDS = (
         ("techlib", "工艺库名 techlib", "RFCMOS", "text"),
         ("techlib_dir", "工艺库目录 techlib_dir", "", "dir"),
@@ -19,23 +20,27 @@ class _TechTab:
     def _build(self, parent):
         self.ttk.Label(
             parent, anchor="w", justify="left", foreground="#555555",
+            wraplength=1150,
             text=("开始版图/EM 前会自动执行工艺检查（路径存在性 -> proc/layermap "
-                  "解析 -> 叠层/层号核对），硬错误直接中止任务，警告仅在状态栏提示。"
+                  "解析 -> 叠层/层号核对），硬错误直接中止任务，警告仅在状态栏提示。\n"
                   "留空的项沿用 tech_profile.json / 内建 RFCMOS 默认。")
         ).pack(fill="x", pady=(0, 6))
         box = self.ttk.LabelFrame(parent, text="工艺输入")
         box.pack(fill="x", pady=(0, 4))
         for key, label, default, kind in self.FIELDS:
+            var = self.tk.StringVar(value=default)
+            self.vars[key] = var
+            if key in self.HIDDEN:
+                # cds.lib 在「版图」页填写（单一入口），这里只保留变量供配置往返
+                continue
             row = self.ttk.Frame(box)
             row.pack(fill="x", pady=2)
             self.ttk.Label(row, text=label, width=26, anchor="w").pack(side="left")
-            var = self.tk.StringVar(value=default)
             self.ttk.Entry(row, textvariable=var, width=58).pack(side="left", fill="x", expand=True)
             if kind != "text":
                 self.ttk.Button(row, text="浏览",
                                 command=lambda k=key, t=kind: self._browse(k, t)
                                 ).pack(side="left", padx=4)
-            self.vars[key] = var
         bar = self.ttk.Frame(parent)
         bar.pack(fill="x", pady=2)
         self.ttk.Button(bar, text="检查工艺", command=self.check).pack(side="left", padx=2)
@@ -51,8 +56,13 @@ class _TechTab:
         self.xs_host.pack(fill="both", expand=True, pady=(2, 0))
     def _text(self, parent, height=6):
         from tkinter.scrolledtext import ScrolledText
-        box = ScrolledText(parent, height=height, width=80,
-                           font=("WenQuanYi Micro Hei", 9))
+        box = ScrolledText(parent, height=height, width=80, padx=4, pady=4)
+        font = getattr(self.gui, "ui_font", None)
+        if font is not None:
+            try:
+                box.configure(font=font)
+            except Exception:
+                pass
         box.configure(state="disabled")
         return box
     def _set_detail(self, text):
@@ -61,6 +71,7 @@ class _TechTab:
             self.detail.delete("1.0", "end")
             self.detail.insert("1.0", text)
             self.detail.configure(state="disabled")
+            self.detail.yview_moveto(0)
         except Exception:
             pass
     def _set_status(self, text, color):

@@ -204,10 +204,11 @@ class OptimizerGui:
         mview = self.tk.Menu(bar, tearoff=0)
         for label, attr in (("环境", "env_tab"), ("设计", "design_tab"),
                             ("变量", "vars_tab"), ("目标", "targets_tab"),
-                            ("仿真设置", "simset_tab"),
+                            ("迭代", "settings_tab"),
                             ("进度", "progress_tab"), ("结果", "result_tab"),
-                            ("工艺", "tech_tab"),
-                            ("EM 对齐", "em_align_tab"), ("EM 融合", "em_tab")):
+                            ("工艺", "tech_tab"), ("版图", "layout_tab"),
+                            ("EM", "em_sim_tab"),
+                            ("EM 对齐", "em_align_tab"), ("EM 融合", "em_merge_tab")):
             mview.add_command(label=label, command=lambda a=attr: self._show_tab(a))
         bar.add_cascade(label="视图", menu=mview)
         mrun = self.tk.Menu(bar, tearoff=0)
@@ -257,9 +258,10 @@ class OptimizerGui:
             "  醒目红线=最优变量组合在该变量上的取值, 便于对照当前偏离。\n"
             "算法选择: 见菜单「帮助-算法说明」; 各参数含义: 「帮助-参数说明」。\n\n"
             "模块名称对照:\n  工具栏/菜单栏/状态栏, 环境页/设计页/变量页/目标页/\n"
+            "  迭代页(搜索设置/仿真选项/算法说明/历史与续跑)/\n"
             "  进度页(收敛图/变量柱状图/日志栏/动态曲线栏)/结果页\n"
-            "  仿真设置页: ADE 分析/网表 parameters/模型文件/目标频段覆盖,\n"
-            "    只读实时展示, 2 秒轮询自动刷新 (也可手动刷新)\n\n"
+            "  ADE 设置快照: 迭代页「查看 ADE 设置…」, 只读展示\n"
+            "    ADE 分析/网表 parameters/模型文件/目标频段覆盖\n\n"
             "运行机制: 启动时读取一次网表快照, 每轮迭代只改写网表的"
             " parameters 行并直接运行 spectre, 不重新生成网表。\n"
             "  设计页勾选「开始前自动生成网表」时, 启动前先调用 netlist_create;\n"
@@ -278,7 +280,7 @@ class OptimizerGui:
         self._show_long_text("算法说明", text)
     def _show_param_help(self):
         self._show_long_text("参数说明", (
-            "搜索设置详细说明（取值 / 影响）—— 目标页底部\n\n"
+            "搜索设置详细说明（取值 / 影响）—— 迭代页\n\n"
             "最大迭代 max_iter —— 整数 ≥1。累计到这么多轮停止（stop_reason=max_iterations）。默认 100。续跑时沿用此前迭代数：历史 N 次 + 本次 (max_iter-N) 次。\n"
             "停滞耐心 patience —— 整数 ≥1。连续这么多轮无实质改进时触发停滞动作（重启/踢点）；重启次数用完仍无改进则停止（stop_reason=no_improvement）。默认 10。\n"
             "改进阈值 improve_rel —— 小数 0~1。相对改善 < improve_rel 视为“无改进”。默认 0.001。目标噪声大时可调大（如 0.01），避免把噪声误判为改进。\n"
@@ -286,8 +288,8 @@ class OptimizerGui:
             "最大重启 max_restarts —— 整数 ≥0。停滞时允许的最大重启次数。默认 2。重启围绕当前最优点重新布点（带衰减扰动 + 少量随机移民）。\n"
             "随机种子 seed —— 整数（含 0）。同种子 + 同配置 → 结果可复现。留空=每次不同。默认 0。\n"
             "搜索策略 strategy —— 取值见「算法说明」。另有隐藏项可写进 JSON 的 settings：mode（scalar/spec/pareto）、portfolio（成员配置）、init_points（预热 CSV）。\n\n"
-            "运行选项详细说明 —— 仿真设置页\n\n"
-            "保存原始数据 save_raw —— 1（默认）：每轮迭代保留 psf/ 原始数据，可用 ViVA 打开复查波形；代价是磁盘占用大（每轮数 MB）。0：提取输出曲线后不保留原始数据，只留 result.txt 中的曲线。长时间大规模优化建议设 0。\n"
+            "运行选项详细说明 —— 迭代页\n\n"
+            "保存原始数据 save_raw —— 1（默认）：每轮迭代保留 psf/ 原始数据，可用 ViVA 打开复查波形；代价是磁盘占用大（每轮数 MB）。2：只保留关键轮。0：提取输出曲线后不保留原始数据，只留 result.txt 中的曲线。长时间大规模优化建议设 0。\n"
             "仿真超时 sim_timeout —— 正数，秒。单轮 spectre 超过该时间判为 TIMEOUT 失败并终止进程。默认 3600。设小可防挂死占用 license；但小于真实仿真耗时会误杀。实际单轮耗时可从进度页日志的“耗时”估计（求值循环约 0.5 秒/次）。\n\n"
             "历史数据与续跑机制 —— 输出目录 + 「续跑」勾选\n\n"
             "1) 精确续跑：输出目录中的 snapshot*.json（约每 10 轮写一次）+ events.jsonl 可逐位还原算法内部状态（种群 / RNG / 代理模型），再补演快照之后的事件。续跑结果与不间断跑完全一致（回归测试保证）。\n"
@@ -321,7 +323,7 @@ class OptimizerGui:
         self._build_targets_tab()
         self._build_env_tab()
         self._build_tech_tab()
-        self._build_simset_tab()
+        self._build_settings_tab()
         self._build_em_tab()
         self._build_em_align_tab()
         self._build_progress_tab()
@@ -330,10 +332,10 @@ class OptimizerGui:
             from ... import librf_opt
             librf_opt.register(self)
         except Exception as exc:
-            print("librf_opt 未加载 (版图 EM 页不可用): %s" % exc)
+            print("librf_opt 未加载 (版图/EM 页不可用): %s" % exc)
         self._reorder_tabs()
-    TAB_ORDER = ("环境", "设计", "变量", "目标", "仿真设置", "进度", "结果",
-                 "工艺", "版图 EM", "EM 对齐", "EM 融合")
+    TAB_ORDER = ("环境", "设计", "变量", "目标", "迭代", "进度", "结果",
+                 "工艺", "版图", "EM", "EM 对齐", "EM 融合")
     def _reorder_tabs(self):
         wanted = list(self.TAB_ORDER)
         placed = []
@@ -361,40 +363,132 @@ class OptimizerGui:
         self.notebook.add(tab, text="设计")
         self.design_tab = tab
         self.fields = {}
+        # name 不再出现在表单里：保留隐藏变量供旧配置往返。
+        self.fields["name"] = self.tk.StringVar()
+        # 网表视图/网表根目录只在「高级…」里出现，避免主表单堆字段。
+        self.fields["netlist_view"] = self.tk.StringVar(value="schematic")
+        self.fields["sim_root"] = self.tk.StringVar()
+        # virtuoso 程序由环境页维护；这里保留同名变量。
+        self.fields["virtuoso_bin"] = self.tk.StringVar(value="virtuoso")
         keys = [
-            ("name", "名称"), ("library", "库"), ("cell", "单元"), ("view", "视图"),
-            ("netlist_view", "网表视图"),
-            ("state", "状态"), ("state_dir", "状态目录"), ("work_dir", "工作目录"),
-            ("sim_root", "网表根目录"), ("netlist", "网表"), ("virtuoso_bin", "virtuoso 路径"),
-            ("output_dir", "输出目录"), ("analyses", "分析"),
+            ("library", "库"), ("cell", "单元"),
+            ("view", "视图"), ("state", "状态名"),
+            ("state_dir", "状态目录"), ("work_dir", "工作目录"),
+            ("netlist", "网表文件"), ("output_dir", "输出目录"),
+            ("analyses", "分析"),
         ]
         choices = {
             "view": ("schematic", "symbol", "layout"),
-            "netlist_view": ("schematic", "config"),
             "analyses": ("sp", "ac", "dc", "tran", "noise", "pss"),
         }
-        browse = ("state_dir", "work_dir", "output_dir", "sim_root", "netlist")
-        for row, (key, label) in enumerate(keys):
-            chs = choices.get(key)
-            self._add_field(tab, row, key, label, self.fields, chs, 57 if chs else 60, "we")
-            col = 2
+        browse = ("state_dir", "work_dir", "output_dir", "netlist")
+        hints = {
+            "state": "ADE L state cellView 名，例如 spectre_state1。",
+            "state_dir": "ADE L spectre_state 的目录。",
+            "work_dir": "Virtuoso CIW 里执行 pwd 得到的目录；版图/网表都默认放在这里。",
+            "netlist": "input.scs 的完整路径；也可以点「查找网表」自动找。",
+            "analyses": "spectre 分析类型；sp 为 S 参数。",
+        }
+        self._design_hints = hints
+        for i, (key, label) in enumerate(keys):
+            self.ttk.Label(tab, text=label, anchor="e").grid(
+                row=i, column=0, sticky="e", padx=(4, 8), pady=2)
+            var = self.fields.get(key) or self.tk.StringVar()
+            self.fields[key] = var
+            if key in choices:
+                widget = self.ttk.Combobox(tab, textvariable=var, width=52,
+                                           values=choices[key], state="readonly")
+            else:
+                widget = self.ttk.Entry(tab, textvariable=var, width=54)
+            widget.grid(row=i, column=1, sticky="we", padx=2, pady=2)
             if key in browse:
-                self.ttk.Button(tab, text="浏览", command=lambda k=key: self._browse_path(k)).grid(row=row, column=col, padx=4)
-                col += 1
-            if key == "state_dir":
-                self.ttk.Button(tab, text="探查", command=self._explore_state).grid(row=row, column=col, padx=4)
+                self.ttk.Button(tab, text="浏览",
+                                command=lambda k=key: self._browse_path(k)
+                                ).grid(row=i, column=2, padx=(6, 2), pady=2)
+            if key in hints:
+                self.ttk.Button(tab, text="[?]",
+                                command=lambda k=key: self._show_field_hint(k)
+                                ).grid(row=i, column=3, padx=(2, 4), pady=2)
+        tab.columnconfigure(1, weight=1)
         btns = self.ttk.Frame(tab)
-        btns.grid(row=len(keys), column=0, columnspan=4, sticky="w", pady=8)
-        self.ttk.Button(btns, text="导入 ADE L 变量/输出", command=self._import_ade).pack(side="left", padx=2)
-        self.ttk.Button(btns, text="查找网表", command=self._find_netlist).pack(side="left", padx=2)
-        self.auto_netlist_var = self.tk.BooleanVar(value=False)
-        self.ttk.Checkbutton(btns, text="开始前自动生成网表",
-                             variable=self.auto_netlist_var).pack(side="left", padx=8)
+        btns.grid(row=len(keys), column=0, columnspan=4,
+                  sticky="w", pady=(10, 0))
+        self.ttk.Button(btns, text="导入 ADE L 变量/输出",
+                        command=self._import_ade).pack(side="left", padx=2)
+        self.ttk.Button(btns, text="查找网表",
+                        command=self._find_netlist).pack(side="left", padx=2)
         self.netlist_btn = self.ttk.Button(btns, text="立即生成网表",
                                            command=self._netlist_now)
         self.netlist_btn.pack(side="left", padx=2)
-        self.ttk.Label(btns, text="导入: 变量进变量页, 输出名进目标页下拉框").pack(side="left", padx=8)
-        tab.columnconfigure(1, weight=1)
+        self.auto_netlist_var = self.tk.BooleanVar(value=False)
+        self.ttk.Checkbutton(btns, text="开始前自动生成网表",
+                             variable=self.auto_netlist_var).pack(side="left", padx=8)
+        self.ttk.Button(btns, text="高级…",
+                        command=self._design_advanced).pack(side="left", padx=2)
+        self.ttk.Label(tab, anchor="w", foreground="#666666",
+                       text="导入 ADE L 后：变量进变量页，输出名进目标页下拉框。"
+                            "网表视图与网表根目录在「高级…」里。"
+                       ).grid(row=len(keys) + 1, column=0, columnspan=4,
+                              sticky="w", pady=(8, 0))
+
+    def _show_field_hint(self, key):
+        text = (self._design_hints or {}).get(key, "") or "(无说明)"
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo("说明 · %s" % key, text, parent=self.root)
+        except Exception:
+            self._dialog("说明", text)
+
+    def _design_advanced(self):
+        win = self.tk.Toplevel(self.root)
+        win.title("设计 · 高级")
+        win.transient(self.root)
+        body = self.ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+        rows = (
+            ("name", "任务名称", None),
+            ("netlist_view", "网表视图", ("schematic", "config")),
+            ("sim_root", "网表根目录", None),
+        )
+        for i, (key, label, chs) in enumerate(rows):
+            self.ttk.Label(body, text=label, anchor="e").grid(
+                row=i, column=0, sticky="e", padx=(4, 8), pady=3)
+            if chs and key == "netlist_view":
+                # 空值表示跟随主表单的「视图」；下拉里写明这一点，别让它看着像待填的空栏。
+                disp = self.tk.StringVar()
+                cur = self.fields[key].get().strip()
+                disp.set(cur if cur in chs else "跟随「视图」")
+                widget = self.ttk.Combobox(
+                    body, textvariable=disp, width=40,
+                    values=("跟随「视图」",) + tuple(chs), state="readonly")
+
+                def _pick(_evt=None, var=disp, k=key):
+                    v = var.get()
+                    self.fields[k].set("" if v == "跟随「视图」" else v)
+
+                widget.bind("<<ComboboxSelected>>", _pick)
+            elif chs:
+                widget = self.ttk.Combobox(body, textvariable=self.fields[key],
+                                           width=40, values=chs, state="readonly")
+            else:
+                widget = self.ttk.Entry(body, textvariable=self.fields[key], width=42)
+            widget.grid(row=i, column=1, sticky="we", padx=2, pady=3)
+            if key == "sim_root":
+                self.ttk.Button(body, text="浏览",
+                                command=lambda: self._browse_dir("sim_root")
+                                ).grid(row=i, column=2, padx=(6, 2), pady=3)
+        self.ttk.Label(body, anchor="w", foreground="#666666",
+                       text="网表视图默认跟随主表单的「视图」；网表根目录只用于「查找网表」，"
+                            "留空时在 ~/simulation 下找。"
+                       ).grid(row=len(rows), column=1, sticky="w", pady=(6, 0))
+        bar = self.ttk.Frame(body)
+        bar.grid(row=len(rows) + 1, column=0, columnspan=3, sticky="we",
+                 pady=(10, 0))
+        self.ttk.Button(bar, text="探查 ADE 状态目录…",
+                        command=self._explore_state).pack(side="left", padx=2)
+        self.ttk.Button(bar, text="关闭", command=win.destroy).pack(
+            side="right", padx=2)
+        body.columnconfigure(1, weight=1)
     def _browse_path(self, key):
         if key == "netlist":
             from tkinter import filedialog
@@ -593,65 +687,78 @@ class OptimizerGui:
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="变量")
         self.vars_tab = tab
-        self.ttk.Label(tab, text="优化变量（参与优化搜索）").grid(row=0, column=0, columnspan=4, sticky="w")
-        self.var_tree = self.ttk.Treeview(tab, columns=("name", "init", "min", "max"), show="headings", height=7)
+        body = self.ttk.Frame(tab)
+        body.pack(side="top", fill="both", expand=True)
+        self.ttk.Label(body, text="优化变量（参与优化搜索）",
+                       anchor="w").grid(row=0, column=0, columnspan=4,
+                                        sticky="w", pady=(0, 2))
+        self.var_tree = self.ttk.Treeview(body, columns=("name", "init", "min", "max"),
+                                          show="headings", height=7)
         for col, label, width in (("name", "名称", 160), ("init", "初值", 120),
                                   ("min", "最小", 120), ("max", "最大", 120)):
             self.var_tree.heading(col, text=label)
             self.var_tree.column(col, width=width, anchor="w")
-        self.var_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.var_tree.grid(row=1, column=0, columnspan=4, sticky="we")
         self.var_tree.bind("<<TreeviewSelect>>", self._var_select)
-        edit = self.ttk.Frame(tab)
-        edit.grid(row=2, column=0, columnspan=4, sticky="we", pady=4)
+        edit = self.ttk.Frame(body)
+        edit.grid(row=2, column=0, columnspan=4, sticky="we", pady=(4, 2))
         self.var_edit = {}
-        self._edit_fields(edit, (("name", "名称"), ("init", "初值"), ("min", "最小"), ("max", "最大")), self.var_edit)
-        btns = self.ttk.Frame(tab)
-        btns.grid(row=3, column=0, columnspan=4, sticky="w")
+        self._edit_fields(edit, (("name", "名称"), ("init", "初值"),
+                                 ("min", "最小"), ("max", "最大")), self.var_edit)
+        btns = self.ttk.Frame(body)
+        btns.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
         for text, cmd in (("添加", self._var_add), ("更新", self._var_update),
                           ("删除", self._var_delete), ("移至固定", self._var_move_to_fixed)):
             self.ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=2)
-        self.ttk.Label(btns, text="快捷键: Del=删除 · Ctrl+Z=撤销 · Ctrl+Y=重做", foreground="#888888").pack(side="left", padx=10)
-        self.ttk.Label(tab, text="固定变量（不参与优化，值写入仿真）").grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        self.fix_tree = self.ttk.Treeview(tab, columns=("name", "value"), show="headings", height=5)
+        self.ttk.Label(btns, text="快捷键: Del=删除 · Ctrl+Z=撤销 · Ctrl+Y=重做",
+                       foreground="#888888").pack(side="left", padx=10)
+        self.ttk.Label(body, text="固定变量（不参与优化，值写入仿真）",
+                       anchor="w").grid(row=4, column=0, columnspan=4,
+                                        sticky="w", pady=(16, 2))
+        self.fix_tree = self.ttk.Treeview(body, columns=("name", "value"),
+                                          show="headings", height=5)
         for col, label, width in (("name", "名称", 160), ("value", "值", 160)):
             self.fix_tree.heading(col, text=label)
             self.fix_tree.column(col, width=width, anchor="w")
-        self.fix_tree.grid(row=5, column=0, columnspan=4, sticky="nsew")
+        self.fix_tree.grid(row=5, column=0, columnspan=4, sticky="we")
         self.fix_tree.bind("<<TreeviewSelect>>", self._fix_select)
-        fedit = self.ttk.Frame(tab)
-        fedit.grid(row=6, column=0, columnspan=4, sticky="we", pady=4)
+        fedit = self.ttk.Frame(body)
+        fedit.grid(row=6, column=0, columnspan=4, sticky="we", pady=(4, 2))
         self.fix_edit = {}
         self._edit_fields(fedit, (("name", "名称"), ("value", "值")), self.fix_edit)
-        fbtns = self.ttk.Frame(tab)
-        fbtns.grid(row=7, column=0, columnspan=4, sticky="w")
+        fbtns = self.ttk.Frame(body)
+        fbtns.grid(row=7, column=0, columnspan=4, sticky="w", pady=(2, 0))
         for text, cmd in (("添加", self._fix_add), ("更新", self._fix_update),
                           ("删除", self._fix_delete), ("移至优化", self._fix_move_to_opt)):
             self.ttk.Button(fbtns, text=text, command=cmd).pack(side="left", padx=2)
-        self.ttk.Button(fbtns, text="撤销", command=self._vars_undo).pack(side="left", padx=10)
-        self.ttk.Button(fbtns, text="重做", command=self._vars_redo).pack(side="left", padx=2)
-        tab.rowconfigure(1, weight=1)
-        tab.rowconfigure(5, weight=1)
-        tab.columnconfigure(0, weight=1)
+        self.ttk.Button(fbtns, text="撤销", command=self._vars_undo).pack(
+            side="left", padx=(10, 2))
+        self.ttk.Button(fbtns, text="重做", command=self._vars_redo).pack(
+            side="left", padx=2)
+        body.columnconfigure(0, weight=1)
     def _build_targets_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="目标")
         self.targets_tab = tab
+        body = self.ttk.Frame(tab)
+        body.pack(side="top", fill="both", expand=True)
         cols = ("output", "metric", "op", "goal", "goal2", "tol", "weight",
-                "band_lo", "band_hi", "freq", "curve_op")
-        self.target_tree = self.ttk.Treeview(tab, columns=cols, show="headings", height=8)
+                "band_lo", "band_hi", "freq")
+        self.target_tree = self.ttk.Treeview(body, columns=cols, show="headings",
+                                             height=8)
         labels = (("output", "输出", 120), ("metric", "指标", 100),
                   ("op", "算子", 60), ("goal", "目标", 80),
                   ("goal2", "目标2(range上限)", 95),
                   ("tol", "容差", 80), ("weight", "权重", 60),
                   ("band_lo", "频段下", 80), ("band_hi", "频段上", 80),
-                  ("freq", "频率", 80), ("curve_op", "限值比较", 75))
+                  ("freq", "频率", 80))
         for col, label, width in labels:
             self.target_tree.heading(col, text=label)
             self.target_tree.column(col, width=width, anchor="w")
         self.target_tree.grid(row=0, column=0, columnspan=6, sticky="nsew")
         self.target_tree.bind("<<TreeviewSelect>>", self._target_select)
-        edit = self.ttk.Frame(tab)
-        edit.grid(row=1, column=0, columnspan=6, sticky="we", pady=4)
+        edit = self.ttk.Frame(body)
+        edit.grid(row=1, column=0, columnspan=6, sticky="we", pady=(4, 2))
         self.target_edit = {}
         fields = (("output", "输出", 16, ()),
                   ("metric", "指标", 12,
@@ -661,74 +768,46 @@ class OptimizerGui:
                   ("goal", "目标", 8, ()), ("goal2", "目标2(range上限)", 10, ()),
                   ("tol", "容差", 8, ()), ("weight", "权重", 8, ()),
                   ("band_lo", "频段下", 8, ()), ("band_hi", "频段上", 8, ()),
-                  ("freq", "频率", 8, ()),
-                  ("curve_op", "限值比较", 10, ("", "above", "below", "match")))
+                  ("freq", "频率", 8, ()))
         for col, (key, label, width, choices) in enumerate(fields):
             self.ttk.Label(edit, text=label).grid(row=0, column=col, padx=2)
             var = self.tk.StringVar()
+            if key == "tol":
+                var.set("0.1")
             if choices or key == "output":
-                widget = self.ttk.Combobox(edit, textvariable=var, width=width, values=choices)
+                widget = self.ttk.Combobox(edit, textvariable=var, width=width,
+                                           values=choices)
             else:
                 widget = self.ttk.Entry(edit, textvariable=var, width=width)
             widget.grid(row=1, column=col, padx=2, sticky="we")
             self.target_edit[key] = var
             if key == "output":
                 self.target_out_combo = widget
-        self.ttk.Label(edit, text="限值曲线JSON").grid(row=2, column=0, padx=2)
-        var = self.tk.StringVar()
-        self.ttk.Entry(edit, textvariable=var).grid(row=2, column=1, columnspan=8, sticky="we", padx=2)
-        self.target_edit["limit"] = var
-        self.ttk.Button(edit, text="从CSV载入", command=self._target_limit_from_csv).grid(row=2, column=9, padx=2)
-        self.ttk.Button(edit, text="字段说明", command=self._target_help).grid(row=2, column=10, padx=2)
-        btns = self.ttk.Frame(tab)
-        btns.grid(row=2, column=0, columnspan=6, sticky="w")
+        self.ttk.Button(edit, text="字段说明",
+                        command=self._target_help).grid(
+            row=1, column=len(fields), padx=2)
+        self.target_adv = {"limit": self.tk.StringVar(),
+                           "curve_op": self.tk.StringVar()}
+        btns = self.ttk.Frame(body)
+        btns.grid(row=2, column=0, columnspan=6, sticky="w", pady=(2, 0))
         for text, cmd in (("添加", self._target_add),
                           ("添加上下界", self._target_add_window),
                           ("更新", self._target_update),
-                          ("删除", self._target_delete)):
+                          ("删除", self._target_delete),
+                          ("限值曲线…", self._target_limit_dialog)):
             self.ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=2)
-        help_line = self.ttk.Label(
-            tab, anchor="w", foreground="#555555",
-            text=('一条目标=对一条曲线提要求，多条目标加权求和=总误差，0 即全部达标。'
-                  '算子=range 时目标2=区间上限；「添加上下界」时目标2=窗口上界。'
-                  '限值比较 above/below/match：曲线逐点与限值线比较'
-                  '(above=须高于限值线, below=须低于, match=须贴合)，'
-                  '限值曲线 JSON 形如 {"x":["1G","2G"],"y":["35","45"]}，'
-                  '一般用「从CSV载入」自动生成。点「字段说明」看全部字段。'))
-        help_line.grid(row=3, column=0, columnspan=6, sticky="we", pady=(6, 0))
-        self.ttk.Label(btns, text="上下界: 目标=下界 目标2=上界").pack(side="left", padx=8)
-        self.set_fields = {}
-        sbar = self.ttk.Frame(tab)
-        sbar.grid(row=4, column=0, columnspan=6, sticky="we", pady=(12, 0))
-        self.ttk.Label(sbar, text="搜索设置", foreground="#0066cc").grid(
-            row=0, column=0, columnspan=8, sticky="w", pady=(0, 2))
-        search_keys = (("max_iter", "最大迭代", ()),
-                       ("patience", "停滞耐心", ()),
-                       ("improve_rel", "改进阈值", ()),
-                       ("fail_limit", "失败上限", ()),
-                       ("max_restarts", "最大重启", ()),
-                       ("seed", "随机种子", ()),
-                       ("strategy", "搜索策略",
-                        tuple(Settings.allowed_strategies())))
-        for col, (key, label, chs) in enumerate(search_keys):
-            cell = self.ttk.Frame(sbar)
-            cell.grid(row=1, column=col, padx=(0, 8), sticky="w")
-            self.ttk.Label(cell, text=label).pack(anchor="w")
-            var = self.tk.StringVar()
-            if chs:
-                widget = self.ttk.Combobox(cell, textvariable=var, width=13,
-                                           values=list(chs), state="readonly")
-            else:
-                widget = self.ttk.Entry(cell, textvariable=var, width=10)
-            widget.pack(anchor="w")
-            self.set_fields[key] = var
+        self.ttk.Label(btns, text="上下界: 目标=下界 目标2=上界"
+                       ).pack(side="left", padx=10)
         self.ttk.Label(
-            sbar, foreground="#555555",
-            text=("策略选型见菜单「帮助 → 算法说明」，各参数含义见「帮助 → 参数说明」；"
-                  "最大迭代是本次会话的预算上限，续跑时沿用历史迭代数。")
-        ).grid(row=2, column=0, columnspan=8, sticky="w", pady=(4, 0))
-        tab.rowconfigure(0, weight=1)
-        tab.columnconfigure(0, weight=1)
+            body, anchor="w", justify="left", foreground="#555555",
+            wraplength=1150,
+            text=('一条目标=对一条曲线提要求，多条目标加权求和=总误差，0 即全部达标。\n'
+                  '算子=range 时目标2=区间上限；「添加上下界」时目标2=窗口上界。'
+                  '容差默认 0.1。\n'
+                  '限值曲线（逐点 above/below/match）在「限值曲线…」里编辑；'
+                  '点「字段说明」看全部字段。')
+        ).grid(row=3, column=0, columnspan=6, sticky="we", pady=(6, 0))
+        body.columnconfigure(0, weight=1)
     def _build_tech_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="工艺")
@@ -740,84 +819,315 @@ class OptimizerGui:
         self.env_fields = {}
         self.spectre_bin_var = self.tk.StringVar()
         self.path_append_var = self.tk.StringVar()
-        self.ttk.Label(tab, anchor="w", foreground="#555555",
-                       text=("软件与 Cadence 环境变量一览（即原 cds_env.sh 的内容）。"
-                             "留空=用系统默认（默认 shell 已注册的值）；填写=仅对仿真子进程覆盖。"
-                             "「自动探测」把当前环境已有值填进空行；「自检报告」验证软件能否解析。")
-                       ).grid(row=0, column=0, columnspan=3, sticky="we", pady=(0, 6))
+        self.ttk.Label(tab, anchor="w", justify="left", foreground="#555555",
+                       wraplength=1150,
+                       text=("软件与 Cadence 环境变量（即原 cds_env.sh 的内容）。"
+                             "留空=用系统默认；填写=仅对仿真子进程覆盖。\n"
+                             "「自动探测」把当前环境已有值填进空行；"
+                             "「自检报告」验证软件能否解析。")
+                       ).grid(row=0, column=0, columnspan=3, sticky="we",
+                              pady=(0, 8))
         rows = (
             ("spectre_bin", "spectre 程序", "仿真器命令或绝对路径（空=spectre）"),
-            ("virtuoso_bin", "virtuoso 程序", "求值服务用；与设计页「virtuoso 路径」同一项"),
+            ("virtuoso_bin", "virtuoso 程序", "求值服务用（空=virtuoso）"),
             ("CADHOME", "CADHOME", "Cadence 安装根目录"),
             ("CDS", "CDS", "Virtuoso/IC 安装目录（如 .../IC618）"),
-            ("CDSDIR", "CDSDIR", "同 CDS（兼容别名）"),
-            ("CDS_INST_DIR", "CDS_INST_DIR", "同 CDS（兼容别名）"),
-            ("CDSHOME", "CDSHOME", "同 CDS（兼容别名）"),
-            ("CDS_ROOT", "CDS_ROOT", "同 CDS（兼容别名）"),
-            ("CDSROOT", "CDSROOT", "同 CDS（兼容别名）"),
             ("SPECTRE_HOME", "SPECTRE_HOME", "spectre 安装目录"),
             ("CDS_LIC_FILE", "CDS_LIC_FILE", "license 文件路径"),
-            ("CDS_LIC_ONLY", "CDS_LIC_ONLY", "只用 Cadence license（填 1）"),
-            ("CDS_Netlisting_Mode", "CDS_Netlisting_Mode", "网表模式（Analog）"),
-            ("CDS_LOAD_ENV", "CDS_LOAD_ENV", "（CWD）"),
-            ("CDS_AUTO_64BIT", "CDS_AUTO_64BIT", "（ALL）"),
-            ("VIRTUOSO_BIN", "VIRTUOSO_BIN", "virtuoso 路径的环境变量形式"),
-            ("OCEAN_BIN", "OCEAN_BIN", "ocean 路径（本工具不使用，供对照）"),
-            ("path_append", "PATH 追加", "追加到 PATH 末尾（冒号分隔）"))
+            ("path_append", "PATH 追加", "追加到 PATH 末尾（冒号分隔）"),
+        )
         specials = {"virtuoso_bin": self.fields["virtuoso_bin"],
                     "spectre_bin": self.spectre_bin_var,
                     "path_append": self.path_append_var}
         for i, (key, label, note) in enumerate(rows):
             r = 1 + i
-            self.ttk.Label(tab, text=label).grid(row=r, column=0, sticky="e", padx=4, pady=1)
+            self.ttk.Label(tab, text=label, anchor="e").grid(
+                row=r, column=0, sticky="e", padx=(4, 8), pady=2)
             var = specials.get(key)
             if var is None:
                 var = self.tk.StringVar()
                 self.env_fields[key] = var
-            self.ttk.Entry(tab, textvariable=var, width=42).grid(row=r, column=1, sticky="we", padx=4)
-            self.ttk.Label(tab, text=note, anchor="w", foreground="#666666").grid(row=r, column=2, sticky="we", padx=4)
+            self.ttk.Entry(tab, textvariable=var, width=44).grid(
+                row=r, column=1, sticky="we", padx=2, pady=2)
+            self.ttk.Label(tab, text=note, anchor="w", foreground="#666666",
+                           wraplength=430, justify="left").grid(
+                row=r, column=2, sticky="we", padx=(8, 4), pady=2)
         r2 = 1 + len(rows)
         btns = self.ttk.Frame(tab)
-        btns.grid(row=r2, column=0, columnspan=3, sticky="w", pady=(8, 2))
-        for text, cmd in (("自动探测", self._env_probe), ("自检报告", self._env_report)):
-            self.ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=2)
-        self.ttk.Label(tab, text="其他附加变量").grid(row=r2 + 1, column=0, sticky="e", padx=4)
+        btns.grid(row=r2, column=0, columnspan=3, sticky="w", pady=(10, 4))
+        self.ttk.Button(btns, text="自动探测",
+                        command=self._env_probe).pack(side="left", padx=2)
+        self.ttk.Button(btns, text="自检报告",
+                        command=self._env_report).pack(side="left", padx=2)
+        self.ttk.Button(btns, text="更多变量…",
+                        command=self._env_more_dialog).pack(side="left", padx=2)
+        self.ttk.Label(tab, text="其他附加变量", anchor="ne").grid(
+            row=r2 + 1, column=0, sticky="ne", padx=(4, 8), pady=(3, 0))
         self.env_extra_text = self._make_text(tab, wrap="none", height=5, width=60)
-        self.env_extra_text.grid(row=r2 + 1, column=1, columnspan=2, sticky="nsew", padx=4, pady=2)
+        self.env_extra_text.grid(row=r2 + 1, column=1, columnspan=2,
+                                 sticky="we", padx=2, pady=2)
         self.ttk.Label(tab, anchor="w", foreground="#666666",
                        text="KEY=VALUE 每行一个；# 开头为注释"
-                       ).grid(row=r2 + 2, column=1, columnspan=2, sticky="w", padx=4)
+                       ).grid(row=r2 + 2, column=1, columnspan=2,
+                              sticky="w", padx=2)
         tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(r2 + 1, weight=1)
-    def _build_simset_tab(self):
-        tab, self.simset_text, self.simset_status_var, self.simset_auto_var = \
-            self._build_poll_tab(
-                "仿真设置",
-                "只读展示: 在 ADE 里改设置即可, 本页自动跟随;优化器只展示不修改",
-                self._simset_refresh)
-        self.simset_tab = tab
-        opt = self.ttk.Frame(tab)
-        opt.pack(side="top", fill="x", pady=(0, 4), before=tab._poll_body)
-        self.ttk.Label(opt, text="运行选项", foreground="#0066cc").pack(
-            side="left", padx=(0, 10))
-        self.ttk.Label(opt, text="保存原始数据").pack(side="left")
-        raw_var = self.tk.StringVar()
-        self.ttk.Combobox(opt, textvariable=raw_var, width=5, state="readonly",
-                          values=("1", "2", "0")).pack(side="left", padx=(2, 12))
-        self.fields["save_raw"] = raw_var
-        self.ttk.Label(opt, text="仿真超时(秒)").pack(side="left")
-        tout_var = self.tk.StringVar()
-        self.ttk.Entry(opt, textvariable=tout_var, width=10).pack(side="left", padx=2)
-        self.fields["sim_timeout"] = tout_var
-        self.ttk.Label(opt, text="1=保留全部 psf 2=只留关键轮 0=不留",
-                       foreground="#888888").pack(side="left", padx=10)
-        self._simset_sig = self._simset_last_text = None
-        self._simset_closed = False
-        self._simset_after_id = None
-        self._simset_nl_cache = None
-        self._simset_sig_fail_n = 0
-        self._simset_refresh(force=True)
-        self._simset_after_id = self.root.after(2000, self._simset_tick)
+
+    ENV_ALIASES = (
+        ("CDSDIR", "同 CDS（兼容别名）"),
+        ("CDS_INST_DIR", "同 CDS（兼容别名）"),
+        ("CDSHOME", "同 CDS（兼容别名）"),
+        ("CDS_ROOT", "同 CDS（兼容别名）"),
+        ("CDSROOT", "同 CDS（兼容别名）"),
+        ("CDS_LIC_ONLY", "只用 Cadence license（填 1）"),
+        ("CDS_Netlisting_Mode", "网表模式（Analog）"),
+        ("CDS_LOAD_ENV", "（CWD）"),
+        ("CDS_AUTO_64BIT", "（ALL）"),
+        ("VIRTUOSO_BIN", "virtuoso 路径的环境变量形式"),
+        ("OCEAN_BIN", "ocean 路径（本工具不使用，供对照）"),
+    )
+
+    def _env_more_dialog(self):
+        win = self.tk.Toplevel(self.root)
+        win.title("环境 · 更多变量")
+        win.transient(self.root)
+        body = self.ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+        self.ttk.Label(body, anchor="w", justify="left", foreground="#555555",
+                       text=("这些是本工具识别的兼容变量，通常留空即可。"
+                             "只有目标机确实需要时才填；填写=仅对仿真子进程覆盖。")
+                       ).grid(row=0, column=0, columnspan=3, sticky="we",
+                              pady=(0, 8))
+        for i, (key, note) in enumerate(self.ENV_ALIASES):
+            r = 1 + i
+            var = self.env_fields.get(key)
+            if var is None:
+                var = self.tk.StringVar()
+                self.env_fields[key] = var
+            self.ttk.Label(body, text=key, anchor="e").grid(
+                row=r, column=0, sticky="e", padx=(4, 8), pady=2)
+            self.ttk.Entry(body, textvariable=var, width=40).grid(
+                row=r, column=1, sticky="we", padx=2, pady=2)
+            self.ttk.Label(body, text=note, anchor="w", foreground="#666666",
+                           wraplength=360, justify="left").grid(
+                row=r, column=2, sticky="we", padx=(8, 4), pady=2)
+        bar = self.ttk.Frame(body)
+        bar.grid(row=1 + len(self.ENV_ALIASES), column=0, columnspan=3,
+                 sticky="we", pady=(10, 0))
+        self.ttk.Button(bar, text="自动探测",
+                        command=self._env_probe).pack(side="left", padx=2)
+        self.ttk.Button(bar, text="关闭", command=win.destroy).pack(
+            side="right", padx=2)
+        body.columnconfigure(1, weight=1)
+    def _build_settings_tab(self):
+        tab = self.ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab, text="迭代")
+        self.settings_tab = tab
+        self.set_fields = {}
+        left = self.ttk.Frame(tab)
+        left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+        keys = (("max_iter", "最大迭代", ()),
+                ("patience", "停滞耐心", ()),
+                ("improve_rel", "改进阈值", ()),
+                ("fail_limit", "失败上限", ()),
+                ("max_restarts", "最大重启", ()),
+                ("seed", "随机种子", ()),
+                ("strategy", "搜索策略", tuple(Settings.allowed_strategies())))
+        for row, (key, label, chs) in enumerate(keys):
+            self.ttk.Label(left, text=label, anchor="e").grid(
+                row=row, column=0, sticky="e", padx=(4, 8), pady=2)
+            var = self.tk.StringVar()
+            if chs:
+                widget = self.ttk.Combobox(left, textvariable=var, width=16,
+                                           values=list(chs), state="readonly")
+            else:
+                widget = self.ttk.Entry(left, textvariable=var, width=18)
+            widget.grid(row=row, column=1, sticky="w", padx=2, pady=2)
+            self.set_fields[key] = var
+        row = len(keys)
+        self.ttk.Separator(left, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="we", pady=(10, 6))
+        self.ttk.Label(left, text="仿真选项", anchor="w").grid(
+            row=row + 1, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 2))
+        sim_opts = (("save_raw", "保存原始数据", ("1", "2", "0")),
+                    ("sim_timeout", "仿真超时(秒)", ()))
+        for i, (key, label, chs) in enumerate(sim_opts):
+            r = row + 2 + i
+            self.ttk.Label(left, text=label, anchor="e").grid(
+                row=r, column=0, sticky="e", padx=(4, 8), pady=2)
+            var = self.tk.StringVar()
+            if chs:
+                widget = self.ttk.Combobox(left, textvariable=var, width=16,
+                                           values=list(chs), state="readonly")
+            else:
+                widget = self.ttk.Entry(left, textvariable=var, width=18)
+            widget.grid(row=r, column=1, sticky="w", padx=2, pady=2)
+            self.fields[key] = var
+        self.ttk.Button(left, text="查看 ADE 设置…",
+                        command=self._show_ade_snapshot).grid(
+            row=row + 4, column=0, columnspan=2, sticky="w", padx=4, pady=(10, 0))
+        self.ttk.Label(left, anchor="w", justify="left", foreground="#666666",
+                       wraplength=320,
+                       text="1=保留全部 psf；2=只留关键轮；0=不留。\n"
+                            "单轮超过仿真超时判失败。"
+                       ).grid(row=row + 5, column=0, columnspan=2,
+                              sticky="w", padx=4, pady=(6, 0))
+        right = self.ttk.Frame(tab)
+        right.grid(row=0, column=1, sticky="nsew")
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(0, weight=1)
+        self.set_help_nb = self.ttk.Notebook(right)
+        self.set_help_nb.pack(fill="both", expand=True)
+        self.set_help_details = {}
+        for title, summary, detail in self._settings_help_data():
+            frame = self.ttk.Frame(self.set_help_nb, padding=4)
+            self.set_help_nb.add(frame, text=title)
+            box = self._make_text(frame, wrap="word", height=9, width=56)
+            box.insert("1.0", summary)
+            box.configure(state="disabled")
+            box.pack(fill="both", expand=True)
+            self.set_help_details[title] = detail
+        det = self.ttk.Frame(right)
+        det.pack(fill="both", expand=True, pady=(8, 0))
+        self.ttk.Label(det, text="详细说明（随上方小标签页切换）",
+                       foreground="#555555").pack(anchor="w")
+        box = self._scrolled_text(det, wrap="word", height=18)
+        box.configure(state="disabled")
+        self.set_detail_box = box
+        self.set_help_nb.bind("<<NotebookTabChanged>>",
+                              self._settings_help_switch)
+        self._settings_help_switch()
+
+    def _settings_help_data(self):
+        search_detail = (
+            "搜索设置详细说明（取值 / 影响）\n\n"
+            "最大迭代 max_iter\n"
+            "  整数 ≥1。累计到这么多轮停止；默认 100。\n"
+            "  续跑时沿用此前迭代数：历史 N 次 + 本次 (max_iter-N) 次。\n\n"
+            "停滞耐心 patience\n"
+            "  整数 ≥1。连续这么多轮无实质改进时触发重启/踢点；\n"
+            "  重启次数用完仍无改进则停止。默认 10。\n\n"
+            "改进阈值 improve_rel\n"
+            "  小数 0~1。相对改善小于此值视为无改进。默认 0.001。\n"
+            "  目标噪声大时可调大（如 0.01），避免把噪声误判为改进。\n\n"
+            "失败上限 fail_limit\n"
+            "  整数 ≥1。连续仿真失败达到即停止；默认 5。\n"
+            "  基础设施类错误会免费重试一次且不计入。\n\n"
+            "最大重启 max_restarts\n"
+            "  整数 ≥0。停滞时允许的最大重启次数；默认 2。\n\n"
+            "随机种子 seed\n"
+            "  整数（含 0）。同种子 + 同配置 → 结果可复现；留空=每次不同。\n\n"
+            "搜索策略 strategy\n"
+            "  取值见「算法说明」小标签页。\n"
+            "  另有隐藏项可写进 JSON 的 settings：mode、portfolio、init_points。\n")
+        sim_detail = (
+            "仿真选项详细说明\n\n"
+            "保存原始数据 save_raw\n"
+            "  1（默认）：每轮保留 psf/ 原始数据，可用 ViVA 打开复查波形；\n"
+            "    代价是磁盘占用大（每轮数 MB）。\n"
+            "  2：只保留关键轮。\n"
+            "  0：只留 result.txt 中的曲线，不保留原始数据。\n\n"
+            "仿真超时 sim_timeout\n"
+            "  正数，秒。单轮 spectre 超过该时间判为 TIMEOUT 失败并终止进程。\n"
+            "  默认 3600。设小可防挂死占用 license；小于真实耗时会误杀。\n")
+        hist_detail = (
+            "历史数据与续跑机制\n\n"
+            "1) 精确续跑\n"
+            "   输出目录中的 snapshot*.json（约每 10 轮写一次）+ events.jsonl\n"
+            "   可逐位还原算法内部状态，再补演快照之后的事件。\n"
+            "   续跑结果与不间断跑完全一致（回归测试保证）。\n\n"
+            "2) 历史热启动（无快照可还原时自动启用）\n"
+            "   所有历史成功评测被注入算法，且不再重新仿真；\n"
+            "   失败评测不注入（惩罚值会污染代理模型）。\n\n"
+            "3) 预热布点 settings.init_points\n"
+            "   指向一个 CSV，每行一组变量值（列序=variables 顺序）。\n\n"
+            "4) 预算一致\n"
+            "   历史点计入评测数，预算感知机制据此分配剩余预算。\n")
+        return [
+            ("搜索设置",
+             "最大迭代 max_iter —— 预算上限，达到即停（默认 100）\n"
+             "停滞耐心 patience —— 连续无改进轮数，触发重启（默认 10）\n"
+             "改进阈值 improve_rel —— 相对改善小于此算无改进（默认 0.001）\n"
+             "失败上限 fail_limit —— 连续仿真失败达到即停（默认 5）\n"
+             "最大重启 max_restarts —— 停滞时最多重启次数（默认 2）\n"
+             "随机种子 seed —— 同种子可复现；留空=每次不同（默认 0）\n"
+             "搜索策略 strategy —— 选型速查见「算法说明」小标签页\n",
+             search_detail),
+            ("仿真选项",
+             "保存原始数据 save_raw —— 1=留全部 psf，2=只留关键轮，0=不留\n"
+             "仿真超时 sim_timeout —— 单轮 spectre 秒数上限，超时判失败\n",
+             sim_detail),
+            ("算法说明",
+             "选型速查（strategy 取值）\n"
+             "  变量少且平滑 → simplex（默认）    变量多 / 多峰 → global 或 de\n"
+             "  预算≥50 单目标 → lshade          变量强耦合 → cmaes / cmaes_ipop\n"
+             "  仿真极贵省次数 → tpe             多目标 → nsga2 / weighted /\n"
+             "  拿不准选哪个 → portfolio          worstspec；基线 → random / grid\n"
+             "\n下方「详细说明」= 全部算法的原理 / 适用 / 优势 / 局限。\n",
+             ""),
+            ("历史与续跑",
+             "精确续跑 —— snapshot+events 逐位还原算法状态\n"
+             "历史热启动 —— 无快照时历史成功评测注入算法（免重仿）\n"
+             "预热布点 —— settings.init_points 指向 CSV\n"
+             "预算一致 —— 历史点计入评测数\n",
+             hist_detail),
+        ]
+
+    def _settings_help_switch(self, _event=None):
+        nb = getattr(self, "set_help_nb", None)
+        box = getattr(self, "set_detail_box", None)
+        if nb is None or box is None:
+            return
+        try:
+            idx = nb.index("current")
+            title = nb.tab(idx, "text")
+        except Exception:
+            return
+        detail = (self.set_help_details or {}).get(title, "")
+        if title == "算法说明" and not detail:
+            try:
+                from ...algorithm import help_text
+                detail = help_text()
+            except Exception as exc:
+                detail = "算法说明加载失败: %s" % exc
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        box.insert("1.0", detail)
+        box.configure(state="disabled")
+
+    def _show_ade_snapshot(self):
+        win = self.tk.Toplevel(self.root)
+        win.title("ADE 设置快照（只读）")
+        win.geometry("900x620")
+        bar = self.ttk.Frame(win)
+        bar.pack(side="top", fill="x", padx=6, pady=4)
+        status = self.tk.StringVar(value="就绪")
+        self.ttk.Button(bar, text="刷新", command=lambda: refresh()).pack(
+            side="left", padx=2)
+        self.ttk.Button(bar, text="关闭", command=win.destroy).pack(
+            side="left", padx=2)
+        self.ttk.Label(bar, textvariable=status,
+                       foreground="#555555").pack(side="left", padx=8)
+        self.ttk.Label(bar, foreground="#888888",
+                       text="只读：在 ADE 里改设置；本窗口不会修改任何东西"
+                       ).pack(side="left", padx=8)
+        wrap = self.ttk.Frame(win)
+        wrap.pack(side="top", fill="both", expand=True, padx=6, pady=(0, 6))
+        box = self._scrolled_text(wrap, wrap="none")
+        box.configure(state="disabled")
+
+        def refresh():
+            try:
+                parts = self._simset_collect()
+                text = build_simset_text(*parts)
+            except Exception as exc:
+                text = "SIMSET_DISPLAY_ERROR: %s" % exc
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("1.0", text)
+            box.configure(state="disabled")
+            status.set("已刷新 %s" % time.strftime("%H:%M:%S"))
+        refresh()
+
     def _simset_netlist_path(self, rescan=False):
         def field(key):
             try:
@@ -927,37 +1237,6 @@ class OptimizerGui:
         except Exception:
             targets = list(getattr(self, "target_specs", {}) or {}).values()
         return state_dir, info, netlist_path, netlist_params, netlist_text, targets, notes
-    def _simset_refresh(self, force=False):
-        if getattr(self, "_simset_closed", False):
-            return
-        try:
-            sig = self._simset_signature()
-        except Exception:
-            sig = None
-        if sig is None and not force:
-            n = getattr(self, "_simset_sig_fail_n", 0) + 1
-            self._simset_sig_fail_n = n
-            if n % 10 != 0:
-                return
-        else:
-            self._simset_sig_fail_n = 0
-        if (not force) and sig is not None and sig == self._simset_sig:
-            return
-        try:
-            parts = self._simset_collect()
-            text = build_simset_text(*parts)
-        except Exception as exc:
-            text = "SIMSET_DISPLAY_ERROR: %s" % exc
-        self._simset_sig = sig
-        if text == self._simset_last_text and not force:
-            return
-        self._simset_last_text = text
-        if self.simset_text is not None:
-            self._set_text(self.simset_text, text, keep_view=not force)
-        try:
-            self.simset_status_var.set("已刷新 %s" % time.strftime("%H:%M:%S"))
-        except Exception:
-            pass
     def _poll_text_tick(self, closed_attr, auto_var, refresh, tick, after_attr):
         if getattr(self, closed_attr, False):
             return
@@ -979,18 +1258,12 @@ class OptimizerGui:
             except Exception:
                 pass
             setattr(self, after_attr, None)
-    def _simset_tick(self):
-        self._poll_text_tick("_simset_closed", self.simset_auto_var,
-                             self._simset_refresh, self._simset_tick,
-                             "_simset_after_id")
-    def _simset_shutdown(self):
-        self._poll_text_shutdown("_simset_closed", "_simset_after_id")
     def _build_em_tab(self):
         tab, self.em_text, self.em_status_var, self.em_auto_var = \
             self._build_poll_tab("EM 融合",
                                  "只读: requested/grid/delivered 与告警",
                                  self._em_refresh)
-        self.em_tab = tab
+        self.em_merge_tab = tab
         self._em_sig = self._em_last_text = None
         self._em_closed = False
         self._em_after_id = None
@@ -1856,14 +2129,14 @@ class OptimizerGui:
                 "goal2": spec.get("goal2", ""), "tol": spec.get("tol", ""),
                 "weight": spec.get("weight", ""),
                 "band_lo": band[0], "band_hi": band[1],
-                "freq": spec.get("freq", ""),
-                "curve_op": spec.get("curve_op", "")}
+                "freq": spec.get("freq", "")}
         for key, var in self.target_edit.items():
-            if key == "limit":
-                continue
             var.set(str(vals.get(key, "")))
-        limit = spec.get("limit")
-        self.target_edit["limit"].set(json.dumps(limit) if limit else "")
+        adv = getattr(self, "target_adv", {})
+        if adv:
+            limit = spec.get("limit")
+            adv["limit"].set(json.dumps(limit, ensure_ascii=False) if limit else "")
+            adv["curve_op"].set(str(spec.get("curve_op", "")))
     def _target_add(self):
         spec = self._target_from_edit()
         if spec is None:
@@ -1887,16 +2160,23 @@ class OptimizerGui:
             self.target_specs.pop(iid, None)
     def _target_from_edit(self, base=None):
         e = {k: v.get().strip() for k, v in self.target_edit.items()}
+        adv = getattr(self, "target_adv", {})
+        e["limit"] = adv["limit"].get().strip() if adv else ""
+        e["curve_op"] = adv["curve_op"].get().strip() if adv else ""
         try:
             if not e["output"]:
                 raise ValueError("输出名不能为空")
             spec = dict(base or {})
             spec["output"] = e["output"]
-            for key in ("metric", "op", "curve_op", "goal", "goal2", "tol", "weight", "freq"):
+            for key in ("metric", "op", "goal", "goal2", "tol", "weight", "freq"):
                 if e[key]:
                     spec[key] = e[key]
                 else:
                     spec.pop(key, None)
+            if e["curve_op"]:
+                spec["curve_op"] = e["curve_op"]
+            else:
+                spec.pop("curve_op", None)
             if e["band_lo"] and e["band_hi"]:
                 spec["band"] = [e["band_lo"], e["band_hi"]]
             elif e["band_lo"] or e["band_hi"]:
@@ -1907,11 +2187,13 @@ class OptimizerGui:
                 try:
                     spec["limit"] = json.loads(e["limit"])
                 except ValueError:
-                    raise ValueError("限值曲线 JSON 解析失败：数值要加引号" "（格式见「字段说明」，或点「从CSV载入」）")
+                    raise ValueError("限值曲线 JSON 解析失败：数值要加引号"
+                                     "（格式见「字段说明」，或点「从CSV载入」）")
             else:
                 spec.pop("limit", None)
             if spec.get("curve_op") and "limit" not in spec:
-                raise ValueError("限值比较(above/below/match)需要限值曲线：" "用「从CSV载入」或填写 JSON")
+                raise ValueError("限值比较(above/below/match)需要限值曲线："
+                                 "用「限值曲线…」里的「从CSV载入」或填写 JSON")
             Target(spec)
         except Exception as exc:
             self._dialog("目标错误", str(exc), error=True)
@@ -1922,8 +2204,7 @@ class OptimizerGui:
         return (spec.get("output", ""), spec.get("metric", ""),
                 spec.get("op", ""), spec.get("goal", ""), spec.get("goal2", ""),
                 spec.get("tol", ""), spec.get("weight", ""),
-                str(band[0]), str(band[1]), spec.get("freq", ""),
-                spec.get("curve_op", ""))
+                str(band[0]), str(band[1]), spec.get("freq", ""))
     def _target_limit_from_csv(self):
         from tkinter import filedialog
         path = filedialog.askopenfilename(parent=self.root,
@@ -1966,11 +2247,54 @@ class OptimizerGui:
         if len(xs) < 2:
             self._dialog("载入失败", "文件里没有找到至少两行 x,y 数据（按 %s 解码）" % used, error=True)
             return
-        self.target_edit["limit"].set(json.dumps({"x": xs, "y": ys}, ensure_ascii=False))
+        self.target_adv["limit"].set(json.dumps({"x": xs, "y": ys},
+                                                ensure_ascii=False))
         msg = "已载入 %d 个点（按 %s 解码）" % (len(xs), used)
         if skipped:
             msg += "，跳过 %d 行非数值内容" % skipped
         self._dialog("限值曲线", msg)
+
+    def _target_limit_dialog(self):
+        win = self.tk.Toplevel(self.root)
+        win.title("目标 · 限值曲线")
+        win.transient(self.root)
+        body = self.ttk.Frame(win, padding=10)
+        body.pack(fill="both", expand=True)
+        self.ttk.Label(body, anchor="w", justify="left", foreground="#555555",
+                       text=("限值曲线让整条输出曲线逐点与一条限值线比较。"
+                             "填写后，指标/算子/目标/目标2/频率都不再参与该条目标。")
+                       ).grid(row=0, column=0, columnspan=3, sticky="we",
+                              pady=(0, 8))
+        self.ttk.Label(body, text="比较方式", anchor="e").grid(
+            row=1, column=0, sticky="e", padx=(4, 8), pady=3)
+        self.ttk.Combobox(body, textvariable=self.target_adv["curve_op"],
+                          width=12, state="readonly",
+                          values=("", "above", "below", "match")).grid(
+            row=1, column=1, sticky="w", padx=2, pady=3)
+        self.ttk.Label(body, anchor="w", foreground="#666666",
+                       text="above=曲线须高于限值线；below=须低于；match=须贴合"
+                       ).grid(row=1, column=2, sticky="w", padx=8, pady=3)
+        self.ttk.Label(body, text="限值曲线 JSON", anchor="e").grid(
+            row=2, column=0, sticky="e", padx=(4, 8), pady=3)
+        self.ttk.Entry(body, textvariable=self.target_adv["limit"], width=64).grid(
+            row=2, column=1, columnspan=2, sticky="we", padx=2, pady=3)
+        self.ttk.Label(body, anchor="w", justify="left", foreground="#666666",
+                       wraplength=760,
+                       text=('形如 {"x":["1G","2G"],"y":["35","45"]}，数值要加引号。'
+                             '通常不用手写：点「从CSV载入」选两列数据文件自动生成。')
+                       ).grid(row=3, column=1, columnspan=2, sticky="w",
+                              padx=2, pady=(2, 0))
+        bar = self.ttk.Frame(body)
+        bar.grid(row=4, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        self.ttk.Button(bar, text="从CSV载入",
+                        command=self._target_limit_from_csv).pack(side="left", padx=2)
+        self.ttk.Button(bar, text="清空",
+                        command=lambda: (self.target_adv["limit"].set(""),
+                                         self.target_adv["curve_op"].set(""))
+                        ).pack(side="left", padx=2)
+        self.ttk.Button(bar, text="关闭", command=win.destroy).pack(
+            side="right", padx=2)
+        body.columnconfigure(1, weight=1)
     def _target_help(self):
         nl = chr(10)
         text = nl.join([
@@ -2660,7 +2984,6 @@ class OptimizerGui:
         ]
         self._set_text(self.result_text, "\n".join(lines))
     def _on_close(self):
-        self._simset_shutdown()
         self._em_shutdown()
         self.stop()
         self.root.destroy()
@@ -2709,19 +3032,20 @@ def run_gui(cfg_path=None, smoke=False):
         reason = "迭代计数为 0"
     elif gui.drawn_points < 1:
         reason = "收敛图无绘制点"
-    elif not getattr(gui, "simset_text", None):
-        reason = "仿真设置页未创建"
+    elif not getattr(gui, "settings_tab", None):
+        reason = "迭代页未创建"
+    elif not getattr(gui, "set_fields", None):
+        reason = "迭代页搜索设置字段缺失"
     else:
         try:
-            body = gui.simset_text.get("1.0", "end")
-            if "SIMSET_DISPLAY_ERROR" in body:
-                reason = "仿真设置页展示失败: " + body.split("SIMSET_DISPLAY_ERROR", 1)[-1][:80]
-            elif "【分析 analyses】" not in body:
-                reason = "仿真设置页缺少分析区"
-            elif "【仿真频率范围】" not in body:
-                reason = "仿真设置页缺少频率区"
+            gui._settings_help_switch()
+            body = gui.set_detail_box.get("1.0", "end")
+            if "最大迭代" not in body:
+                reason = "迭代页帮助详情未加载"
+            elif not getattr(gui, "_show_ade_snapshot", None):
+                reason = "迭代页缺少 ADE 设置快照入口"
         except Exception as exc:
-            reason = "仿真设置页读取失败: %s" % exc
+            reason = "迭代页读取失败: %s" % exc
     if reason is None and not getattr(gui, "em_text", None):
         reason = "EM 融合页未创建"
     elif reason is None:
@@ -2735,12 +3059,27 @@ def run_gui(cfg_path=None, smoke=False):
             reason = "EM 融合页读取失败: %s" % exc
     if reason is None and not getattr(gui, "em_align_tab", None):
         reason = "EM 对齐页未创建"
-    elif reason is None and (not getattr(gui, "em_align_log_text", None)
-                             or not getattr(gui, "em_align_result_text", None)):
+    if reason is None and (not getattr(gui, "em_align_log_text", None)
+                           or not getattr(gui, "em_align_result_text", None)):
         reason = "EM 对齐页文本框未创建"
-    elif reason is None and not getattr(gui, "netlist_btn", None):
+    if reason is None and not getattr(gui, "layout_page", None):
+        reason = "版图页未创建"
+    if reason is None and not getattr(gui, "em_page", None):
+        reason = "EM 页未创建"
+    if reason is None:
+        try:
+            lp = gui.layout_page
+            if not getattr(lp, "geom_vars", None):
+                reason = "版图页几何表单为空"
+            elif getattr(lp, "sketch", None) is None:
+                reason = "版图页示意图未创建"
+            elif not getattr(gui.em_page, "b_log", None):
+                reason = "EM 页日志框未创建"
+        except Exception as exc:
+            reason = "版图/EM 页检查失败: %s" % exc
+    if reason is None and not getattr(gui, "netlist_btn", None):
         reason = "设计页缺少「立即生成网表」按钮"
-    elif reason is None:
+    if reason is None:
         try:
             probe = gui._collect_cfg(validate=False)
             if not isinstance(probe, dict):
@@ -2755,7 +3094,6 @@ def run_gui(cfg_path=None, smoke=False):
         except Exception as exc:
             reason = "配置键检查失败: %s" % exc
     try:
-        gui._simset_shutdown()
         gui._em_shutdown()
     except Exception:
         pass

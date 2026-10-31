@@ -931,11 +931,32 @@ def lri_draw_sketch(c, raw):
     W, H = geo["bx"], geo["by"]
     w = float(g["w"])
     wu = w
-    sc = min(196.0 / max(W, 1e-9), 128.0 / max(H, 1e-9))
-    cx, cy = 140.0, 94.0
+    # 把端口引出线/下穿也计入范围，避免示意图被 Canvas 边缘裁掉
+    xs, ys = [-W / 2.0, W / 2.0], [-H / 2.0, H / 2.0]
+    for _name, _pt in geo["ports"]:
+        xs.append(_pt[0])
+        ys.append(_pt[1])
+    for _pp in (geo.get("under_poly") or []):
+        for _q in _pp:
+            xs.append(_q[0])
+            ys.append(_q[1])
+    for _seg in (geo.get("under") or []):
+        for _q in _seg:
+            xs.append(_q[0])
+            ys.append(_q[1])
+    for _vx, _vy, _vw in (geo.get("vias") or []):
+        ys.append(_vy + _vw / 2.0)
+        ys.append(_vy - _vw / 2.0)
+    _pad = w / 2.0
+    minx, maxx = min(xs) - _pad, max(xs) + _pad
+    miny, maxy = min(ys) - _pad, max(ys) + _pad
+    sc = min(240.0 / max(maxx - minx, 1e-9),
+             132.0 / max(maxy - miny, 1e-9))
+    cxm, cym = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    cx, cy = 140.0, 85.0
 
     def tx(p):
-        return (cx + p[0] * sc, cy - p[1] * sc)
+        return (cx + (p[0] - cxm) * sc, cy - (p[1] - cym) * sc)
 
     def poly(pts, width, fill, edge):
         pp = lri_sweep(pts, width)
@@ -977,28 +998,35 @@ def lri_draw_sketch(c, raw):
         x, y = tx(pt)
         col = "#b02020" if name.startswith("ct") else "#0a7d33"
         c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=col, outline="")
-        c.create_text(x, y - 9, text=name, fill=col, font=("fixed", 7))
-    yb = max(y1, y2) + 13
+        # 端口名放圆点旁边，避免压住尺寸线或金属
+        if x >= cx:
+            c.create_text(x + 7, y, text=name, fill=col,
+                          font=("fixed", 7), anchor="w")
+        else:
+            c.create_text(x - 7, y, text=name, fill=col,
+                          font=("fixed", 7), anchor="e")
+    bb = c.bbox("all") or (cx - 60, cy - 60, cx + 60, cy + 60)
+    yb = bb[3] + 10
     c.create_line(x1, yb, x2, yb, fill="#a03030", arrow="both")
     c.create_text((x1 + x2) / 2.0, yb + 8, text="W=%g" % W, fill="#a03030",
                   font=("fixed", 8))
-    xl = min(x1, x2) - 14
+    xl = bb[0] - 12
     c.create_line(xl, y1, xl, y2, fill="#a03030", arrow="both")
     c.create_text(xl - 2, (y1 + y2) / 2.0, text="H=%g" % H, fill="#a03030",
                   font=("fixed", 8), angle=90)
     if g.get("kind") == "sym":
-        c.create_text(140, 182, fill="#444444", font=("fixed", 8),
+        c.create_text(140, 186, fill="#444444", font=("fixed", 8),
                       text="dout=%g  w=%g  s=%g  实际圈数 N=%d"
                            % (float(g.get("dout", W)), w, float(g["s"]),
                               int(geo.get("N", 0))))
-        c.create_text(140, 197, fill="#666666", font=("fixed", 8),
+        c.create_text(140, 199, fill="#666666", font=("fixed", 8),
                       text="kind=sym  端口同侧顶部  内端下方对称轴")
     else:
-        c.create_text(140, 182, fill="#444444", font=("fixed", 8),
+        c.create_text(140, 186, fill="#444444", font=("fixed", 8),
                       text="n=%g  w=%g  s=%g  corner=%g"
                            % (float(g["n"]), w, float(g["s"]),
                               float(g["corner"])))
-        c.create_text(140, 197, fill="#666666", font=("fixed", 8),
+        c.create_text(140, 199, fill="#666666", font=("fixed", 8),
                       text="kind=%s  shape=%s  ct=%d  seam=%s"
                            % (g["kind"], g["shape"], int(g["ct"]), g["seam"]))
 
@@ -1016,7 +1044,11 @@ def lri_sketch_after(tab):
 
 def lri_redraw_sketch(tab):
     try:
-        tab._draw_geom_sketch("ind")
+        typ = tab.a_type.get()
+    except Exception:
+        typ = "ind"
+    try:
+        tab._draw_geom_sketch(typ)
     except Exception:
         pass
 

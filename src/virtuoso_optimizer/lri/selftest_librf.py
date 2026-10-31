@@ -31,7 +31,7 @@ from .runner import (
 from .layout import (
     lri_norm_geom, lri_validate, lri_build_ind, form_to_geom)
 from .ui_em import (
-    _EmOptTab, _health_judge)
+    _LayoutTab, _health_judge)
 
 def _selftest():
     import tempfile
@@ -330,7 +330,7 @@ def _selftest():
     l_small = r3.curves["L0"][1][0]
     check("mock L0 monotone", l_big > l_small, "%s vs %s" % (l_big, l_small))
     import inspect as _insp
-    sig = _insp.signature(_EmOptTab._make_worker)
+    sig = _insp.signature(_LayoutTab._make_worker)
     kinds = [p.kind for p in sig.parameters.values()]
     check("make_worker **kwargs", _insp.Parameter.VAR_KEYWORD in kinds, str(sig))
     sig2 = _insp.signature(make_layout_emx)
