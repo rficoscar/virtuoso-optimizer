@@ -4,7 +4,7 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 调用 spectre 迭代，输出收敛报告。版图部分按工艺角色生成电感、传输线、变压器
 和耦合线，可接 EMX 做几何迭代。
 
-`Version 1.5.0 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
+`Version 1.5.1 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
 
 ## 功能
 
@@ -36,6 +36,24 @@ python3 optimizer.py --gui-smoke                  # GUI 无头冒烟
 
 界面需要在图形桌面中运行，或设置 `DISPLAY` 指向可用的 X 显示。没有显示时程序
 打印 `GUI_SMOKE_FAIL: no display` 后退出。
+
+## 无网络迁移（纯文本剪贴板）
+
+目标机不能传文件、只能通过 VNC 复制文本时，用 `tools/` 把项目打成纯文本安装
+脚本：本地复制整段脚本，在目标机文本编辑器中粘贴保存，`sh` 执行即可，脚本自带
+sha256 校验与解包。
+
+```sh
+python3 tools/make_kit.py --repo . --out dist/kit --limit 200000 --format xz
+python3 tools/make_onepaste.py --kit dist/kit --ext xz
+python3 tools/verify_kit.py dist/kit
+```
+
+- 全量包（xz）21 个文件 2 片；目标机没有 xz 时改用 `--format gz`，变 3 片。
+- 核心包（gz）用 `--exclude` 去掉版图、EM、测试、文档和本工具，9 个文件 1 片。
+- RealVNC 剪贴板上限 256 kB，超限会整段粘贴失败并粘出上一次的内容；脚本逐片
+  校验 sha256，失败时把剪贴板换成任意小文本后重抄该片。
+- 目标机需要 `python3`、`base64`、`tar`，以及对应的 `xz` 或 `gzip`。
 
 ## GUI 页面
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.1 — 2026-10-31
+
+纯文本剪贴板迁移工具链。无运行时行为变更；`VERSION` 1.5.1。
+
+- **tools/**：`make_kit.py` 按 `git ls-files` 打包（tar → xz/gz → base64 76 列）并切片为 heredoc 脚本；`make_onepaste.py` 把逐片 sha256、整包 sha256 与解包并入最后一片，粘贴次数等于片数；`verify_kit.py` 校验脚本纯 ASCII、单片上限、分片与整包 sha256；`make_file_kit.py` 生成按文件的 gzip+base64 落盘脚本。
+- **文档**：README 增「无网络迁移」一节；DEVELOPMENT_GUIDE 增 §10 工具链契约（纯 ASCII、自校验、单片不超过 200000 字符、每次发版重新出包并验收）。
+- **验证**：`--selftest` 179、`--gui-smoke` OK、`--help` 正常；核心包 9 文件单脚本一次粘贴，全量包 21 文件 xz 两片（gz 三片）；`verify_kit.py` 全部 PASS。
+
 ## 1.5.0 — 2026-10-31
 
 代码压缩版。CLI 参数、GUI 页面与控件、报告 JSON 字段、配置键、测试断言的行为均不变；

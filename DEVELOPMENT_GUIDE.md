@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.5.0。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.5.1。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -420,3 +420,34 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 - `tangle` 出口点必须在包围盒外，否则 p02 同层 stub 会从内部穿过绕组短路。
 - 拉长 `ex/ey` 时，underpass 外端落点相对「拉长后实际轮廓」定位，禁止 `dout/2+ex/2` 半移参考系。
 - 内孔闭合告警只在确实容纳不下请求匝数时发出（`nr` 本就多预留 2 圈）。
+
+## 10. 传输工具链（tools/）
+
+四个脚本只用于交付，不进入运行时：
+
+| 脚本 | 作用 |
+|---|---|
+| `make_kit.py` | `git ls-files` 打 tar，xz/gz 压缩后 base64（76 列）切片，每片一个 heredoc 脚本；`--exclude` 接受 glob |
+| `make_onepaste.py` | 把逐片 sha256、整包 sha256 与解包命令追加到最后一片，粘贴次数等于片数 |
+| `verify_kit.py` | 校验安装脚本纯 ASCII、单片不超过上限、分片与整包 sha256 一致 |
+| `make_file_kit.py` | 按文件生成 gzip+base64 落盘脚本，需要单文件复制时用 |
+
+契约（改工具时必须保持）：
+
+- 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
+- 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片、gz 3 片；核心包 gz 1 片。
+- 每次发版重新出包并跑 `verify_kit.py`。
+
+全量包与核心包出包命令：
+
+```sh
+python3 tools/make_kit.py --repo . --out dist/kit --limit 200000 --format xz
+python3 tools/make_onepaste.py --kit dist/kit --ext xz
+python3 tools/verify_kit.py dist/kit
+
+python3 tools/make_kit.py --repo . --out dist/core --limit 200000 --format gz \
+  --exclude "tools/*,README.md,CHANGELOG.md,DEVELOPMENT_GUIDE.md,.gitignore,selftest.py,test_proc_cross_section.py,em_align.py,em_opt.py,em_bridge.py,librf.il,librf_opt.py,proc_cross_section.py"
+python3 tools/make_onepaste.py --kit dist/core --ext gz
+python3 tools/verify_kit.py dist/core
+```
