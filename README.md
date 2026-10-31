@@ -28,7 +28,7 @@ python3 optimizer.py
 1. 打开 `release/paste_001.sh`，全选复制，粘贴到目标机终端并回车；
 2. 对 `release/paste_002.sh` 重复一次；最后一片会顺带生成 `check.sh` 和
    `unpack.sh`。
-3. 执行 `sh check.sh && sh unpack.sh`，校验并解包到 `optimizer-1.7.2/`。
+3. 执行 `sh check.sh && sh unpack.sh`，校验并解包到 `optimizer-1.7.3/`。
 
 每片自带 base64 数据与校验和；`check.sh` 校验分片，`unpack.sh` 校验整包后
 解包。RealVNC 剪贴板上限约 256 kB，超限会整段失败并粘出上一次的内容；若
@@ -68,7 +68,7 @@ available, the scripts under `release/` carry the whole package over:
 2. Repeat with `release/paste_002.sh`; the last chunk also writes `check.sh`
    and `unpack.sh`;
 3. Run `sh check.sh && sh unpack.sh` to verify and unpack into
-   `optimizer-1.7.2/`.
+   `optimizer-1.7.3/`.
 
 Each chunk embeds its base64 payload and checksum. `check.sh` verifies the
 chunks; `unpack.sh` verifies the archive and extracts it. The RealVNC clipboard
