@@ -835,7 +835,7 @@ def _selftest():
         j_n = J_of({"Z0": 50.0, "theta": 12.0},
                    {"Z0": 50.0, "theta": None}, {"Z0": 0.05})
         theta_err = None
-    except Exception as exc:  # noqa: BLE001 - selftest 需报告任意异常
+    except Exception as exc:  # noqa: BLE001 - the selftest must report any exception
         theta_err = exc
     fails += _chk(theta_err is None and d_n == 0.0 and j_n == 0.0
                   and "theta" not in per_n, "theta=None 不崩", "d=0 J=0",
@@ -966,5 +966,5 @@ def _selftest():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         sys.exit(1 if _selftest() else 0)
-    print("em_opt.py — Virtuoso Optimizer EM 融合优化模块")
-    print("用法: python3 src/em_opt.py --selftest")
+    print("em_opt.py — Virtuoso Optimizer EM fusion module")
+    print("Usage: PYTHONPATH=src python3 -m virtuoso_optimizer.em.opt --selftest")

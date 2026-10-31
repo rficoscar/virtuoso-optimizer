@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.common — 编码/输出/路径/错误/文件与命令等基础工具。"""
+"""lri.common — encoding, output, paths, errors, file and command helpers."""
 from __future__ import print_function
 
 import glob
@@ -13,7 +13,7 @@ import builtins
 
 _native_open = builtins.open
 
-def open(file, mode="r", *args, **kwargs):  # noqa: A001 - 有意覆盖内建 open
+def open(file, mode="r", *args, **kwargs):  # noqa: A001 - intentionally shadows builtin open
     if "b" not in mode and "encoding" not in kwargs:
         kwargs["encoding"] = "utf-8"
         if not any(c in mode for c in "wxa+"):
@@ -36,9 +36,8 @@ def _force_utf8_stdio():
 _force_utf8_stdio()
 
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # virtuoso_optimizer/
-_HERE = os.path.join(_PKG_ROOT, "data")                                  # 随包数据目录
-REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_ROOT))                  # 仓库根（src/ 上一级）
-TEST_FIXTURES = os.path.join(REPO_ROOT, "tests", "fixtures")
+_HERE = os.path.join(_PKG_ROOT, "data")                                  # Bundled data directory
+REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_ROOT))                  # Repository root (parent of src/)
 
 SKILL_IL = os.path.join(_HERE, "librf.il")
 

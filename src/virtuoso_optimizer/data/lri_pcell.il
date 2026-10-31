@@ -1,37 +1,37 @@
 ;===============================================================
-; lri_pcell.il — 二代差分对称电感 PCell 外壳（IC618）
+; lri_pcell.il — second-generation differential symmetric inductor PCell shell (IC618)
 ;
-; 依赖：先 load("librf.il")（几何内核 lriI3BuildSym 在那边）。
-; 用法：
+; Requires load("librf.il") first (the geometry kernel lriI3BuildSym lives there).
+; Usage:
 ;   load("librf.il")
 ;   load("lri_pcell.il")
-;   lriPcellTechSmic55()                  ; 真实 PDK 层/DRC 档（可跳过=示教 M5/M4）
-;   lriPcellDefine("MYLIB" "ind_sym")     ; 在 MYLIB 里注册 cell
-; 之后在 Library Manager 里实例化 ind_sym，参数即下面 CDF 表。
+;   lriPcellTechSmic55()                  ; real PDK layer/DRC profile (optional; demo M5/M4 otherwise)
+;   lriPcellDefine("MYLIB" "ind_sym")     ; register the cell in MYLIB
+; Then instantiate ind_sym in Library Manager; the parameters are the CDF table below.
 ;
-; 参数（与用户需求一一对应）：
-;   rx/ry    横向/纵向半径（外金属半轴，footprint = 2rx x 2ry + lead_len）
-;   n        每臂圈数（整数；差分总圈数 = 2n）
-;   w/s      线宽 / 线间隔
-;   chamfer  拐角切角 0..1（0=矩形，2-sqrt(2)=正八边形）
-;   lead_len 差分输出线长度（中心线）
-;   lead_gap 差分线间距（边到边）
-;   lead_w   差分线宽
-;   ct       1 = 中心抽头（内桥中点 -> 原点焊盘）
+; Parameters (one-to-one with the user-facing fields):
+;   rx/ry    horizontal/vertical radius (outer-metal half axes; footprint = 2rx x 2ry + lead_len)
+;   n        turns per arm (integer; total differential turns = 2n)
+;   w/s      line width / line spacing
+;   chamfer  corner chamfer 0..1 (0 = rectangle, 2-sqrt(2) = regular octagon)
+;   lead_len differential output lead length (centreline)
+;   lead_gap differential lead spacing (edge to edge)
+;   lead_w   differential lead width
+;   ct       1 = centre tap (inner-bridge midpoint -> origin pad)
 ;
-; 工艺层角色：spiral/underpass/via_sp/marker 由 librfTech 决定
-; （缺省 M5/M4/V4/MARKER）。真实 PDK 由 tools/gen_tech.py 从 tech/<key>.json
-; 生成 tech/<key>_profile.il，lriPcellTechLoad 加载。
+; Process layer roles: spiral/underpass/via_sp/marker come from librfTech
+; (default M5/M4/V4/MARKER). For a real PDK, tools/gen_tech.py turns tech/<key>.json
+; into tech/<key>_profile.il, loaded by lriPcellTechLoad.
 ;===============================================================
 
 unless(boundp('lriPcellLib) (setq lriPcellLib "RF_LIB"))
 
-; ------------------------------------------------------------ 工艺档加载
-; 层名/通孔/DRC 数值全部来自 tech/<key>.json 生成的 <key>_profile.il。
+; ------------------------------------------------------------ process profile loading
+; Layer names, vias and DRC values all come from <key>_profile.il generated from tech/<key>.json.
 defvar(lriTechDir nil)
 defvar(lriTechLoaded nil)
 
-; PCell 生成上下文：批处理会话要先 loadContext 才能 pcDefinePCell。
+; PCell generation context: batch sessions must loadContext before pcDefinePCell.
 procedure(lriPcellCxtLoad()
   let((d p)
     p = getShellEnvVar("LIBRF_PCELLGEN_CXT")
@@ -70,13 +70,13 @@ procedure(lriPcellTechLoad(name)
     sprintf(nil "lriPcellTechLoad: %s -> %s" name librfTechName)))
 
 
-; SMIC55LL ULP RF（1P8M_6Ic_1TMc_1MTTc）内建档。
-; 优先读 tech/smic55ll_ulp_rf_profile.il（由 tech/*.json 生成）；找不到才用
-; 下面的内联表。TV2 规则按 Calibre DRC V1.13 实测：
-;   UTV2_1 固定 0.36x0.36（MTT2_UTV2=1 分支）
-;   UTV2_2a 间距 0.34
-;   UTV2_5  TM2 包络 >= 0.3  -> 取 0.4 留裕量
-;   TM2_1 最小线宽 0.40；TM2_2b 长/宽>=2um 时最小间距 0.5；TM2_5 最大宽 30
+; Built-in profile for SMIC55LL ULP RF (1P8M_6Ic_1TMc_1MTTc).
+; Prefer tech/smic55ll_ulp_rf_profile.il (generated from tech/*.json); fall back to
+; the inline table below. TV2 rules measured against Calibre DRC V1.13:
+;   UTV2_1 fixed 0.36x0.36 (MTT2_UTV2=1 branch)
+;   UTV2_2a spacing 0.34
+;   UTV2_5  TM2 enclosure >= 0.3 -> use 0.4 for margin
+;   TM2_1 min width 0.40; TM2_2b min spacing 0.5 when length/width >= 2um; TM2_5 max width 30
 procedure(lriPcellTechSmic55()
   if(lriTechFind("smic55ll_ulp_rf")
     then lriPcellTechLoad("smic55ll_ulp_rf")
@@ -93,7 +93,7 @@ procedure(lriPcellTechSmic55Inline()
     list("TM2" list("MnTXT" "topmetal2"))
     list("TM1" list("MnTXT" "topmetal1"))
     list("M6"  list("MnTXT" "metal6")))
-  ; 叠层表：metal_main/metal_aux 可指任意相邻两层，通孔链逐级生成
+  ; Stack table: metal_main/metal_aux may name any adjacent pair; the via chain is generated level by level
   librfStackMetals = list("M1" "M2" "M3" "M4" "M5" "M6" "TM1" "TM2")
   librfStackVias = list(
     list("V1" "M1" "M2" 0.09 0.11 0.03 0.02)
@@ -113,7 +113,7 @@ procedure(lriPcellTechSmic55Inline()
                        list("enclosure" 0.05))))
   t)
 
-; 该 cell 的参数是否已在 CDF 里
+; Whether this cell's parameters already exist in the CDF
 procedure(lriCdfHasParam(cdf pname)
   let((hit)
     hit = nil
@@ -122,7 +122,7 @@ procedure(lriCdfHasParam(cdf pname)
         when(p~>name == pname  hit = t)))
     hit))
 
-; 补建 CDF 参数（batch 下 cdfSaveCDF 可能返回 nil，但本会话内表单可用）
+; Create missing CDF parameters (cdfSaveCDF may return nil in batch, but the form works in this session)
 procedure(lriPcellCdf(libName cellName)
   let((master cdf)
     master = ddGetObj(libName cellName)
@@ -172,7 +172,7 @@ procedure(lriPcellCdf(libName cellName)
         errset(cdfSaveCDF(cdf) t)))
     cdf))
 
-; 在 libName 中注册/刷新 PCell。cellName 缺省 "ind_sym"。
+; Register/refresh the PCell in libName. cellName defaults to "ind_sym".
 procedure(lriPcellDefine(libName cellName)
   let((lib)
     when(libName == nil || libName == ""  libName = lriPcellLib)
@@ -181,6 +181,12 @@ procedure(lriPcellDefine(libName cellName)
     unless(lib
       error(sprintf(nil "lriPcellDefine: library %s not found" libName)))
     lriPcellCxtLoad()
+    unless(fboundp('lriI3BuildSym)
+      error("lriPcellDefine: lriI3BuildSym missing; load librf.il first"))
+    ; Load a process profile when available; otherwise keep the demo M5/M4 layers.
+    when(lriTechLoaded == nil
+      when(lriTechFind("smic55ll_ulp_rf")
+        lriPcellTechSmic55()))
     pcDefinePCell(
       list(lib cellName "layout")
       (
@@ -198,7 +204,58 @@ procedure(lriPcellDefine(libName cellName)
         (metal_main string "" "Main metal: spiral + leads (empty = tech default)")
         (metal_aux  string "" "Aux metal: cross-under (empty = tech default)")
       )
-      let((req)
+      let((req bootDirs bootDir bootFile pcellFile)
+        ; --- Bootstrap: a new session only keeps the compiled pcell body; librf.il /
+        ;     lri_pcell.il and the process profile are gone. On first evaluation, find
+        ;     and load them from candidate directories so instantiating directly from
+        ;     Library Manager (without loading scripts first) still builds correctly; fail loudly, never silently fall back to demo M5/M4.
+        when(fboundp('lriI3BuildSym) == nil
+          bootDirs = nil
+          bootDir = getShellEnvVar("LRI_DATA_DIR")
+          when(bootDir && bootDir != ""
+            bootDirs = append(bootDirs list(bootDir)))
+          bootDir = getShellEnvVar("LRI_HOME")
+          when(bootDir && bootDir != ""
+            bootDirs = append(bootDirs list(
+              strcat(bootDir "/src/virtuoso_optimizer/data"))))
+          when(boundp('lriPcellDataDir)
+            when(lriPcellDataDir && lriPcellDataDir != ""
+              bootDirs = append(bootDirs list(lriPcellDataDir))))
+          bootDirs = append(bootDirs list("." "src/virtuoso_optimizer/data"))
+          bootFile = nil
+          foreach(bootDir bootDirs
+            unless(bootFile
+              when(isReadable(strcat(bootDir "/librf.il"))
+                bootFile = strcat(bootDir "/librf.il")
+                setq(lriPcellDataDir bootDir))))
+          unless(bootFile
+            error("inductor pcell: librf.il not found; load librf.il or set LRI_DATA_DIR"))
+          load(bootFile))
+        when(fboundp('lriPcellTechSmic55) == nil
+          bootDirs = nil
+          bootDir = getShellEnvVar("LRI_DATA_DIR")
+          when(bootDir && bootDir != ""
+            bootDirs = append(bootDirs list(bootDir)))
+          bootDir = getShellEnvVar("LRI_HOME")
+          when(bootDir && bootDir != ""
+            bootDirs = append(bootDirs list(
+              strcat(bootDir "/src/virtuoso_optimizer/data"))))
+          when(boundp('lriPcellDataDir)
+            when(lriPcellDataDir && lriPcellDataDir != ""
+              bootDirs = append(bootDirs list(lriPcellDataDir))))
+          bootDirs = append(bootDirs list("." "src/virtuoso_optimizer/data"))
+          pcellFile = nil
+          foreach(bootDir bootDirs
+            unless(pcellFile
+              when(isReadable(strcat(bootDir "/lri_pcell.il"))
+                pcellFile = strcat(bootDir "/lri_pcell.il")
+                setq(lriPcellDataDir bootDir))))
+          unless(pcellFile
+            error("inductor pcell: lri_pcell.il not found; load lri_pcell.il or set LRI_DATA_DIR"))
+          load(pcellFile))
+        when(lriTechLoaded == nil
+          lriPcellTechSmic55()
+          setq(lriTechLoaded "smic55ll_ulp_rf"))
         lriReport = nil
         librf__errs = nil
         req = list('kind "sym"
@@ -208,7 +265,7 @@ procedure(lriPcellDefine(libName cellName)
                    'metal_main metal_main 'metal_aux metal_aux)
         unless(lriI3BuildSym(pcCellView req)
           error(sprintf(nil "inductor pcell build failed: %s"
-            (if(librf__errs car(librf__errs) "see lri[i3] checks")))))
+            (if librf__errs car(librf__errs) "see lri[i3] checks"))))
         dbReplaceProp(pcCellView "instNamePrefix" "string" "L")
         t)
       )

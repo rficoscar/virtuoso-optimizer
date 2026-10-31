@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.tech_tab — 工艺档表单页。"""
+"""lri.ui.tech_tab — process profile form page."""
 from __future__ import print_function
 
 class _TechTab:
@@ -31,7 +31,7 @@ class _TechTab:
             var = self.tk.StringVar(value=default)
             self.vars[key] = var
             if key in self.HIDDEN:
-                # cds.lib 在「版图」页填写（单一入口），这里只保留变量供配置往返
+                # cds.lib is filled on the Layout page (single entry point); keep the variable here for config round-tripping.
                 continue
             row = self.ttk.Frame(box)
             row.pack(fill="x", pady=2)

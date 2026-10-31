@@ -84,13 +84,13 @@ class AlgorithmBase(object):
         state = AlgorithmBase.snapshot(self)
         state.update(kw)
         return state
-    def _restore_common(self, state):  # RNG 先解包，再交给基类
+    def _restore_common(self, state):  # Unpack the RNG first, then hand it to the base class
         st = dict(state)
         if st.get("rng") is not None:
             st["rng"] = _rng_unpack(st["rng"])
         AlgorithmBase.restore(self, st)
         return st
-    def _decay_radius(self, spread):  # 重启半径按 0.6^k 衰减
+    def _decay_radius(self, spread):  # Restart radius decays as 0.6^k
         self.last_restart_radius = spread * (0.6 ** (self.restarts - 1))
         return self.last_restart_radius
     def restart(self, spread=0.15):

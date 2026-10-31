@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.tech — 工艺档：加载、派生、角色层与 DRC 查询、SKILL 注入。"""
+"""lri.tech — process profiles: loading, derivation, role layers, DRC queries and SKILL injection."""
 from __future__ import print_function
 
 import json
@@ -517,17 +517,19 @@ def _skill_val(v):
     return str(v)
 
 def _stack_il(prof):
-    """工艺档可选 stack 表 -> SKILL 的叠层全局量。
+    """Translate the optional process-profile stack table into SKILL stack globals.
 
-    prof["stack"] 形如::
+    prof["stack"] looks like::
 
-        {"metals": ["M1", "M2", ...],            # 自下而上
+        {"metals": ["M1", "M2", ...],            # bottom to top
          "vias": {"V1": {"lower": "M1", "upper": "M2",
                          "cut": 0.09, "space": 0.11,
                          "enc_lo": 0.03, "enc_hi": 0.02}, ...}}
 
-    也接受顶层 stack_order + metals/vias。缺任意一段就返回空串：
-    SKILL 会退回 via_sp 角色单跳连接，不会因缺表而画错通孔。
+    A top-level stack_order plus metals/vias is also accepted. If any part is
+    missing, return an empty string: SKILL then falls back to single-hop
+    via_sp role connections and will not draw wrong vias because of a missing
+    table.
     """
     prof = prof or {}
     st = prof.get("stack") or {}

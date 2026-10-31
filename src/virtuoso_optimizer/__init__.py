@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer — Cadence Virtuoso/spectre 参数优化与 RF 版图/EM 自动化。"""
-VERSION = "1.7.1"
+"""Virtuoso Optimizer: parameter optimization and RF layout/EM automation for Cadence Virtuoso/spectre."""
+VERSION = "1.7.2"
 __version__ = VERSION

@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""EM 库桥接、EM 融合优化与两阶段对齐。"""
+"""EM library bridge, EM fusion optimization and two-stage alignment."""

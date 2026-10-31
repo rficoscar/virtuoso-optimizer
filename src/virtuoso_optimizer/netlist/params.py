@@ -142,7 +142,7 @@ def _body(line):
         body = body[:-1]
     return body
 
-def _mask_block_comments(text):  # 掩码必须等长替换，偏移才不漂移
+def _mask_block_comments(text):  # The mask must be replaced with equal length; otherwise offsets drift
     out = list(text)
     in_block = False
     quote = None
@@ -652,7 +652,7 @@ def _append_offset(stmt, lines, starts):
             rel -= 1
     return starts[index] + rel
 
-def _apply_edits(text, edits):  # 从后往前替换，前部偏移不受影响
+def _apply_edits(text, edits):  # Replace from the end so offsets earlier in the text are unaffected
     for start, end, replacement in sorted(
             edits, key=lambda item: (item[0], item[1]), reverse=True):
         text = text[:start] + replacement + text[end:]

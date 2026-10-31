@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.results — 结果读取、状态判定与查询/指标格式化。"""
+"""lri.ui.results — result reading, status decisions and query/metric formatting."""
 from __future__ import print_function
 
 import json

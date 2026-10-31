@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.selftest_librf — librf_opt 自测（python3 src/librf_opt.py --selftest）。"""
+"""lri.selftest_librf — librf_opt self-test (python3 -m virtuoso_optimizer.librf_opt --selftest)."""
 from __future__ import print_function
 
 import math
@@ -8,7 +8,7 @@ import re
 import sys
 
 from .common import (
-    _native_open, open, _HERE, TEST_FIXTURES, DEF_FREQ, DEFAULT_TECH, LibrfError, note_created,
+    _native_open, open, _HERE, DEF_FREQ, DEFAULT_TECH, LibrfError, note_created,
     safe_write_text, atomic_write_json, read_json, parse_eng, fmt_eng, run_cmd, _probe_data_file)
 from .tech import (
     load_tech_profile, _tech_deep_merge, build_tech, require_tech_ready, tech_layer, tech_text,
@@ -198,7 +198,16 @@ def _selftest():
                         "cell": "c1", "n": 3, "w": 10, "result": "/tmp/r.txt"})
     check("driver carries kind/seam", "'kind \"se\"" in _d and "'seam \"bottom\"" in _d)
     check("driver carries W/H numeric", "'W 160.0" in _d and "'tangle 180.0" in _d)
-    _fx = TEST_FIXTURES
+    _fx = os.path.join(tmp, "fixtures")
+    if not os.path.isdir(_fx):
+        os.makedirs(_fx)
+    with open(os.path.join(_fx, "demo_stack.layermap"), "w") as _fh:
+        _fh.write("M5 drawing 65 0\nM4 drawing 64 0\nM3 drawing 63 0\n"
+                  "V4 drawing 73 0\nV3 drawing 72 0\nMARKER marker 199 0\n")
+    with open(os.path.join(_fx, "demo_stack.proc"), "w") as _fh:
+        _fh.write("conductor 0.5 0.1 M3\nconductor 0.5 0.1 M4\n"
+                  "conductor 1.0 0.1 M5\nvia M3 M4 0.1 V3\n"
+                  "via M4 M5 0.1 V4\n")
     _cds = os.path.join(tmp, "cds.lib")
     with _native_open(_cds, "w") as _fh:
         _fh.write("DEFINE keepMe /k\n")

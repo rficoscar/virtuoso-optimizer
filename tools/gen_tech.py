@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""gen_tech.py - 工艺档 JSON -> SKILL 工艺档 + GDS 层映射 + 评估配置。
+"""gen_tech.py - process profile JSON -> SKILL profile + GDS layer map + evaluation config.
 
-一个 JSON 是唯一事实源：SKILL 几何内核、strmout 层映射、EMX/DRC 评估
-都从它派生，换工艺不改代码。
+One JSON is the single source of truth: the SKILL geometry kernel, the strmout
+layer map and the EMX/DRC evaluation config are all derived from it, so a new
+process does not require code changes.
 
     python3 tools/gen_tech.py src/virtuoso_optimizer/data/tech/smic55ll_ulp_rf.json
     python3 tools/gen_tech.py src/virtuoso_optimizer/data/tech/x.json \
-        --eval-config eval/config_x.json
+        --eval-config config_x.json
 
-产物：
-    data/tech/<key>_profile.il    load() 后设置 librfTech / librfStack* / librfDrc
-    data/stream/<key>.map         仅含本 PCell 用到的层，strmout -map 用
-    eval/config_<key>.json        评估脚本用（layers/text/limits/emx/calibre）
+Outputs:
+    data/tech/<key>_profile.il    sets librfTech / librfStack* / librfDrc after load()
+    data/stream/<key>.map         only the layers used by this PCell, for strmout -map
+    config_<key>.json             for the evaluation scripts (layers/text/limits/emx/calibre)
 
-JSON 结构见 data/tech/smic55ll_ulp_rf.json。校验项：
-  * stack_order 里的金属必须在 metals 中定义；
-  * 每个 via 的 lower/upper 必须是 stack_order 里相邻的一对；
-  * defaults.metal_main 必须在 metal_aux 之上，且两者之间通孔链完整。
+See data/tech/smic55ll_ulp_rf.json for the JSON structure. Checks:
+  * every metal in stack_order must be defined in metals;
+  * each via lower/upper must be an adjacent pair in stack_order;
+  * defaults.metal_main must be above metal_aux, with a complete via chain between them.
 """
 from __future__ import print_function
 
@@ -72,7 +73,7 @@ def validate(d):
 
 
 def _num(x):
-    """SKILL 数字字面量：整数要带小数点，避免 sprintf %f 类问题。"""
+    """SKILL numeric literal: integers need a decimal point to avoid sprintf %f issues."""
     if isinstance(x, bool):
         return "t" if x else "nil"
     if isinstance(x, int):
@@ -104,8 +105,8 @@ def emit_il(d, src_name):
 
     L = []
     w = L.append
-    w("; 自动生成，勿手改 —— 源 tech/%s，生成器 tools/gen_tech.py" % src_name)
-    w("; 加载后覆盖 librf.il 的内建缺省（SMIC55 数值即出厂默认）。")
+    w("; auto-generated, do not edit — source tech/%s, generator tools/gen_tech.py" % src_name)
+    w("; overrides librf.il built-in defaults when loaded (SMIC55 values are the factory default).")
     w("setq(librfTechName %s)" % _q(d.get("name", d["key"])))
     w("setq(librfTechLib %s)" % _q(d.get("techlib", d.get("name", d["key"]))))
     w("setq(librfTechKey %s)" % _q(d["key"]))
@@ -133,7 +134,7 @@ def emit_il(d, src_name):
         "list(%s %d %d)" % (_q(vn), v["gds"][0], v["gds"][1])
         for vn, v in vias.items()))
     w("")
-    w("; 角色表：spiral/underpass = 主/副金属，route = 副金属下方那层。")
+    w("; role table: spiral/underpass = main/aux metal, route = the layer below aux.")
     w("setq(librfTech")
     w("  list(")
     w("    list(\"spiral\" %s) list(\"underpass\" %s)" % (_q(main), _q(aux)))
@@ -184,7 +185,7 @@ def emit_il(d, src_name):
 
 
 def _balance(text):
-    """字符串与 ; 行注释之外的括号余额；用于在写盘前拦住生成错误。"""
+    """Bracket balance outside strings and ; line comments; used to catch generation errors before writing."""
     depth = 0
     in_str = False
     in_com = False
@@ -216,9 +217,9 @@ def _balance(text):
 def emit_map(d):
     order = d["stack_order"]
     metals = d["metals"]
-    L = ["; 自动生成，勿手改 —— 源 tech/%s.json，生成器 tools/gen_tech.py"
+    L = ["; auto-generated, do not edit — source tech/%s.json, generator tools/gen_tech.py"
          % d["key"],
-         "; 仅含本 PCell 用到的层；strmout -map 可直接用。"]
+         "; only layers used by this PCell; usable directly with strmout -map."]
     for nm in order:
         m = metals[nm]
         L.append("%s drawing %d %d" % (m["oa"], m["gds"][0], m["gds"][1]))
@@ -276,8 +277,8 @@ def emit_eval(d):
             "lead_match": 1.0,
         },
         "expect": {"ports": ["p01", "p02"]},
-        # 层角色表：评估器按用例的 metal_main/metal_aux 重新解析，
-        # 非默认金属对也能查对层、算对包络阈值。
+        # Layer role table: the consumer re-parses metal_main/metal_aux per case,
+        # so non-default metal pairs also resolve the correct layers and envelope limits.
         "defaults": {"metal_main": main, "metal_aux": aux},
         "stack": {
             "order": list(order),
@@ -304,13 +305,13 @@ def emit_eval(d):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="工艺档 JSON -> SKILL/映射/评估配置")
+    ap = argparse.ArgumentParser(description="Tech profile JSON -> SKILL / layermap / eval config")
     ap.add_argument("tech_json")
     ap.add_argument("--out-dir", default=os.path.join(DATA, "tech"))
     ap.add_argument("--map-dir", default=os.path.join(DATA, "stream"))
     ap.add_argument("--eval-config", default=None,
-                    help="写出评估配置（缺省不写）")
-    ap.add_argument("--check", action="store_true", help="只校验，不写文件")
+                    help="write an eval config (omitted by default)")
+    ap.add_argument("--check", action="store_true", help="validate only, write nothing")
     a = ap.parse_args(argv)
     d = load(a.tech_json)
     errs = validate(d)

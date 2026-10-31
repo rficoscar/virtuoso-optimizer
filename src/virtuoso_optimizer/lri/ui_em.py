@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui_em — 版图页、EM 页与注册钩子（tkinter 为局部导入）。"""
+"""lri.ui_em — layout page, EM page and registration hooks (tkinter imported locally)."""
 from __future__ import print_function
 
 import json
@@ -31,20 +31,20 @@ from .layout import (
 
 
 def _disp_cols(text):
-    """显示宽度（CJK 宽字符按 2 列），用于对齐表单标签。"""
+    """Display width (CJK wide characters count as 2 columns) for aligning form labels."""
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
                for ch in str(text))
 
 
-# 版图页主表单只放常用字段（对齐 08c 的使用逻辑）；
-# 其余高级字段收进「高级…」窗口，功能和配置往返不变。
+# The Layout page main form shows only common fields (matching the 08c workflow);
+# advanced fields live in the "Advanced..." window; behavior and config round-tripping are unchanged.
 GEOM_PRIMARY = {
     "ind": ("kind", "shape", "seam", "n", "w", "s", "dout", "ct"),
 }
 
 
 class _TabBase(object):
-    """版图页/EM 页共用：表单、日志、滚动、后台任务。"""
+    """Shared by the layout and EM pages: forms, log, scrolling, background tasks."""
     label_cols = 22
     def __init__(self, gui, parent, state=None):
         self.gui = gui
@@ -59,7 +59,7 @@ class _TabBase(object):
     @_busy.setter
     def _busy(self, value):
         self._state["busy"] = bool(value)
-    # ---- 基础控件 ----
+    # ---- basic widgets ----
     def _row(self, parent, pady=2):
         f = self.ttk.Frame(parent)
         f.pack(fill="x", pady=pady)
@@ -73,7 +73,7 @@ class _TabBase(object):
         self.ttk.Entry(r, textvariable=var, width=width).pack(side="left", padx=4)
         return var
     def _fit_form_labels(self):
-        """把本页所有表单标签宽度统一到最长标签，避免中文被截断。"""
+        """Normalize form label widths to the longest label on this page so text is not truncated."""
         labs = []
         def walk(widget):
             for child in widget.winfo_children():
@@ -105,7 +105,7 @@ class _TabBase(object):
         widget.insert("end", msg if msg.endswith("\n") else msg + "\n")
         widget.see("end")
     def _scrollable(self, parent, height=None):
-        """返回 (inner, outer)：纵向滚动容器，鼠标在容器内即可滚轮。"""
+        """Return (inner, outer): a vertical scroll container that reacts to the wheel anywhere inside."""
         tk, ttk = self.tk, self.ttk
         outer = ttk.Frame(parent)
         kw = {"highlightthickness": 0, "borderwidth": 0}
@@ -131,14 +131,14 @@ class _TabBase(object):
                     and cy <= e.y_root <= cy + canvas.winfo_height())
 
         def _active():
-            # bind_all 会对所有页生效；只有当前显示的页才响应滚轮。
+            # bind_all applies to every page; only the currently visible page reacts to the wheel.
             try:
                 return bool(canvas.winfo_ismapped())
             except Exception:
                 return False
 
         def _on_scroller(e):
-            # 滚轮落在日志/树表这类自带滚动的控件上时，只滚该控件。
+            # When the wheel is over a widget with its own scrolling (log/tree), scroll only that widget.
             try:
                 w = e.widget
                 while w is not None:
@@ -186,7 +186,7 @@ class _TabBase(object):
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         return inner, outer
-    # ---- 工艺 / 后台任务 ----
+    # ---- process / background tasks ----
     def _collect_tech(self):
         tab = getattr(self.gui, "tech_tab", None)
         if tab is not None and hasattr(tab, "collect_tech"):
@@ -234,7 +234,7 @@ class _TabBase(object):
 
 
 class _LayoutTab(_TabBase):
-    """版图页：器件类型 + 几何表单 + 示意图 + 出图/截图（对齐 08c）。"""
+    """Layout page: device type + geometry form + sketch + run/screenshot."""
 
     def __init__(self, gui, parent, state=None):
         self.em_tab = None
@@ -249,7 +249,7 @@ class _LayoutTab(_TabBase):
         outer.pack(fill="both", expand=True)
         f = body
 
-        # --- cds.lib：默认 = 设计页工作目录/cds.lib；工艺检查用 ---
+        # --- cds.lib: default = design-page work dir / cds.lib; used by the process check ---
         rc = self._row(f)
         lab = self.ttk.Label(rc, text="cds.lib 路径", anchor="w",
                              width=self.label_cols)
@@ -272,7 +272,7 @@ class _LayoutTab(_TabBase):
         except Exception:
             pass
 
-        # --- 器件类型：切换即自动重载几何表单 ---
+        # --- device type: changing it reloads the geometry form ---
         r = self._row(f)
         lab = self.ttk.Label(r, text="器件类型", anchor="w",
                              width=self.label_cols)
@@ -287,7 +287,7 @@ class _LayoutTab(_TabBase):
         self.ttk.Button(r, text="预设…", command=self._preset_dialog).pack(
             side="left", padx=6)
 
-        # --- 几何表单 + 示意图 ---
+        # --- geometry form + sketch ---
         mid = self.ttk.Frame(f)
         mid.pack(fill="x", pady=2)
         self.geom_frame = self.ttk.Frame(mid)
@@ -301,7 +301,7 @@ class _LayoutTab(_TabBase):
         self._rebuild_geom()
 
         self.a_cell = self._entry(f, "cell 名", "")
-        # EM 频率在 EM 页；工作目录用设计页 work_dir
+        # EM frequencies live on the EM page; the work directory comes from the design-page work_dir
         self.a_views = self.tk.StringVar(value="emx")
         r3 = self._row(f)
         lab = self.ttk.Label(r3, text="views 模式", anchor="w",
@@ -324,7 +324,7 @@ class _LayoutTab(_TabBase):
         self.a_log.pack(fill="both", expand=True, pady=4)
         self._fit_form_labels()
 
-    # ---- cds.lib 自动 + 手改保护 ----
+    # ---- cds.lib auto-sync + manual-edit protection ----
     def _browse_cdslib(self):
         try:
             from tkinter import filedialog
@@ -346,7 +346,7 @@ class _LayoutTab(_TabBase):
         except Exception:
             return ""
     def _sync_cdslib_from_design(self):
-        """cds.lib 默认 = 设计页工作目录/cds.lib；手改过就不覆盖。"""
+        """cds.lib default = design-page work dir / cds.lib; never overwrite after a manual edit."""
         if self._cdslib_dirty:
             return
         wd = self._design_workdir()
@@ -357,7 +357,7 @@ class _LayoutTab(_TabBase):
             return
         cur = self.a_cdslib.get().strip()
         if cur and cur != self._cdslib_auto_last:
-            # 载入配置带来的自定义值：保留，后续不再自动覆盖
+            # Custom values loaded from a config are kept and never overwritten automatically.
             self._cdslib_dirty = True
             return
         self._cdslib_auto_last = val
@@ -367,7 +367,7 @@ class _LayoutTab(_TabBase):
         finally:
             self._cdslib_loading = False
 
-    # ---- 几何表单 / 示意图 ----
+    # ---- geometry form / sketch ----
     def _rebuild_geom(self):
         for child in self.geom_frame.winfo_children():
             child.destroy()
@@ -413,7 +413,7 @@ class _LayoutTab(_TabBase):
         self._fit_form_labels()
 
     def _geom_advanced(self):
-        """高级几何参数：不常用的字段收进单独窗口，保持表单简洁。"""
+        """Advanced geometry parameters: less common fields go into a separate window to keep the form compact."""
         win = getattr(self, "_adv_win", None)
         if win is not None:
             try:
@@ -468,7 +468,7 @@ class _LayoutTab(_TabBase):
             except Exception:
                 pass
     def _draw_geom_sketch(self, typ):
-        """器件几何示意图，标注参数名（tl/xfmr/cpl 与 08c 一致）。"""
+        """Device geometry sketch with parameter labels (tl/xfmr/cpl)."""
         c = getattr(self, "sketch", None)
         if c is None:
             return
@@ -534,7 +534,7 @@ class _LayoutTab(_TabBase):
             c.create_text(140, 100, text="(no sketch)", fill="#888888",
                           font=("fixed", 10))
 
-    # ---- 预设 ----
+    # ---- presets ----
     def _preset_dialog(self):
         win = self.tk.Toplevel(self.root)
         win.title("套用预设")
@@ -569,7 +569,7 @@ class _LayoutTab(_TabBase):
             self._draw_geom_sketch(p["type"])
             return
 
-    # ---- 出图 ----
+    # ---- run layout ----
     def _collect_geom(self):
         raw = {k: v.get() for k, v in self.geom_vars.items()}
         return form_to_geom(self.a_type.get(), raw)
@@ -673,7 +673,7 @@ class _LayoutTab(_TabBase):
 
 
 class _EmOptTab(_TabBase):
-    """EM 页：EM 仿真 + EM 优化迭代（版图部分已拆到「版图」页）。"""
+    """EM page: EM simulation + EM optimization loop (layout parts moved to the Layout page)."""
     def _build(self, parent):
         nb = self.ttk.Notebook(parent)
         nb.pack(fill="both", expand=True)
@@ -688,7 +688,7 @@ class _EmOptTab(_TabBase):
         outer_c.pack(fill="both", expand=True)
         self._build_c(body_c)
     def _sync_proc_label(self):
-        """proc 只在「工艺」页填写；这里只读同步显示。"""
+        """proc is filled on the Process page; here it is read-only and mirrored for display."""
         path = ""
         try:
             tab = getattr(self.gui, "tech_tab", None)
@@ -1050,7 +1050,7 @@ class _CurveCanvas(object):
                                 highlightbackground="#cccccc")
         self.series = []
         self.srf = None
-        # 空图也画提示，避免一块空白面板看起来像多余控件。
+        # Draw a hint even when empty so a blank panel does not look like a stray widget.
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
     def pack(self, **kw):
         self.canvas.pack(**kw)

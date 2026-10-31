@@ -54,7 +54,7 @@ def audit(kind, path=None, detail=""):
             pass
     return rec
 
-def open(file, mode="r", *args, **kwargs):  # noqa: A001 - 有意覆盖内建 open
+def open(file, mode="r", *args, **kwargs):  # noqa: A001 - intentionally shadows builtin open
     if "b" not in mode:
         if "encoding" not in kwargs:
             kwargs["encoding"] = "utf-8"
@@ -1188,7 +1188,7 @@ class SpaceAdapter(object):
             f = F[0] if (F and isinstance(F[0], (list, tuple))) else F
             if isinstance(f, (list, tuple)):
                 f = sum(f)
-        self.inner.tell([z], [f], [list(G)] if G else None)  # G 必须包一层
+        self.inner.tell([z], [f], [list(G)] if G else None)  # G must be wrapped in a function
 
     def snapshot(self):
         return {"name": self.name, "inner": self.inner.snapshot()}
@@ -1658,7 +1658,7 @@ class RealRunner:
         self.sim_proc = None
         self._cleanup_helpers(proc.pid)
         self._compact_after_spectre(iter_dir, new_text, line, patch_report)
-        # 成败只看 psf 非空；spectre 退出码不可信（DC 不收敛但 sp 结果仍会写出）
+        # Success is judged by a non-empty psf; the spectre exit code is unreliable (DC may not converge while sp results are still written)
         psf_dir = os.path.join(iter_dir, "psf")
         if not os.path.isdir(psf_dir) or not os.listdir(psf_dir):
             return self._fail(f"spectre exit {proc.returncode}, no psf output")
@@ -1979,7 +1979,7 @@ def resolve_run_dir(cfg, resume=False, prev=None):
         run_dir = make_run_dir(_base_of_run_dir(base), circuit_id(cfg))
     return run_dir, (base, auto, run_dir)
 
-def _archive_aside(path):  # 只改名归档，不删除
+def _archive_aside(path):  # Rename for archiving; never delete
     if not os.path.exists(path):
         return None
     dst = "%s.old-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
@@ -2048,7 +2048,7 @@ def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
             json.dump(meta, f, indent=2, ensure_ascii=False)
         return meta
     if os.path.isfile(base_path):
-        try:  # 仅当 base+params_line 能逐字节重建 full_text 才归档 input.scs
+        try:  # Archive input.scs only when base+params_line reproduces full_text byte for byte
             rebuilt, replaced = rewrite_netlist_parameters(
                 _read_text(base_path), params_line)
             base_ok = bool(replaced) and _sha1_text(rebuilt) == sha
@@ -2954,7 +2954,7 @@ class Optimization:
         return True
     def _write_snapshot(self):
         try:
-            # events 计数必须与 algo 状态同一时刻；续跑从该下标回放
+            # The events index must refer to the same moment as the algorithm state; resume replays from that index
             self.journal.snapshot({
                 "algo": self.algo.snapshot(),
                 "best_total": self.best.total,
@@ -3141,7 +3141,7 @@ def load_config(path):
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     base = os.path.dirname(os.path.abspath(path))
-    # state_dir 相对路径以配置文件目录为基准
+    # Relative state_dir paths are resolved against the config file directory
     for key in ("state_dir",):
         value = cfg.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -3560,16 +3560,6 @@ EXAMPLE_CFG = {
         {'init': '100f', 'max': '200f', 'min': '50f', 'name': 'cin'}],
 }
 
-def run_selftests():
-    here = os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))
-    path = os.path.join(here, "tests", "test_optimizer.py")
-    if not os.path.isfile(path):
-        print("本包未附带单测（%s）；完整回归请在开发仓库运行。" % path,
-              file=sys.stderr)
-        return 2
-    return subprocess.call([sys.executable, path])
-
 def _warn_ascii_filesystem():
     enc = (sys.getfilesystemencoding() or "").lower()
     if enc in ("ascii", "us-ascii",
@@ -3638,8 +3628,6 @@ def main():
     ap.add_argument("--max-iter", type=int, default=None)
     ap.add_argument("--dump-state", action="store_true",
                     help="parse ADE state and exit")
-    ap.add_argument("--selftest", action="store_true",
-                    help="run the regression tests and exit")
     ap.add_argument("--reconstruct", nargs="+", metavar="ARG",
                     help="rebuild input.scs from a compact run dir: "
                          "--reconstruct RUN_DIR [INDEX [DEST]]")
@@ -3658,15 +3646,13 @@ def main():
     ap.add_argument("--em-tol", type=float, default=None,
                     help="curve match tolerance (default 0.1)")
     args = ap.parse_args()
-    if args.selftest:
-        sys.exit(1 if run_selftests() else 0)
     if args.reconstruct:
         sys.exit(_cli_reconstruct(args.reconstruct))
     if args.gui or args.gui_smoke:
         from .gui import run_gui
         sys.exit(run_gui(args.config, smoke=args.gui_smoke))
     if not args.config:
-        # 无参数直接进图形界面：这是面向射频工程师的唯一入口。
+        # No arguments: open the GUI directly. This is the only entry point for RF engineers.
         from .gui import run_gui
         sys.exit(run_gui(None))
     cfg = load_config(args.config)

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""gui.py — 图形界面门面。
+"""gui.py — graphical interface facade.
 
-1.6.0 起实现拆分到 lri/ui/；包内 `from virtuoso_optimizer.gui import ...`
-与命令行 `python optimizer.py --gui` 均保持不变。
+The implementation lives in lri/ui/. In-package imports
+`from virtuoso_optimizer.gui import ...` and `python optimizer.py --gui`
+keep working unchanged.
 """
 from __future__ import print_function
 
@@ -13,6 +14,6 @@ from .lri.ui.reports import *  # noqa: F401,F403
 from .lri.ui.tech_tab import *  # noqa: F401,F403
 from .lri.ui.main import *  # noqa: F401,F403
 
-from .lri.ui.main import (  # noqa: F401 - 下划线接口的兼容再导出
+from .lri.ui.main import (  # noqa: F401 - compatibility re-export of underscore-prefixed names
     OptimizerGui, PlotCanvas, _MANAGED_CFG_KEYS, _SET_DEFAULTS, _TechTab, run_gui)
 from .lri.ui.reports import _var_extra_drop, _var_extra_rename  # noqa: F401

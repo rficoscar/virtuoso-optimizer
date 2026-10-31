@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""按文件生成可一次全选复制的落盘脚本（gzip+base64）。
+"""Generate per-file copy-paste scripts (gzip+base64).
 
-用法: python make_file_kit.py [--repo DIR] [--out DIR]
-产物: put__<path>.sh（每个文件一个）、check_files.sh、MANIFEST.txt
+Usage: python make_file_kit.py [--repo DIR] [--out DIR]
+Output: put__<path>.sh (one per file), check_files.sh, MANIFEST.txt
 """
 import argparse, base64, gzip, hashlib, os, subprocess, sys
 

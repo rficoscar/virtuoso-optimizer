@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.reports — 库统计、EM 报告与网表/对齐事件文本。"""
+"""lri.ui.reports — library stats, EM reports and netlist/alignment event text."""
 from __future__ import print_function
 
 import glob

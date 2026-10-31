@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer 图形界面入口。
+"""Virtuoso Optimizer graphical entry point.
 
-用法：`python3 optimizer.py`（直接打开界面）。实现位于
-src/virtuoso_optimizer/。
+Usage: `python3 optimizer.py` (opens the GUI directly). The implementation
+lives in src/virtuoso_optimizer/.
 """
 import os
 import sys

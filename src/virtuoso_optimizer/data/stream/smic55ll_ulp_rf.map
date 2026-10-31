@@ -1,5 +1,5 @@
-; 自动生成，勿手改 —— 源 tech/smic55ll_ulp_rf.json，生成器 tools/gen_tech.py
-; 仅含本 PCell 用到的层；strmout -map 可直接用。
+; auto-generated, do not edit — source tech/smic55ll_ulp_rf.json, generator tools/gen_tech.py
+; only layers used by this PCell; usable directly with strmout -map.
 M1 drawing 61 0
 M2 drawing 62 0
 M3 drawing 63 0

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""校验 kit 目录：安装脚本为纯 ASCII、单片不超过上限、分片/整包 sha 与 MANIFEST 一致。
+"""Validate a kit directory: install scripts are pure ASCII, chunks stay under the limit,
+and chunk/archive SHA-256 values match MANIFEST.
 
-用法: python verify_kit.py KIT_DIR [KIT_DIR ...] [--limit 240000]
+Usage: python verify_kit.py KIT_DIR [KIT_DIR ...] [--limit 240000]
 """
 import argparse, glob, hashlib, os, re, sys
 

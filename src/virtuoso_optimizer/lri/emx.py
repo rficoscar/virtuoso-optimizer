@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.emx — EMX 命令行构建、sNp 校验与运行。"""
+"""lri.emx — EMX command-line setup, sNp validation and execution."""
 from __future__ import print_function
 
 import math

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.plots — 曲线画布与配色/数值格式工具。"""
+"""lri.ui.plots — curve canvas and color/number formatting helpers."""
 from __future__ import print_function
 
 import math

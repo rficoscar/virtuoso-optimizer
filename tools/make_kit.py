@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""把仓库打包成可经剪贴板/共享目录传输的 base64 分片。
+"""Pack the repository into base64 chunks that can travel by clipboard or shared folder.
 
-用法:
+Usage:
   python make_kit.py [--repo DIR] [--out DIR] [--limit 20000] [--format xz|gz] [--probes]
 
-产物:
-  kit.tar.xz / kit.tar.gz     完整压缩包
-  paste_001.sh ...            每片一个剪贴板块（heredoc，直接粘贴即可）
-  unpack.sh                   服务器端重建脚本（粘贴一次）
-  MANIFEST.txt                分片校验和与重建命令
-  probes/probe_08k.sh ...     粘贴上限标定用
+Output:
+  kit.tar.xz / kit.tar.gz     full compressed archive
+  paste_001.sh ...            one clipboard block per chunk (heredoc, paste directly)
+  unpack.sh                   server-side rebuild script (paste once)
+  MANIFEST.txt                chunk checksums and rebuild commands
+  probes/probe_08k.sh ...     paste-size calibration
 
-默认排除单元测试（tests/、lri/selftest_librf.py）、开发文档（docs/）与剪贴板
-传输脚本本身（release/）：交付包只带运行时功能，完整回归与文档留在开发仓库。
-用 --include-tests / --include-docs 可以打回去。
+By default the self-test module (lri/selftest_librf.py) and the clipboard
+transfer scripts themselves (release/) are excluded: the delivery kit carries
+only runtime functionality. Use --include-tests / --include-docs to add them back.
 """
 import argparse, base64, fnmatch, gzip, hashlib, io, lzma, os, subprocess, sys, tarfile
 
@@ -31,10 +31,10 @@ r.destroy()
 def sh(cmd, cwd=None):
     return subprocess.check_output(cmd, cwd=cwd)
 
-# 交付包不含单测：测试文件只在开发仓库里，运行时功能不依赖它们。
-TESTS_EXCLUDE = ("tests/*", "src/virtuoso_optimizer/lri/selftest_librf.py")
-# 交付包不含随附文档与传输脚本：README/LICENSE 留着，开发文档与 release/ 只在仓库里。
-DOCS_EXCLUDE = ("docs/*", "release/*")
+# The delivery kit excludes the self-test module: runtime does not depend on it.
+TESTS_EXCLUDE = ("src/virtuoso_optimizer/lri/selftest_librf.py",)
+# The delivery kit excludes the transfer scripts themselves: release/ lives only in the repository.
+DOCS_EXCLUDE = ("release/*",)
 
 def repo_files(repo):
     out = sh(["git", "-C", repo, "ls-files", "-z"])
@@ -99,9 +99,9 @@ def main():
     ap.add_argument("--probes", action="store_true")
     ap.add_argument("--exclude", default="", help="comma-separated paths or glob patterns to drop")
     ap.add_argument("--include-tests", action="store_true",
-                    help="把单元测试与 fixtures 也打进包（默认排除）")
+                    help="include the self-test module (excluded by default)")
     ap.add_argument("--include-docs", action="store_true",
-                    help="把 docs/ 与 release/ 也打进包（默认排除）")
+                    help="include release/ (excluded by default)")
     a = ap.parse_args()
 
     repo = os.path.abspath(a.repo)
@@ -168,9 +168,9 @@ def main():
     man.append("files: %d  raw_tar: %d  %s: %d  base64: %d chars" % (
         len(files), len(raw), ext, len(blob), len(text)))
     man.append("tests: %s" % ("included" if a.include_tests else
-                              "excluded (tests/, src/virtuoso_optimizer/lri/selftest_librf.py)"))
+                              "excluded (src/virtuoso_optimizer/lri/selftest_librf.py)"))
     man.append("docs: %s" % ("included" if a.include_docs else
-                             "excluded (docs/, release/)"))
+                             "excluded (release/)"))
     man.append("chunks: %d at limit %d chars/paste" % (len(parts), a.limit))
     man.append("blob sha256: %s" % sha(blob))
     man.append("")

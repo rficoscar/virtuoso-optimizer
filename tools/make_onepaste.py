@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""把 make_kit.py 的分片脚本合并成“最少粘贴次数”的安装脚本。
+"""Merge make_kit.py chunk scripts into install scripts with the fewest pastes.
 
-用法: python make_onepaste.py --kit DIR --ext gz|xz
-产物: paste_XXX_install.sh —— 每片一个；最后一片自动附带校验+解包，粘完即装好
+Usage: python make_onepaste.py --kit DIR --ext gz|xz
+Output: paste_XXX_install.sh -- one per chunk; the last one verifies and unpacks automatically.
 """
 import argparse, glob, hashlib, os, re
 

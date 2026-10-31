@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.skillio — SKILL 驱动生成、结果解析、视图与 strmout/cds.lib。"""
+"""lri.skillio — SKILL-driven generation, result parsing, views and strmout/cds.lib."""
 from __future__ import print_function
 
 import os

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.main — 主窗口 OptimizerGui 与 run_gui 入口。"""
+"""lri.ui.main — OptimizerGui main window and run_gui entry point."""
 from __future__ import print_function
 
 import glob
@@ -363,12 +363,12 @@ class OptimizerGui:
         self.notebook.add(tab, text="设计")
         self.design_tab = tab
         self.fields = {}
-        # name 不再出现在表单里：保留隐藏变量供旧配置往返。
+        # name is no longer shown in the form: kept as a hidden variable for round-tripping old configs.
         self.fields["name"] = self.tk.StringVar()
-        # 网表视图/网表根目录只在「高级…」里出现，避免主表单堆字段。
+        # Netlist view / netlist root appear only in "Advanced..." to keep the main form uncluttered.
         self.fields["netlist_view"] = self.tk.StringVar(value="schematic")
         self.fields["sim_root"] = self.tk.StringVar()
-        # virtuoso 程序由环境页维护；这里保留同名变量。
+        # The virtuoso program is maintained on the Environment page; keep a variable of the same name here.
         self.fields["virtuoso_bin"] = self.tk.StringVar(value="virtuoso")
         keys = [
             ("library", "库"), ("cell", "单元"),
@@ -454,7 +454,7 @@ class OptimizerGui:
             self.ttk.Label(body, text=label, anchor="e").grid(
                 row=i, column=0, sticky="e", padx=(4, 8), pady=3)
             if chs and key == "netlist_view":
-                # 空值表示跟随主表单的「视图」；下拉里写明这一点，别让它看着像待填的空栏。
+                # An empty value means "follow the main form's view"; say so in the dropdown so it does not look like a blank required field.
                 disp = self.tk.StringVar()
                 cur = self.fields[key].get().strip()
                 disp.set(cur if cur in chs else "跟随「视图」")

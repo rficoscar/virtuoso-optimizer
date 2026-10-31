@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.layout — 电感几何内核（i3/对称/单端）、DRC 校验与表单映射。"""
+"""lri.layout — inductor geometry kernel (i3/symmetric/single-ended), DRC checks and form mapping."""
 from __future__ import print_function
 
 import math
@@ -247,7 +247,7 @@ def lri_norm_geom(g):
     else:
         is_sym = False
     if is_sym:
-        # 参数集：rx/ry（缺省由 dout 推出）、n/w/s、chamfer、lead_*。
+        # Parameter set: rx/ry (defaults derived from dout), n/w/s, chamfer, lead_*.
         dout = float(g.get("dout", g.get("W", 160.0)))
         rx = float(g.get("rx") or dout / 2.0)
         ry = float(g.get("ry") or dout / 2.0)
@@ -341,7 +341,7 @@ def _drc_veto(w, s, tech=None):
     return None
 
 def _wide_space_veto(s, lead_gap, tech=None):
-    """差分两臂与两条引线都是独立多边形：s / lead_gap 须 >= 该层宽金属间距。"""
+    """Both differential arms and both leads are separate polygons: s / lead_gap must be >= the wide-metal spacing for this layer."""
     try:
         drc = tech_drc(tech) or {}
         ws = drc.get("wide_space") or {}
@@ -547,16 +547,16 @@ def lri_sym_min_dout(n, w, s):
     Rlast = max(r1, r2, r3, 0.0)
     return 2.0 * (Rlast + (N - 1) * p + w / 2.0)
 
-# ---------------------------------------------------------------- i3 内核
-# 二代对称电感：rx/ry 独立、任意整数圈、可调切角、可调差分引线。
-# 与 SKILL lriI3Rings/HalfR/Arm/BuildSym 逐行对应；规格见
-# DEVELOPMENT_GUIDE §11.2。
+# ---------------------------------------------------------------- i3 kernel
+# Second-generation symmetric inductor: independent rx/ry, any integer turns,
+# adjustable chamfer and differential leads. Line-by-line counterpart of SKILL
+# lriI3Rings/HalfR/Arm/BuildSym; see the SKILL source for the specification.
 SYM_I3_WEDGE_MIN = 2.6
 
 SYM_I3_DELTA_FRAC = 0.5
 
 def lri_i3_rings(rx, ry, w, s, n_turns, chamfer):
-    """平行内偏移环族 -> (rings, p, N)，ring=(a,b,c)。"""
+    """Parallel inward-offset ring family -> (rings, p, N), ring=(a,b,c)."""
     if rx <= 0.0 or ry <= 0.0 or w <= 0.0 or s <= 0.0:
         raise ValueError("rx/ry/w/s 必须 > 0")
     if abs(float(n_turns) - round(float(n_turns))) > 1e-6:
@@ -613,7 +613,7 @@ def lri_i3_via_span(w, cut, sp, encl):
 
 def lri_i3_arm(rings, p, N, xj, w, s, side, via_edge, stub,
                delta_frac=SYM_I3_DELTA_FRAC):
-    """单臂 -> (tops, unders, vias, trim_pts)。边为扁平通孔点表。"""
+    """Single arm -> (tops, unders, vias, trim_pts). Edges are flat via point lists."""
     halfs = []
     for k, (a, b, c) in enumerate(rings):
         seg = (lri_i3_half_r(a, b, c, xj) if k % 2 == 0
@@ -665,7 +665,7 @@ def lri_i3_arm(rings, p, N, xj, w, s, side, via_edge, stub,
 
 def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
                  lead_len=20.0, lead_gap=None, lead_w=None, ct=0):
-    """完整二代对称电感 -> dict（metal/under/vias/ports/bbox）。"""
+    """Complete second-generation symmetric inductor -> dict (metal/under/vias/ports/bbox)."""
     rings, p, N = lri_i3_rings(rx, ry, w, s, n, chamfer)
     a0, b0, _c0 = rings[0]
     xj = p / 2.0
@@ -825,8 +825,9 @@ def lri_build_ind(g):
            "bx": W, "by": H, "kind": kind}
 
     if kind == "sym":
-        # 二代内核：rx/ry 独立（缺省由 dout 推出）、任意整数圈、可调切角、
-        # 可调差分引线；与 SKILL lriI3BuildSym 同几何。
+        # Second-generation kernel: independent rx/ry (defaults derived from dout),
+        # any integer turns, adjustable chamfer and differential leads; same
+        # geometry as SKILL lriI3BuildSym.
         dout = float(g.get("dout", W))
         rx = float(g.get("rx", dout / 2.0))
         ry = float(g.get("ry", dout / 2.0))
@@ -931,7 +932,7 @@ def lri_draw_sketch(c, raw):
     W, H = geo["bx"], geo["by"]
     w = float(g["w"])
     wu = w
-    # 把端口引出线/下穿也计入范围，避免示意图被 Canvas 边缘裁掉
+    # Include port leads and underpasses in the bounding box so the sketch is not clipped by the canvas edge
     xs, ys = [-W / 2.0, W / 2.0], [-H / 2.0, H / 2.0]
     for _name, _pt in geo["ports"]:
         xs.append(_pt[0])
@@ -998,7 +999,7 @@ def lri_draw_sketch(c, raw):
         x, y = tx(pt)
         col = "#b02020" if name.startswith("ct") else "#0a7d33"
         c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=col, outline="")
-        # 端口名放圆点旁边，避免压住尺寸线或金属
+        # Place port names beside the dots so they do not cover dimension lines or metal
         if x >= cx:
             c.create_text(x + 7, y, text=name, fill=col,
                           font=("fixed", 7), anchor="w")

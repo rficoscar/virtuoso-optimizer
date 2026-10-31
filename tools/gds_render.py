@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""gds_render.py -- GDSII -> PNG 渲染器（验证/目视用，纯标准库 + PIL）
+"""gds_render.py -- GDSII -> PNG renderer (for verification/visual checks; stdlib + PIL)
 
-用法: python3 gds_render.py in.gds out.png [--scale N] [--dpi D]
-只画 BOUNDARY/PATH/BOX，sref/aref 忽略（本工具链产出为平铺图形）。
-层配色按 XMC 55RFSOI 习惯（层号->颜色），未知层灰色。
+Usage: python3 gds_render.py in.gds out.png [--scale N] [--dpi D]
+Draws BOUNDARY/PATH/BOX only; sref/aref are ignored (this toolchain emits flat geometry).
+Layer colors follow XMC 55RFSOI conventions (layer number -> color); unknown layers are gray.
 """
 from __future__ import print_function
 import struct
@@ -43,7 +43,7 @@ RT_PATHTYPE = 0x21
 RT_BOX = 0x2D
 RT_BOXTYPE = 0x2E
 
-# 层号 -> 颜色 (XMC 55RFSOI)
+# Layer number -> color (XMC 55RFSOI)
 LAYER_COLORS = {
     61: (80, 120, 200),    # M1
     70: (200, 160, 60),    # V1
@@ -60,7 +60,7 @@ LAYER_COLORS = {
     175: (150, 90, 160),   # MIMT
     132: (100, 100, 100),  # IND marker
 }
-# 文字层 (dat=5) 画亮青
+# Text layers (dat=5) drawn in bright cyan
 TXT_COLOR = (0, 220, 220)
 
 
@@ -97,8 +97,8 @@ def render(gds_path, png_path, scale=None):
     units_user = 1e-6
     for rt, dt, payload in read_records(gds_path):
         if rt == RT_UNITS and len(payload) >= 16:
-            # 两个 8 字节 real：user_unit/meter, db_unit/meter
-            # GDS real: 8 字节 excess-64 浮点
+            # Two 8-byte reals: user_unit/meter, db_unit/meter
+            # GDS real: 8-byte excess-64 float
             def gds_real(b):
                 e = b[0] & 0x7F
                 sign = -1.0 if (b[0] & 0x80) else 1.0

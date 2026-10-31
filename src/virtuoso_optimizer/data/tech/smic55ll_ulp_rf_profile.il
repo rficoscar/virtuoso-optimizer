@@ -1,5 +1,5 @@
-; 自动生成，勿手改 —— 源 tech/smic55ll_ulp_rf.json，生成器 tools/gen_tech.py
-; 加载后覆盖 librf.il 的内建缺省（SMIC55 数值即出厂默认）。
+; auto-generated, do not edit — source tech/smic55ll_ulp_rf.json, generator tools/gen_tech.py
+; overrides librf.il built-in defaults when loaded (SMIC55 values are the factory default).
 setq(librfTechName "SMIC55LL_ULP_RF_1P8M_6Ic_1TMc_1MTTc")
 setq(librfTechLib "SMIC55LL_ULP_RF_1P8M_6Ic_1TMc_1MTTc")
 setq(librfTechKey "smic55ll_ulp_rf")
@@ -20,7 +20,7 @@ setq(librfMetalGds
 setq(librfViaGds
   list(list("V1" 70 0) list("V2" 71 0) list("V3" 72 0) list("V4" 73 0) list("V5" 74 0) list("TV1" 121 0) list("TV2" 123 0)))
 
-; 角色表：spiral/underpass = 主/副金属，route = 副金属下方那层。
+; role table: spiral/underpass = main/aux metal, route = the layer below aux.
 setq(librfTech
   list(
     list("spiral" "TM2") list("underpass" "TM1")

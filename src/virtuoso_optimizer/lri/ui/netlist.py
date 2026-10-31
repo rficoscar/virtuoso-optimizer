@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.ui.netlist — 网表分析解析、频率范围与 simset 文本生成。"""
+"""lri.ui.netlist — netlist analysis, frequency ranges and simset text generation."""
 from __future__ import print_function
 
 import os

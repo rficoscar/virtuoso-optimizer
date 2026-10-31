@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.tools — EDA 工具探测（virtuoso/strmout/emx/calibre）。"""
+"""lri.tools — EDA tool discovery (virtuoso/strmout/emx/calibre)."""
 from __future__ import print_function
 
 import os

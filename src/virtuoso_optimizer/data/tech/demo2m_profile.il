@@ -1,5 +1,5 @@
-; 自动生成，勿手改 —— 源 tech/demo2m.json，生成器 tools/gen_tech.py
-; 加载后覆盖 librf.il 的内建缺省（SMIC55 数值即出厂默认）。
+; auto-generated, do not edit — source tech/demo2m.json, generator tools/gen_tech.py
+; overrides librf.il built-in defaults when loaded (SMIC55 values are the factory default).
 setq(librfTechName "DEMO_2M_MIN")
 setq(librfTechLib "demo2m_tech")
 setq(librfTechKey "demo2m")
@@ -14,7 +14,7 @@ setq(librfMetalGds
 setq(librfViaGds
   list(list("V1" 30 0)))
 
-; 角色表：spiral/underpass = 主/副金属，route = 副金属下方那层。
+; role table: spiral/underpass = main/aux metal, route = the layer below aux.
 setq(librfTech
   list(
     list("spiral" "M2") list("underpass" "M1")

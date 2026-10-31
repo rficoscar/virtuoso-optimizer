@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.device — 器件元数据与 make_layout_emx 主流程。"""
+"""lri.device — device metadata and the make_layout_emx flow."""
 from __future__ import print_function
 
 import json

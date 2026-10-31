@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lri.snp — Touchstone 读写、S/Y/Z 变换与器件指纹。"""
+"""lri.snp — Touchstone I/O, S/Y/Z conversions and device fingerprints."""
 from __future__ import print_function
 
 import math
