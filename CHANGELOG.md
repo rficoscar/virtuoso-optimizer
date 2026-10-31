@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.5.2 — 2026-10-31
+
+差分对称电感 PCell、工艺档派生链与版图评估框架。已有版图器件与优化器行为不变；
+`VERSION` 1.5.2。
+
+- **PCell 外壳（新增 `lri_pcell.il`）**：`lriPcellDefine` 注册 `ind_sym` 并建 CDF，
+  参数 `rx`/`ry`/`n`/`w`/`s`/`chamfer`/`lead_len`/`lead_gap`/`lead_w`/`ct`/
+  `stack`/`metal_main`/`metal_aux`。`lriPcellTechSmic55`/`lriPcellTechLoad` 从
+  `tech/<key>_profile.il` 载入层角色与 DRC 数值；批处理下自动定位 `pCellGen.cxt`。
+- **几何内核（`librf.il`）**：新增对称差分内核 `lriI3BuildSym`。环族
+  `a_k=a0−kp`、`b_k=b0−kp`、`c_k=max(0,c0−k·p·(2−√2))`，横纵半径独立，每臂整数圈，
+  `chamfer` 0..1（2−√2 为正八边形）；每圈拆两条半圈路径、underpass 逐半圈交替并
+  按窗口布置通孔阵列；中心抽头走内桥中点；主/副金属可逐实例指定，`metal_main`
+  在任意堆叠金属上时由 `lriViaChain` 按 `librfStackVias` 逐级补 landing pad。
+  宽金属长平行间距门禁 `librfDrcWideSpace` 在构建期拒绝不可行参数（差分两臂与
+  两条引线是独立多边形，`s`/`lead_gap` 必须不小于各金属的 `wide_space`）。
+- **Python 侧（`librf_opt.py`）**：`lri_norm_geom` 增 sym 分支（内核的 Python 镜像），
+  `lri_validate` 校验整数圈与宽金属间距；`GEOM_FORM` 增 `stack`/`metal_main`/
+  `metal_aux` 三行，skill 注入支持工艺表；selftest 覆盖典型值与半圈拒绝。
+- **工艺档单一事实源（`tech/`、`stream/`、`tools/gen_tech.py`）**：一个
+  `tech/<key>.json` 派生 `tech/<key>_profile.il`（SKILL）、`stream/<key>.map`
+  （strmout）、`eval/config_<key>.json`（评估器）。自带 `smic55ll_ulp_rf` 与
+  `demo2m`（两层金属最小示例）；生成器校验堆叠顺序、通孔相邻性与默认金属链。
+  换工艺只改 JSON，不改 Python/SKILL。
+- **评估框架（新增 `eval/`）**：14 个模块。`skillgen.py` 用真实 SKILL PCell
+  （`virtuoso -nograph` 建 cellview + `strmout` 导 GDS，输出重定向到文件，
+  批处理 virtuoso 偶发静默退出时重试一次）；`geometry.py` 做 G0–G12 几何检查
+  （线宽/外框/间距/自交/通孔尺寸/宿主/包络/间距/标签/连通/圈数/对称/内圈净空/
+  引线一致/叠层）；`emx_runner.py` 取 L/Q/R/SRF；`calibre_runner.py` 跑 DRC/LVS；
+  `matrix.py` 的 `sym` 套件 31 例，含 6 个 `expect_fail` 不可行组合。
+- **文档**：README 增 PCell、工艺档、评估、单包迁移四节；DEVELOPMENT_GUIDE 增 §11
+  （工艺档派生契约、SKILL 内核契约、评估器契约）与回归步骤 4；迁移只出全量包一种。
+- **验证**：`--selftest` 179、`librf_opt.py --selftest` 124/0、`--gui-smoke` OK；
+  SKILL 生成 GDS 与调研参考实现逐 shape/逐 text 一致（31 shapes、3 texts、bbox 相同）；
+  `demo2m` 换工艺冒烟 PASS；Calibre DRC `geometry_clean`（仅 17 个密度检查，独立
+  单元预期）、LVS 端口同一网络；`matrix --suite sym` 31 例全部 PASS（25 例构建并
+  取 L/Q，6 例不可行组合按预期拒绝；其中 2 次批处理 virtuoso 启动段错误
+  `rc=-11` 由新增重试吸收）。叠层模式 Q 低于
+  单层是 M6 underpass 电阻的物理结果，不是几何缺陷。
+
 ## 1.5.1 — 2026-10-31
 
 纯文本剪贴板迁移工具链。无运行时行为变更；`VERSION` 1.5.1。

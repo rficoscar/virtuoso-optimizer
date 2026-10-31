@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.5.1。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.5.2。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -19,8 +19,9 @@
 | `netlist_params.py` | 1460 | 层次网表解析与参数改写 | `patch_netlist` |
 | `gui.py` | 4187 | Tk 图形界面（11 个页面） | `run_gui` |
 | `selftest.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
-| `librf.il` | 3320 | SKILL 侧：建版图、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
-| `librf_opt.py` | 4600 | 版图器件生成 / EMX 迭代（工艺侧） | `register` |
+| `librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
+| `lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
+| `librf_opt.py` | 4921 | 版图器件生成 / EMX 迭代（工艺侧），含 i3 几何镜像与工艺门禁 | `register` |
 | `em_align.py` / `em_opt.py` / `em_bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
 | `netlist_create.py` / `proc_cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
 
@@ -321,6 +322,9 @@ GUI 结果页读的是同一份 dict（`gui.py` 的 report 展示处），字段
    没有 Cadence 也能跑完主循环，看 `report.json` 里 `stop_reason`、`best_errors`、`summary` 是否合理
 3. 改网表逻辑时：拿 `inspect_netlist` 直接看解析结果，再用 `patch_netlist` 跑三组
    （默认 / 关掉子电路 / `scope_map`）对照 `counts` 与 `warnings`
+4. 改版图内核时：`python librf_opt.py --selftest`，再在装有 Virtuoso 的机器上跑
+   `python eval/bin/tech_smoke.py demo2m --config eval/config_demo2m.json`（换工艺冒烟）
+   与 `python eval/bin/cli.py matrix --suite sym`（真 SKILL 扫掠，含 expect_fail）
 
 `selftest.py` 是 `unittest` 套件，由 `run_selftests` 用 `subprocess` 起子进程跑
 （隔离 `sys.path` 与 stdout），所以新测试加在 `selftest.py`，不要塞进 `optimizer.py`。
@@ -436,18 +440,57 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片、gz 3 片；核心包 gz 1 片。
-- 每次发版重新出包并跑 `verify_kit.py`。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片、gz 3 片。
+- 只出全量包一种（全部功能，不裁剪）；每次发版重新出包并跑 `verify_kit.py`。
 
-全量包与核心包出包命令：
+出包命令：
 
 ```sh
 python3 tools/make_kit.py --repo . --out dist/kit --limit 200000 --format xz
 python3 tools/make_onepaste.py --kit dist/kit --ext xz
 python3 tools/verify_kit.py dist/kit
-
-python3 tools/make_kit.py --repo . --out dist/core --limit 200000 --format gz \
-  --exclude "tools/*,README.md,CHANGELOG.md,DEVELOPMENT_GUIDE.md,.gitignore,selftest.py,test_proc_cross_section.py,em_align.py,em_opt.py,em_bridge.py,librf.il,librf_opt.py,proc_cross_section.py"
-python3 tools/make_onepaste.py --kit dist/core --ext gz
-python3 tools/verify_kit.py dist/core
 ```
+
+## 11. PCell、工艺档与评估框架
+
+### 11.1 工艺档单一事实源
+
+`tech/<key>.json` 同时派生三份产物（`tools/gen_tech.py`）：
+
+| 产物 | 使用者 |
+|---|---|
+| `tech/<key>_profile.il` | SKILL：`lriPcellTechLoad` 加载，设置 `librfTech`、`librfTechText`、`librfDrc`、`librfStackMetals`、`librfStackVias`、`librfMetalGds`、`librfViaGds` |
+| `stream/<key>.map` | `strmout -layerMap` |
+| `eval/config_<key>.json` | 评估器（层角色、GDS 号、文字层、宽金属间距、EMX/Calibre） |
+
+生成器校验：`stack_order` 的金属必须都有定义；每个 via 的 `lower`/`upper`
+必须是 `stack_order` 中相邻的一对；`defaults.metal_main` 必须在 `metal_aux`
+之上且通孔链完整。改工艺只改 JSON，不改 Python/SKILL。
+
+### 11.2 SKILL 几何内核（lriI3BuildSym）
+
+- 参数：`rx`/`ry`（外金属半轴）、`n`（每臂圈数，必须整数）、`w`、`s`、
+  `chamfer`（0..1）、`lead_len`/`lead_gap`/`lead_w`、`ct`、`stack`、
+  `metal_main`/`metal_aux`。
+- 环族：`a_k=a0−kp`、`b_k=b0−kp`、`c_k=max(0,c0−k·p·(2−√2))`，`p=w+s`；
+  每圈拆成两条半圈路径，underpass 逐半圈交替。
+- 宽金属长平行间距：差分两臂与两条引线都是独立多边形，`s` 与 `lead_gap`
+  必须 ≥ 主/副金属的 `wide_space`（SMIC55 TM2 为 2.0，其余 0.5）。
+- 通孔链：`lriViaChain(aux, main)` 从 `librfStackVias` 逐级拼接；无叠层表时
+  退回 `via_sp` 单跳并告警；叠层模式只允许相邻金属（跨级缝合孔没有整圈宿主）。
+- PCell 默认值必须与 `lriI3BuildSym` 缺省语义一致（`lri_norm_geom` 的 sym 分支
+  是 Python 侧的镜像，两边改动必须同步）。
+
+### 11.3 评估器（eval/bin）
+
+- `skillgen.py`：`virtuoso -nograph` 建 cellview → `strmout` 导 GDS。路径用
+  `LIBRF_VIRTUOSO`、`LIBRF_STRMOUT`、`LIBRF_PDK_MAP`、`LIBRF_PCELLGEN_CXT`
+  覆盖；返回 `ret=t` 才算构建成功。
+- `geometry.py`：G0–G12 几何检查；层角色按 `config.stack` 与用例的
+  `metal_main`/`metal_aux` 重新解析，不写死层号。
+- `cli.py`：`run`/`matrix`/`emx`/`drc`/`lvs`；`matrix --suite sym` 是差分对称
+  PCell 的固定扫掠，`expect_fail` 用例被拒绝即 PASS。
+- `tech_smoke.py`：换工艺冒烟（构建 + 几何），不跑 EMX/DRC。
+
+契约：几何检查只读 GDS，不读 SKILL 内部状态；新增检查必须带 `id` 与
+`status`（pass/info/warn/fail）；`report.grade` 只把 fail 判为 FAIL。

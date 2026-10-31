@@ -1,0 +1,26 @@
+; 自动生成，勿手改 —— 源 tech/smic55ll_ulp_rf.json，生成器 tools/gen_tech.py
+; 仅含本 PCell 用到的层；strmout -map 可直接用。
+M1 drawing 61 0
+M2 drawing 62 0
+M3 drawing 63 0
+M4 drawing 64 0
+M5 drawing 65 0
+M6 drawing 66 0
+TM1 drawing 120 0
+TM2 drawing 122 0
+V1 drawing 70 0
+V2 drawing 71 0
+V3 drawing 72 0
+V4 drawing 73 0
+V5 drawing 74 0
+TV1 drawing 121 0
+TV2 drawing 123 0
+MnTXT metal1 141 0
+MnTXT metal2 142 0
+MnTXT metal3 143 0
+MnTXT metal4 144 0
+MnTXT metal5 145 0
+MnTXT metal6 146 0
+MnTXT topmetal1 120 3
+MnTXT topmetal2 122 3
+INDMY drawing 212 0

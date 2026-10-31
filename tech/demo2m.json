@@ -1,0 +1,26 @@
+{
+  "_doc": "换工艺冒烟用最小工艺档（两层金属）。故意用与 SMIC 不同的层号/规则，验证 profile/map/config 全链路；层名借用 IC618 工艺库中真实存在的 M1/M2/V1，便于实机跑通。",
+  "key": "demo2m",
+  "name": "DEMO_2M_MIN",
+  "techlib": "demo2m_tech",
+  "pdk": "",
+  "stack_order": ["M1", "M2"],
+  "defaults": {"metal_main": "M2", "metal_aux": "M1"},
+  "metals": {
+    "M1": {"oa": "M1", "gds": [10, 0], "text_oa": ["MnTXT", "metal1"],
+           "text_gds": [110, 0], "min_w": 0.2, "min_s": 0.2, "wide_space": 0.2,
+           "max_w": 10.0, "min_area": 0.0},
+    "M2": {"oa": "M2", "gds": [20, 0], "text_oa": ["MnTXT", "metal2"],
+           "text_gds": [120, 0], "min_w": 0.2, "min_s": 0.2, "wide_space": 0.2,
+           "max_w": 10.0, "min_area": 0.0}
+  },
+  "vias": {
+    "V1": {"oa": "V1", "gds": [30, 0], "lower": "M1", "upper": "M2",
+           "cut": 0.2, "space": 0.2, "enc_lo": 0.05, "enc_hi": 0.05}
+  },
+  "marker": {"oa": ["INDMY", "drawing"], "gds": [212, 0]},
+  "drc": {"min_w": 0.2, "min_s": 0.2, "max_w": 10.0,
+          "via_enclosure": 0.1, "via_st_space": 0.2, "via_st_enclosure": 0.05},
+  "emx": {},
+  "calibre": {"drc": "", "lvs": ""}
+}

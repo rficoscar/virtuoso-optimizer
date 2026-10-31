@@ -814,6 +814,72 @@ def _skill_val(v):
         return '"%s"' % v.replace("\\", "\\\\").replace('"', '\\"')
     return str(v)
 
+def _stack_il(prof):
+    """工艺档可选 stack 表 -> SKILL 的叠层全局量。
+
+    prof["stack"] 形如::
+
+        {"metals": ["M1", "M2", ...],            # 自下而上
+         "vias": {"V1": {"lower": "M1", "upper": "M2",
+                         "cut": 0.09, "space": 0.11,
+                         "enc_lo": 0.03, "enc_hi": 0.02}, ...}}
+
+    也接受顶层 stack_order + metals/vias。缺任意一段就返回空串：
+    SKILL 会退回 via_sp 角色单跳连接，不会因缺表而画错通孔。
+    """
+    prof = prof or {}
+    st = prof.get("stack") or {}
+    metals = st.get("metals") or prof.get("metals") or {}
+    order = list(st.get("order") or prof.get("stack_order") or [])
+    if not order and isinstance(metals, (list, tuple)):
+        order = list(metals)
+    vias = st.get("vias") or prof.get("vias") or {}
+    if not order or not metals:
+        return ""
+    if any(m not in metals for m in order):
+        return ""
+    vd = {}
+    if isinstance(vias, dict):
+        for name, v in vias.items():
+            if isinstance(v, dict):
+                vv = dict(v)
+                vv.setdefault("name", name)
+                vd[name] = vv
+    elif isinstance(vias, (list, tuple)):
+        for v in vias:
+            if isinstance(v, dict) and v.get("name"):
+                vd[v["name"]] = v
+
+    def _enc(v, key, alt):
+        val = v.get(key, v.get(alt, 0.0))
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows = []
+    for lo, hi in zip(order, order[1:]):
+        hit = None
+        for name, v in vd.items():
+            if v.get("lower") == lo and v.get("upper") == hi:
+                hit = (name, v)
+                break
+        if not hit:
+            return ""
+        name, v = hit
+        try:
+            cut = float(v.get("cut", 0.0))
+            space = float(v.get("space", 0.0))
+        except (TypeError, ValueError):
+            return ""
+        rows.append('    list("%s" "%s" "%s" %s %s %s %s)' % (
+            name, lo, hi, _skill_val(cut), _skill_val(space),
+            _skill_val(_enc(v, "enc_lo", "enclosure")),
+            _skill_val(_enc(v, "enc_hi", "enclosure"))))
+    return ("; 叠层表（主/副金属与逐级通孔）\n"
+            "librfStackMetals = list(%s)\n"
+            "librfStackVias = list(\n%s)\n"
+            % (" ".join('"%s"' % str(m) for m in order), "\n".join(rows)))
 def tech_to_skill(prof):
     lay = (prof or {}).get("layers") or {}
     txt = (prof or {}).get("text") or {}
@@ -833,7 +899,8 @@ def tech_to_skill(prof):
     return ("; librf_opt 注入的工艺配置（勿手改）\n"
         "librfTech = %s\n" "librfTechText = %s\n"
         "librfDrc = %s\n"
-        "librfTechLib = \"%s\"\n" % (_alist(lay), _alist(txt), _drc_alist(drc), techlib) )
+        "librfTechLib = \"%s\"\n" % (_alist(lay), _alist(txt), _drc_alist(drc), techlib)
+        + _stack_il(prof))
 def _techlib_name(prof=None):
     if prof and prof.get("techlib"):
         return prof["techlib"]
@@ -970,7 +1037,9 @@ _SKILL_STR_KEYS = ("type", "lib", "cell", "view", "shape", "underpass",
                    "snp", "kind", "libdir", "ct_dir")
 _SKILL_NUM_KEYS = ("n", "w", "s", "dout", "din", "ct", "ports", "x0", "y0",
                    "len", "gap", "np", "ns", "gnd", "fence", "cpw",
-                   "freq_hint", "overlap", "pitch", "ccw", "phi0", "ex", "ey", "ind_mark")
+                   "freq_hint", "overlap", "pitch", "ccw", "phi0", "ex", "ey",
+                   "ind_mark", "rx", "ry", "chamfer", "lead_len", "lead_gap",
+                   "lead_w", "stack")
 def skill_literal(key, value):
     if value is None:
         return "nil"
@@ -985,7 +1054,8 @@ def skill_literal(key, value):
     try:
         f = float(value)
         if f == int(f) and abs(f) < 1e15 and key in (
-                "n", "ct", "ports", "np", "ns", "gnd", "fence", "cpw", "ccw", "ind_mark"):
+                "n", "ct", "ports", "np", "ns", "gnd", "fence", "cpw", "ccw",
+                "ind_mark", "stack"):
             return str(int(f))
         s = repr(f) if abs(f) < 1e-6 or abs(f) >= 1e15 else ("%g" % f)
         if ("." not in s) and ("e" not in s) and ("E" not in s) \
@@ -1023,6 +1093,7 @@ def gen_driver_il(req, layout_il=None, tech=None):
     libdir = os.path.abspath(libdir)
     order = ["type", "lib", "cell", "view", "kind", "shape", "n", "w", "s",
              "W", "H", "corner", "seam", "tangle", "stub", "dout",
+             "rx", "ry", "chamfer", "lead_len", "lead_gap", "lead_w",
              "din", "ct", "ports", "x0", "y0", "underpass", "style", "np",
              "ns", "gap", "len", "gnd", "gnd_layer", "fence", "cpw",
              "freq_hint", "ex", "ey", "ind_mark", "ct_dir"]
@@ -2746,14 +2817,30 @@ def lri_norm_geom(g):
     else:
         is_sym = False
     if is_sym:
+        # 参数集：rx/ry（缺省由 dout 推出）、n/w/s、chamfer、lead_*。
         dout = float(g.get("dout", g.get("W", 160.0)))
-        g.update(kind="sym", dout=dout, W=dout, H=dout,
-                 w=float(g.get("w", 10.0)),
-                 s=float(g.get("s", 3.2)),
-                 n=float(g.get("n", 3.0)))
-        g["shape"] = "oct"
-        g["corner"] = 0.0
-        g["ct"] = 0
+        rx = float(g.get("rx") or dout / 2.0)
+        ry = float(g.get("ry") or dout / 2.0)
+        w = float(g.get("w", 10.0))
+        s = float(g.get("s", 3.2))
+
+        def _f(key, dflt):
+            v = g.get(key)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return dflt
+        chamfer = _f("chamfer", 2.0 - math.sqrt(2.0))
+        lead_len = _f("lead_len", 20.0)
+        lead_gap = _f("lead_gap", s)
+        lead_w = _f("lead_w", w)
+        g.update(kind="sym", dout=2.0 * rx, rx=rx, ry=ry,
+                 W=2.0 * rx, H=2.0 * ry, w=w, s=s, n=float(g.get("n", 3.0)),
+                 chamfer=chamfer, lead_len=lead_len, lead_gap=lead_gap,
+                 lead_w=lead_w)
+        g["ct"] = int(float(g.get("ct", 0) or 0))
+        g["shape"] = "oct" if chamfer > 0.0 else "rect"
+        g["corner"] = chamfer
         g["seam"] = "bottom"
         g["tangle"] = 180
         return g
@@ -2823,19 +2910,59 @@ def _drc_veto(w, s, tech=None):
             w, s, 1.5 * min_s)
     return None
 
+def _wide_space_veto(s, lead_gap, tech=None):
+    """差分两臂与两条引线都是独立多边形：s / lead_gap 须 >= 该层宽金属间距。"""
+    try:
+        drc = tech_drc(tech) or {}
+        ws = drc.get("wide_space") or {}
+        lay = (tech or {}).get("layers") or {}
+        spot = lay.get("spiral")
+        lim = None
+        if isinstance(ws, dict) and spot in ws:
+            lim = float(ws[spot])
+        elif isinstance(ws, (int, float)):
+            lim = float(ws)
+        if lim is None:
+            return None
+        if s < lim - 1e-9:
+            return "间距 s=%g 小于 %s 宽金属长平行间距 %g" % (s, spot, lim)
+        if lead_gap not in (None, ""):
+            lg = float(lead_gap)
+            if lg < lim - 1e-9:
+                return "引线间距 lead_gap=%g 小于 %s 宽金属长平行间距 %g" % (
+                    lg, spot, lim)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def lri_validate(g, tech=None):
     kind0 = str(g.get("kind", "se")).strip().lower()
     if kind0 == "sym":
         dout = float(g.get("dout", g.get("W", 160.0)))
+        rx = float(g.get("rx") or dout / 2.0)
+        ry = float(g.get("ry") or dout / 2.0)
         w = float(g.get("w", 10.0))
         s = float(g.get("s", 3.2))
         n = float(g.get("n", 3.0))
         msg = _drc_veto(w, s, tech)
         if msg:
             return False, msg
+        msg = _wide_space_veto(s, g.get("lead_gap"), tech)
+        if msg:
+            return False, msg
         try:
-            lri_sym_arm(dout, n, w, s)
-        except ValueError as exc:
+            lead_gap = g.get("lead_gap")
+            lead_gap = float(lead_gap) if lead_gap not in (None, "") else None
+            lead_w = g.get("lead_w")
+            lead_w = float(lead_w) if lead_w not in (None, "") else None
+            lri_i3_build(
+                rx, ry, n, w, s,
+                chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+                lead_len=float(g.get("lead_len", 20.0) or 20.0),
+                lead_gap=lead_gap, lead_w=lead_w,
+                ct=int(float(g.get("ct", 0) or 0)))
+        except (TypeError, ValueError) as exc:
             return False, str(exc)
         return True, ""
     W = float(g.get("W", 150.0))
@@ -2986,6 +3113,186 @@ def lri_sym_min_dout(n, w, s):
     Rlast = max(r1, r2, r3, 0.0)
     return 2.0 * (Rlast + (N - 1) * p + w / 2.0)
 
+# ---------------------------------------------------------------- i3 内核
+# 二代对称电感：rx/ry 独立、任意整数圈、可调切角、可调差分引线。
+# 与 SKILL lriI3Rings/HalfR/Arm/BuildSym 逐行对应；规格见
+# DEVELOPMENT_GUIDE §11.2。
+SYM_I3_WEDGE_MIN = 2.6
+SYM_I3_DELTA_FRAC = 0.5
+
+
+def lri_i3_rings(rx, ry, w, s, n_turns, chamfer):
+    """平行内偏移环族 -> (rings, p, N)，ring=(a,b,c)。"""
+    if rx <= 0.0 or ry <= 0.0 or w <= 0.0 or s <= 0.0:
+        raise ValueError("rx/ry/w/s 必须 > 0")
+    if abs(float(n_turns) - round(float(n_turns))) > 1e-6:
+        raise ValueError("n=%.3f 必须为整数（每臂圈数）" % float(n_turns))
+    p = w + s
+    a0, b0 = rx - w / 2.0, ry - w / 2.0
+    if min(a0, b0) <= 0.0:
+        raise ValueError("rx/ry 太小（需 > w=%.3f）" % w)
+    c0 = max(0.0, min(float(chamfer), 1.0)) * min(a0, b0)
+    N = max(1, int(round(float(n_turns))))
+    out = []
+    for k in range(N):
+        a, b = a0 - k * p, b0 - k * p
+        if min(a, b) <= w / 2.0 + 1e-9:
+            raise ValueError(
+                "第 %d 圈放不下 (a=%.2f b=%.2f)；请增大 rx/ry 或减小 n/w/s"
+                % (k, a, b))
+        c = max(0.0, c0 - k * p * (2.0 - math.sqrt(2.0)))
+        if c > min(a, b) + 1e-9:
+            raise ValueError("第 %d 圈切角 %.3f 超过半轴（减小 chamfer）"
+                             % (k, c))
+        out.append((a, b, c))
+    return out, p, N
+
+
+def lri_i3_half_r(a, b, c, xj):
+    if xj > a - c + 1e-9:
+        raise ValueError(
+            "xj=%.3f 超出顶边直段 (a-c=%.3f)；减小 w/s、增大 rx/ry 或减小 "
+            "chamfer" % (xj, a - c))
+    return [(xj, b), (a - c, b), (a, b - c), (a, c - b), (a - c, -b),
+            (xj, -b)]
+
+
+def lri_i3_half_l(a, b, c, xj):
+    return [(-x, y) for x, y in reversed(lri_i3_half_r(a, b, c, xj))]
+
+
+def lri_i3_window(w, s_req, ring_k, ring_k1, xj, via_edge, stub):
+    a, b, c = ring_k
+    a1, b1, c1 = ring_k1
+    rt2 = math.sqrt(2.0)
+    dmin = (rt2 - 1.0) * (s_req + w / 2.0)
+    dm1 = (a - c) - xj - (via_edge + stub)
+    dm2 = (a1 - c1) - w * (rt2 - 1.0) / 2.0 - xj
+    dm3 = (a - c) + s_req / 2.0 - rt2 * (w / 2.0 + s_req)
+    return dmin, min(dm1, dm2, dm3)
+
+
+def lri_i3_via_span(w, cut, sp, encl):
+    sm = w - 2.0 * encl
+    n = int(math.floor((sm + sp) / (cut + sp) + 1e-9))
+    n = max(1, n)
+    if n % 2 == 0:
+        n -= 1
+    n = max(1, n)
+    return n * cut + (n - 1) * sp, n
+
+
+def lri_i3_arm(rings, p, N, xj, w, s, side, via_edge, stub,
+               delta_frac=SYM_I3_DELTA_FRAC):
+    """单臂 -> (tops, unders, vias, trim_pts)。边为扁平通孔点表。"""
+    halfs = []
+    for k, (a, b, c) in enumerate(rings):
+        seg = (lri_i3_half_r(a, b, c, xj) if k % 2 == 0
+               else lri_i3_half_l(a, b, c, xj))
+        if side < 0:
+            seg = [(-x, y) for x, y in seg]
+        halfs.append(seg)
+    unders, vias, trim_pts = [], [], []
+    for k in range(N - 1):
+        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
+        if not under_here:
+            continue
+        dmin, dmax = lri_i3_window(w, s, rings[k], rings[k + 1], xj,
+                                   via_edge, stub)
+        if dmax < dmin - 1e-9:
+            raise ValueError(
+                "换圈 k=%d 的 45° 夹缝放不下 w=%.2f 端头（窗口 %.3f..%.3f）"
+                % (k, w, dmin, dmax))
+        delta = dmin + delta_frac * (dmax - dmin)
+        a = halfs[k][-1]
+        b = halfs[k + 1][0]
+        sa = 1.0 if a[0] >= 0.0 else -1.0
+        sb = 1.0 if b[0] >= 0.0 else -1.0
+        at = (a[0] + sa * delta, a[1])
+        bt = (b[0] + sb * delta, b[1])
+        halfs[k][-1] = at
+        halfs[k + 1][0] = bt
+        av = (at[0] + sa * via_edge, at[1])
+        bv = (bt[0] + sb * via_edge, bt[1])
+        ae = (av[0] + sa * stub, av[1])
+        be = (bv[0] + sb * stub, bv[1])
+        cc = (av[0] - sa * p, bv[1])
+        unders.append([ae, av, cc, bv, be])
+        vias.extend([av, bv])
+        trim_pts.extend([at, bt])
+    tops = []
+    run = list(halfs[0])
+    for k in range(N - 1):
+        nxt = halfs[k + 1][0]
+        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
+        if under_here:
+            tops.append(run)
+            run = list(halfs[k + 1])
+        else:
+            run.append(nxt)
+            run.extend(halfs[k + 1][1:])
+    tops.append(run)
+    return tops, unders, vias, trim_pts
+
+
+def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
+                 lead_len=20.0, lead_gap=None, lead_w=None, ct=0):
+    """完整二代对称电感 -> dict（metal/under/vias/ports/bbox）。"""
+    rings, p, N = lri_i3_rings(rx, ry, w, s, n, chamfer)
+    a0, b0, _c0 = rings[0]
+    xj = p / 2.0
+    lead_gap = s if lead_gap is None else float(lead_gap)
+    lead_w = w if lead_w is None else float(lead_w)
+    if lead_gap < s - 1e-9:
+        raise ValueError("lead_gap=%.3f < s=%.3f" % (lead_gap, s))
+    x_port = (lead_gap + lead_w) / 2.0
+    y_port = b0 + lead_len
+    if lead_len < w / 2.0 - 1e-9:
+        raise ValueError("lead_len < w/2，端口会落在外圈金属内")
+    if x_port < xj - 1e-9:
+        raise ValueError("lead_gap 太小（引线落进换圈夹缝）")
+    if x_port > a0 + 1e-9:
+        raise ValueError(
+            "lead_gap=%.3f 把引线推到外圈之外（x_port=%.3f > a0=%.3f）"
+            % (lead_gap, x_port, a0))
+    cut, sp, encl = SYM_VIA_CUT, SYM_VIA_SPACE, SYM_VIA_ENCL
+    via_edge = cut / 2.0 + encl
+    back = w / 2.0 * (math.sqrt(2.0) - 1.0)
+    stub = max(via_edge, max(0.0, SYM_I3_WEDGE_MIN - back))
+    span, ncut = lri_i3_via_span(w, cut, sp, encl)
+    qa = lri_i3_arm(rings, p, N, xj, w, s, +1, via_edge, stub)
+    qb = lri_i3_arm(rings, p, N, xj, w, s, -1, via_edge, stub)
+    tops_a, under_a, vias_a, _ta = qa
+    tops_b, under_b, vias_b, _tb = qb
+    bridge = [tops_a[-1][-1], tops_b[-1][-1]]
+    bridge_y = bridge[0][1]
+    if abs(bridge[1][1] - bridge_y) > 1e-9:
+        raise ValueError("桥两端不等高")
+    lead_a = [(xj, b0), (x_port, b0), (x_port, y_port)]
+    lead_b = [(-xj, b0), (-x_port, b0), (-x_port, y_port)]
+    metal = list(tops_a) + list(tops_b) + [bridge, lead_a, lead_b]
+    ports = [("p01", (x_port, y_port)), ("p02", (-x_port, y_port))]
+    ct_geom = None
+    if ct:
+        bl = rings[-1][1]
+        if bl < 1.5 * w + s:
+            raise ValueError("内孔太小放不下中心抽头（b_last=%.2f）" % bl)
+        ct_geom = {"stem": [(0.0, bridge_y), (0.0, 0.0)],
+                   "pad": (0.0, 0.0, w)}
+        metal.append(ct_geom["stem"])
+        ports.append(("ct1", (0.0, bridge_y - (1.5 if bridge_y >= 0 else -1.5))))
+    under = list(under_a) + list(under_b)
+    return {
+        "tops": metal, "under": under, "under_poly": [],
+        "vias": [(x, y, span) for (x, y) in (vias_a + vias_b)],
+        "ports": ports, "bridge": bridge, "bridge_y": bridge_y,
+        "ct": ct_geom, "N": N, "rings": rings, "p": p, "xj": xj,
+        "rx": rx, "ry": ry, "ncut": ncut, "via_span": span,
+        "bx": 2.0 * rx, "by": 2.0 * ry,
+        "bbox": (-rx, -ry, rx, y_port),
+    }
+
+
 def lri_sym_arm(dout, n, w, s, side=1):
     if dout <= 0.0 or w <= 0.0 or s <= 0.0:
         raise ValueError("dout/w/s 必须 > 0")
@@ -3091,24 +3398,28 @@ def lri_build_ind(g):
            "bx": W, "by": H, "kind": kind}
 
     if kind == "sym":
+        # 二代内核：rx/ry 独立（缺省由 dout 推出）、任意整数圈、可调切角、
+        # 可调差分引线；与 SKILL lriI3BuildSym 同几何。
         dout = float(g.get("dout", W))
-        ta, ua, va, ca, N, R0, Rlast, xj = lri_sym_arm(dout, n, w, s, +1)
-        tb, ub, vb, cb, _, _, _, _ = lri_sym_arm(dout, n, w, s, -1)
-        ta[-1].append((-xj, -Rlast))
-        lead = 20.0
-        out["metal"] = list(ta) + list(tb)
-        out["metal"].append([(xj, R0), (xj, R0 + lead)])
-        out["metal"].append([(-xj, R0), (-xj, R0 + lead)])
-        out["topcaps"] = list(ca) + list(cb) + [(True, True), (True, True)]
-        out["under"] = list(ua) + list(ub)
+        rx = float(g.get("rx", dout / 2.0))
+        ry = float(g.get("ry", dout / 2.0))
+        m = lri_i3_build(
+            rx, ry, n, w, s,
+            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+            lead_len=float(g.get("lead_len", 20.0)),
+            lead_gap=g.get("lead_gap"), lead_w=g.get("lead_w"),
+            ct=int(float(g.get("ct", 0) or 0)))
+        out["metal"] = list(m["tops"])
+        out["topcaps"] = [(False, False)] * len(out["metal"])
+        out["under"] = list(m["under"])
         out["under_poly"] = [lri_sym_under_poly(p, w)
-                             for p in list(ua) + list(ub)]
-        out["vias"] = list(va) + list(vb)
-        out["ports"] = [("p01", (xj, R0 + lead)),
-                        ("p02", (-xj, R0 + lead))]
-        out["bx"] = dout
-        out["by"] = dout
-        out["N"] = N
+                             for p in m["under"]]
+        out["vias"] = list(m["vias"])
+        out["ports"] = list(m["ports"])
+        out["bx"] = 2.0 * rx
+        out["by"] = 2.0 * ry
+        out["N"] = m["N"]
+        out["bbox"] = m["bbox"]
         return out
 
     if kind == "diff":
@@ -3315,6 +3626,12 @@ GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/f8/sym)", "se", False),
             ("tangle", "端口夹角 tangle (0/90/180)", "180", True),
             ("n", "匝数 n", "3", True), ("w", "线宽 w (µm)", "10", True),
             ("s", "间距 s (µm)", "3.2", True), ("dout", "外径 dout (µm)", "160", True),
+            ("rx", "横向半径 rx (µm, 留空=dout/2) [仅 sym]", "", True),
+            ("ry", "纵向半径 ry (µm, 留空=dout/2) [仅 sym]", "", True),
+            ("chamfer", "拐角切角 chamfer 0..1 (留空=2-sqrt2) [仅 sym]", "", True),
+            ("lead_len", "差分引线长 lead_len (µm) [仅 sym]", "20", True),
+            ("lead_gap", "差分线间距 lead_gap (µm, 留空=s) [仅 sym]", "", True),
+            ("lead_w", "差分线宽 lead_w (µm, 留空=w) [仅 sym]", "", True),
             ("W", "宽 W (µm, 留空=dout)", "", True),
             ("H", "高 H (µm, 留空=dout)", "", True),
             ("corner", "45° 切角 corner (µm, 留空=八角自动)", "", True),
@@ -3324,6 +3641,9 @@ GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/f8/sym)", "se", False),
             ("underpass", "underpass direct/route [仅旧内核]", "direct", False),
             ("ex", "横向拉长 ex (µm) [仅旧内核]", "", True),
             ("ey", "纵向拉长 ey (µm) [仅旧内核]", "", True),
+            ("stack", "叠层 stack (0/1) [仅 sym]", "0", True),
+            ("metal_main", "主金属 (留空=工艺档) [仅 sym]", "", False),
+            ("metal_aux", "副金属/跨线层 (留空=工艺档) [仅 sym]", "", False),
             ("ind_mark", "MARKER 标记层 (0/1)", "0", True)],
     "tl": [("w", "线宽 w (µm)", "20", True), ("len", "长度 len (µm)", "300", True),
            ("gnd", "带地 gnd (0/1)", "1", True), ("gnd_layer", "地层", "M1", False),
@@ -4293,14 +4613,19 @@ def _selftest():
                         "w": 10, "s": 3.2})
     check("lri seam map N->top", gn.get("seam") == "top")
     for _kind in ("se", "diff", "f8", "sym"):
+        _n = 3 if _kind == "sym" else 2.5
         _g = lri_norm_geom({"kind": _kind, "shape": "oct", "dout": 220,
-                            "n": 2.5, "w": 10, "s": 2.6})
+                            "n": _n, "w": 10, "s": 2.6})
         _ok, _msg = lri_validate(_g)
         check("lri validate %s" % _kind, _ok, _msg)
         if _ok:
             _geo = lri_build_ind(_g)
             check("lri build %s ports" % _kind,
                   len(_geo["ports"]) >= 2 and len(_geo["metal"]) >= 2)
+    _half = lri_norm_geom({"kind": "sym", "dout": 220, "n": 2.5,
+                           "w": 10, "s": 2.6})
+    _ok, _msg = lri_validate(_half)
+    check("lri sym 半圈拒绝", (not _ok) and "整数" in (_msg or ""), _msg)
     _bad = lri_norm_geom({"kind": "se", "dout": 30, "n": 9, "w": 10, "s": 3.2})
     _ok, _msg = lri_validate(_bad)
     check("lri validate rejects", (not _ok) and bool(_msg), _msg)

@@ -1,0 +1,322 @@
+{
+  "_doc": "SMIC 55LL ULP RF 工艺档：层号来自 techfile.tf，通孔/间距来自 Calibre DRC V1.13，叠层来自 LVS deck TOPMETAL=8 分支与 EMX proc。换工艺 = 复制本文件改数值，SKILL 内核不动。",
+  "key": "smic55ll_ulp_rf",
+  "name": "SMIC55LL_ULP_RF_1P8M_6Ic_1TMc_1MTTc",
+  "techlib": "SMIC55LL_ULP_RF_1P8M_6Ic_1TMc_1MTTc",
+  "pdk": "/home/IC/Tech/SMIC55LL_2023/installed_PDK/smic55ll_ulp_rf_09121825_oa_cds_v1.16_2",
+  "stack_order": [
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M6",
+    "TM1",
+    "TM2"
+  ],
+  "defaults": {
+    "metal_main": "TM2",
+    "metal_aux": "TM1"
+  },
+  "metals": {
+    "M1": {
+      "oa": "M1",
+      "gds": [
+        61,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal1"
+      ],
+      "text_gds": [
+        141,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "M2": {
+      "oa": "M2",
+      "gds": [
+        62,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal2"
+      ],
+      "text_gds": [
+        142,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "M3": {
+      "oa": "M3",
+      "gds": [
+        63,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal3"
+      ],
+      "text_gds": [
+        143,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "M4": {
+      "oa": "M4",
+      "gds": [
+        64,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal4"
+      ],
+      "text_gds": [
+        144,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "M5": {
+      "oa": "M5",
+      "gds": [
+        65,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal5"
+      ],
+      "text_gds": [
+        145,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "M6": {
+      "oa": "M6",
+      "gds": [
+        66,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "metal6"
+      ],
+      "text_gds": [
+        146,
+        0
+      ],
+      "min_w": 0.09,
+      "min_s": 0.09,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.1
+    },
+    "TM1": {
+      "oa": "TM1",
+      "gds": [
+        120,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "topmetal1"
+      ],
+      "text_gds": [
+        120,
+        3
+      ],
+      "min_w": 0.4,
+      "min_s": 0.5,
+      "wide_space": 0.5,
+      "max_w": 30.0,
+      "min_area": 0.4
+    },
+    "TM2": {
+      "oa": "TM2",
+      "gds": [
+        122,
+        0
+      ],
+      "text_oa": [
+        "MnTXT",
+        "topmetal2"
+      ],
+      "text_gds": [
+        122,
+        3
+      ],
+      "min_w": 0.4,
+      "min_s": 0.5,
+      "wide_space": 2.0,
+      "max_w": 30.0,
+      "min_area": 6.0
+    }
+  },
+  "vias": {
+    "V1": {
+      "oa": "V1",
+      "gds": [
+        70,
+        0
+      ],
+      "lower": "M1",
+      "upper": "M2",
+      "cut": 0.09,
+      "space": 0.11,
+      "enc_lo": 0.03,
+      "enc_hi": 0.02
+    },
+    "V2": {
+      "oa": "V2",
+      "gds": [
+        71,
+        0
+      ],
+      "lower": "M2",
+      "upper": "M3",
+      "cut": 0.09,
+      "space": 0.11,
+      "enc_lo": 0.03,
+      "enc_hi": 0.02
+    },
+    "V3": {
+      "oa": "V3",
+      "gds": [
+        72,
+        0
+      ],
+      "lower": "M3",
+      "upper": "M4",
+      "cut": 0.09,
+      "space": 0.11,
+      "enc_lo": 0.03,
+      "enc_hi": 0.02
+    },
+    "V4": {
+      "oa": "V4",
+      "gds": [
+        73,
+        0
+      ],
+      "lower": "M4",
+      "upper": "M5",
+      "cut": 0.09,
+      "space": 0.11,
+      "enc_lo": 0.03,
+      "enc_hi": 0.02
+    },
+    "V5": {
+      "oa": "V5",
+      "gds": [
+        74,
+        0
+      ],
+      "lower": "M5",
+      "upper": "M6",
+      "cut": 0.09,
+      "space": 0.11,
+      "enc_lo": 0.03,
+      "enc_hi": 0.02
+    },
+    "TV1": {
+      "oa": "TV1",
+      "gds": [
+        121,
+        0
+      ],
+      "lower": "M6",
+      "upper": "TM1",
+      "cut": 0.36,
+      "space": 0.34,
+      "enc_lo": 0.05,
+      "enc_hi": 0.02
+    },
+    "TV2": {
+      "oa": "TV2",
+      "gds": [
+        123,
+        0
+      ],
+      "lower": "TM1",
+      "upper": "TM2",
+      "cut": 0.36,
+      "space": 0.34,
+      "enc_lo": 0.05,
+      "enc_hi": 0.3
+    }
+  },
+  "marker": {
+    "oa": [
+      "INDMY",
+      "drawing"
+    ],
+    "gds": [
+      212,
+      0
+    ]
+  },
+  "drc": {
+    "min_w": 0.4,
+    "min_s": 0.5,
+    "max_w": 30.0,
+    "via_enclosure": 0.4,
+    "via_st_space": 0.5,
+    "via_st_enclosure": 0.05
+  },
+  "emx": {
+    "proc_glob": "*_TYP.proc",
+    "stack": "StarRC_55LL_ULP_RF_1P8M_6Ic_1TMc_1MTTc_ALPA1",
+    "freqs": [
+      1000000000.0,
+      1500000000.0,
+      2000000000.0,
+      2400000000.0,
+      3000000000.0,
+      4000000000.0,
+      5000000000.0,
+      6000000000.0,
+      8000000000.0,
+      10000000000.0,
+      12000000000.0,
+      15000000000.0,
+      20000000000.0
+    ],
+    "f0": 2400000000.0,
+    "edge": 0.5,
+    "three_d": "*",
+    "label_snap": 10.0,
+    "bin": "/opt/eda/cadence/INTEGRAND60/bin/emx"
+  },
+  "calibre": {
+    "drc": "/home/IC/Tech/SMIC55LL_2023/installed_PDK/smic55ll_ulp_rf_09121825_oa_cds_v1.16_2/Calibre/DRC/SMIC_CalDRC_55LLULPGE_0912182533_V1.13_REV1_0.drc",
+    "lvs": "/home/IC/Tech/SMIC55LL_2023/installed_PDK/smic55ll_ulp_rf_09121825_oa_cds_v1.16_2/Calibre/LVS/SMIC_CalLVS_55LGLLULPRF_09121825_V1.16_1.lvs"
+  }
+}

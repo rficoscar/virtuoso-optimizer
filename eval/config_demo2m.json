@@ -1,0 +1,118 @@
+{
+  "_doc": "由 tech/demo2m.json 生成，勿手改（tools/gen_tech.py）",
+  "tech": "DEMO_2M_MIN",
+  "pdk": "",
+  "emx": {},
+  "calibre": {
+    "bin": "",
+    "turbo": 8
+  },
+  "layers": {
+    "spiral": [
+      20,
+      0
+    ],
+    "under": [
+      10,
+      0
+    ],
+    "route": [
+      10,
+      0
+    ],
+    "via": [
+      30,
+      0
+    ],
+    "via_st": [
+      30,
+      0
+    ]
+  },
+  "text": {
+    "spiral": [
+      120,
+      0
+    ],
+    "under": [
+      110,
+      0
+    ],
+    "route": [
+      110,
+      0
+    ],
+    "m1": [
+      110,
+      0
+    ]
+  },
+  "limits": {
+    "min_w": 0.2,
+    "min_s": 0.2,
+    "via_cut": 0.2,
+    "via_space": 0.2,
+    "via_enc": 0.1,
+    "bbox_tol": 0.5,
+    "sym_tol": 0.05,
+    "lead_match": 1.0
+  },
+  "expect": {
+    "ports": [
+      "p01",
+      "p02"
+    ]
+  },
+  "defaults": {
+    "metal_main": "M2",
+    "metal_aux": "M1"
+  },
+  "stack": {
+    "order": [
+      "M1",
+      "M2"
+    ],
+    "defaults": {
+      "metal_main": "M2",
+      "metal_aux": "M1"
+    },
+    "metals": {
+      "M1": {
+        "gds": [
+          10,
+          0
+        ],
+        "text_gds": [
+          110,
+          0
+        ],
+        "wide_space": 0.2
+      },
+      "M2": {
+        "gds": [
+          20,
+          0
+        ],
+        "text_gds": [
+          120,
+          0
+        ],
+        "wide_space": 0.2
+      }
+    },
+    "vias": {
+      "V1": {
+        "gds": [
+          30,
+          0
+        ],
+        "lower": "M1",
+        "upper": "M2",
+        "cut": 0.2,
+        "space": 0.2,
+        "enc_lo": 0.05,
+        "enc_hi": 0.05
+      }
+    }
+  }
+}

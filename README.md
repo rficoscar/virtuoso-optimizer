@@ -4,7 +4,7 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 调用 spectre 迭代，输出收敛报告。版图部分按工艺角色生成电感、传输线、变压器
 和耦合线，可接 EMX 做几何迭代。
 
-`Version 1.5.1 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
+`Version 1.5.2 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
 
 ## 功能
 
@@ -37,11 +37,60 @@ python3 optimizer.py --gui-smoke                  # GUI 无头冒烟
 界面需要在图形桌面中运行，或设置 `DISPLAY` 指向可用的 X 显示。没有显示时程序
 打印 `GUI_SMOKE_FAIL: no display` 后退出。
 
+## 版图 PCell（差分对称电感）
+
+`lri_pcell.il` 是 Virtuoso PCell 外壳，几何内核 `lriI3BuildSym` 在 `librf.il`。
+参数：横向/纵向半径 `rx`/`ry`、每臂圈数 `n`、线宽 `w`、线间隔 `s`、拐角切角
+`chamfer`（0..1，2−√2 为正八边形）、差分线长 `lead_len`、差分线间距 `lead_gap`、
+差分线宽 `lead_w`、中心抽头 `ct`、叠层 `stack`、主金属 `metal_main`、副金属
+`metal_aux`。
+
+```skill
+load("librf.il")
+load("lri_pcell.il")
+lriPcellTechSmic55()               ; 读 tech/smic55ll_ulp_rf_profile.il
+lriPcellDefine("MYLIB" "ind_sym") ; 注册 PCell，随后在 Library Manager 实例化
+```
+
+主/副金属可逐实例指定（如 TM2/TM1、TM1/M6），跨线层与走线层之间按工艺档的
+通孔链逐级自动补 landing pad；叠层模式只接受相邻金属。
+
+## 工艺档（换工艺不改代码）
+
+一个 `tech/<key>.json` 是唯一事实源，同时派生 SKILL 工艺档、GDS 层映射和评估
+配置：
+
+```sh
+python3 tools/gen_tech.py tech/smic55ll_ulp_rf.json --eval-config eval/config_smic55.json
+```
+
+产物为 `tech/<key>_profile.il`（层角色、通孔链、`wide_space`、文字层）、
+`stream/<key>.map`、`eval/config_<key>.json`。换工艺时复制一份 JSON 改层号与
+DRC 数值即可；`tech/demo2m.json` 是两层金属的最小示例。
+
+## PCell 质量评估（eval/）
+
+评估器只依赖真实 GDS：几何规则 G0–G12（线宽、外框、间距、自交、通孔尺寸/
+宿主/包络/间距、标签归属、连通性、圈数、对称性、内圈净空、引线与参数一致、
+叠层），再按需接 EMX（L/Q/R/SRF）和 Calibre DRC/LVS。
+
+```sh
+cd eval
+python3 bin/cli.py run --config config_smic55.json --params '{"rx":60,"ry":60,"n":2}' --work runs/one
+python3 bin/tech_smoke.py demo2m --config config_demo2m.json --work runs/tech_demo2m
+python3 bin/cli.py matrix --suite sym --config config_smic55.json --work runs/sym
+```
+
+`bin/cli.py matrix --suite sym` 用真实 SKILL PCell 跑参数扫掠（含 `expect_fail`
+的不可行组合），输出每个用例的状态与 L/Q。`bin/skillgen.py` 通过
+`virtuoso -nograph` 建 cellview 再用 `strmout` 导出 GDS，路径可用
+`LIBRF_VIRTUOSO` / `LIBRF_STRMOUT` / `LIBRF_PDK_MAP` 覆盖。
+
 ## 无网络迁移（纯文本剪贴板）
 
 目标机不能传文件、只能通过 VNC 复制文本时，用 `tools/` 把项目打成纯文本安装
 脚本：本地复制整段脚本，在目标机文本编辑器中粘贴保存，`sh` 执行即可，脚本自带
-sha256 校验与解包。
+sha256 校验与解包。只出全量包一种（全部功能，不裁剪）：
 
 ```sh
 python3 tools/make_kit.py --repo . --out dist/kit --limit 200000 --format xz
@@ -49,8 +98,6 @@ python3 tools/make_onepaste.py --kit dist/kit --ext xz
 python3 tools/verify_kit.py dist/kit
 ```
 
-- 全量包（xz）21 个文件 2 片；目标机没有 xz 时改用 `--format gz`，变 3 片。
-- 核心包（gz）用 `--exclude` 去掉版图、EM、测试、文档和本工具，9 个文件 1 片。
 - RealVNC 剪贴板上限 256 kB，超限会整段粘贴失败并粘出上一次的内容；脚本逐片
   校验 sha256，失败时把剪贴板换成任意小文本后重抄该片。
 - 目标机需要 `python3`、`base64`、`tar`，以及对应的 `xz` 或 `gzip`。

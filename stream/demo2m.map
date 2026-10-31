@@ -1,0 +1,8 @@
+; 自动生成，勿手改 —— 源 tech/demo2m.json，生成器 tools/gen_tech.py
+; 仅含本 PCell 用到的层；strmout -map 可直接用。
+M1 drawing 10 0
+M2 drawing 20 0
+V1 drawing 30 0
+MnTXT metal1 110 0
+MnTXT metal2 120 0
+INDMY drawing 212 0
