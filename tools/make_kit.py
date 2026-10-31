@@ -122,7 +122,38 @@ def main():
     open(os.path.join(out, "kit.tar." + ext), "wb").write(blob)
 
     text = b64wrap(blob)
-    parts = chunk_text(text, a.limit)
+
+    unpack_text = (
+        "#!/bin/sh\n"
+        "set -e\n"
+        "cat p*.b64 | tr -d '\\r\\n ' | base64 -d > kit_dl.tar.%s\n"
+        "echo '%s  kit_dl.tar.%s' | sha256sum -c -\n"
+        "target=\"${1:-optimizer-%s}\"\n"
+        "mkdir -p \"$target\"\n"
+        "tar -x%sf kit_dl.tar.%s -C \"$target\"\n"
+        "echo \"OK $(find \"$target\" -type f | wc -l) files -> $target\"\n"
+    ) % (ext, sha(blob), ext, version_of(repo).lstrip("v"),
+         "J" if a.format == "xz" else "z", ext)
+
+    # The last paste block also creates check.sh and unpack.sh, so two clipboard
+    # pastes are enough: no extra files have to reach the target machine.
+    # Reserve room for that tail (its checksum lines grow with the chunk count).
+    reserve = 512
+    while True:
+        parts = chunk_text(text, a.limit - reserve)
+        check_lines = ["#!/bin/sh", "fail=0"]
+        for i, piece in enumerate(parts, 1):
+            check_lines.append('echo "%s  p%03d.b64" | sha256sum -c - || fail=1'
+                               % (sha(piece.encode()), i))
+        check_lines.append('exit $fail')
+        check_text = "\n".join(check_lines) + "\n"
+        tail = (
+            "\ncat > check.sh <<'CHECK_EOF'\n%s\nCHECK_EOF\n"
+            "cat > unpack.sh <<'UNPACK_EOF'\n%s\nUNPACK_EOF\n"
+        ) % (check_text.rstrip("\n"), unpack_text.rstrip("\n"))
+        if len(tail) <= reserve:
+            break
+        reserve = max(reserve, len(tail) + 64)
 
     for old in os.listdir(out):
         if (old.startswith("paste_") and old.endswith(".sh")) or old.startswith("raw_") \
@@ -135,6 +166,8 @@ def main():
     lines, chunk_sum = [], []
     for i, piece in enumerate(parts, 1):
         block = "cat > p%03d.b64 <<'B64_EOF'\n%s\nB64_EOF\n" % (i, piece.rstrip("\n"))
+        if i == len(parts):
+            block += tail
         assert len(block) <= a.limit, (len(block), a.limit)
         write(os.path.join(out, "paste_%03d.sh" % i), block)
         write(os.path.join(out, "raw_%03d.b64" % i), piece)
@@ -144,24 +177,8 @@ def main():
 
     write(os.path.join(out, "all.b64"), text)
     write(os.path.join(out, "clip2file.py"), CLIP2FILE)
-    check = ["#!/bin/sh", "fail=0"]
-    for i, h in enumerate(lines, 1):
-        check.append('echo "%s  p%03d.b64" | sha256sum -c - || fail=1' % (h, i))
-    check.append('exit $fail')
-    write(os.path.join(out, "check.sh"), "\n".join(check) + "\n")
-
-    dec = "xz" if a.format == "xz" else "gzip"
-    unpack = (
-        "#!/bin/sh\n"
-        "set -e\n"
-        "cat p*.b64 | tr -d '\\r\\n ' | base64 -d > kit_dl.tar.%s\n"
-        "echo '%s  kit_dl.tar.%s' | sha256sum -c -\n"
-        "target=\"${1:-optimizer-%s}\"\n"
-        "mkdir -p \"$target\"\n"
-        "tar -x%sf kit_dl.tar.%s -C \"$target\"\n"
-        "echo \"OK $(find \"$target\" -type f | wc -l) files -> $target\"\n"
-    ) % (ext, sha(blob), ext, version_of(repo).lstrip("v"), "J" if a.format == "xz" else "z", ext)
-    write(os.path.join(out, "unpack.sh"), unpack)
+    write(os.path.join(out, "check.sh"), check_text)
+    write(os.path.join(out, "unpack.sh"), unpack_text)
 
     man = []
     man.append("version: %s" % version_of(repo))
