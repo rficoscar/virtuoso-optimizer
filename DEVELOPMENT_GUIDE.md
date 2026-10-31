@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.5.2。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.6.0。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -17,13 +17,19 @@
 | `optimizer.py` | 3683 | CLI、配置、Target 打分、Transform、Runner、主循环、报告 | `main` |
 | `algorithm.py` | 2958 | 14 种搜索策略 + 注册表 + 算法说明文案 | `create` |
 | `netlist_params.py` | 1460 | 层次网表解析与参数改写 | `patch_netlist` |
-| `gui.py` | 4187 | Tk 图形界面（11 个页面） | `run_gui` |
+| `gui.py` | 17 | 兼容入口：再导出 `lri/ui/` 的历史接口 | `run_gui` |
+| `lri/ui/` | 4260 | Tk 图形界面实现：plots / netlist / results / reports / tech_tab / main（11 个页面） | `run_gui` |
 | `selftest.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
 | `librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
 | `lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
-| `librf_opt.py` | 4921 | 版图器件生成 / EMX 迭代（工艺侧），含 i3 几何镜像与工艺门禁 | `register` |
+| `librf_opt.py` | 26 | 兼容入口：再导出 `lri/` 的历史接口 | `register` |
+| `lri/` | 5276 | 版图器件生成 / EMX 迭代实现：common / tech / tools / skillio / snp / emx / device / runner / layout / ui_em / selftest_librf，含 i3 几何镜像与工艺门禁 | `register` |
 | `em_align.py` / `em_opt.py` / `em_bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
 | `netlist_create.py` / `proc_cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
+
+根目录只留入口薄壳：`librf_opt.py` / `gui.py` 只负责再导出历史接口，实现放在 `lri/`
+与 `lri/ui/`。新增代码按职责进对应子模块，不要再往薄壳或大文件里堆；拆文件不增加
+文本包片数（片数只由压缩后的字节数决定）。
 
 纯标准库，零依赖；`matplotlib` 只用于可选收敛图（`plot_convergence`），导入失败静默跳过，
 不要加硬依赖。
@@ -277,7 +283,7 @@ report = {
 1. `Target.__init__` 的 `metric` 白名单加上名字（不加就直接 ValueError）
 2. `Target.metric_value` 加分支（`curves` 结构：`{output: {"x": [...], "y": [...]}}`）
 3. 若需要频点参数，仿照 `value_at` 的 `freq` 校验
-4. 补测试到 `selftest.py`；GUI 目标页的下拉在 `gui.py` 的目标页里另有一份硬编码列表
+4. 补测试到 `selftest.py`；GUI 目标页的下拉在 `lri/ui/main.py` 的目标页里另有一份硬编码列表
 
 ### E3 新增 op / role
 
@@ -291,7 +297,7 @@ report = {
 
 - `Settings.__init__`（带校验的走这里，非法值当场抛）
 - 文档：`README.md` 的「任务配置」表
-- GUI：对应页面的表单控件（`gui.py` 里各页 `build_xxx`）
+- GUI：对应页面的表单控件（`lri/ui/main.py` 里各页 `build_xxx`，工艺页在 `lri/ui/tech_tab.py`）
 - 若是路径类，考虑也加进 `load_config` 的归一化循环
 
 ### E5 新增 CLI 子命令
@@ -308,11 +314,11 @@ report = {
 ### E7 新增报告字段
 
 `Optimization.report()` 里加，`run_optimization` 的 finally 之后会原样写进 `report.json`。
-GUI 结果页读的是同一份 dict（`gui.py` 的 report 展示处），字段名两边都要对。
+GUI 结果页读的是同一份 dict（`lri/ui/main.py` 的 report 展示处），字段名两边都要对。
 
 ### E8 新增 GUI 页面
 
-`gui.py` 的页面是 `(标题, 构造函数)` 列表驱动，`run_gui` 装配。长任务不准阻塞主线程：
+`lri/ui/main.py` 的页面是 `(标题, 构造函数)` 列表驱动，`run_gui` 装配。长任务不准阻塞主线程：
 走 `on_event` / `stop_check` 回调 + `queue.Queue`（参考 `Writer` 那段）。
 
 ## 7. 回归与验证（改代码后必须做的三件事）
@@ -440,7 +446,7 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片、gz 3 片。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 3 片（1.6.0：68 文件、43.6 万字符）。
 - 只出全量包一种（全部功能，不裁剪）；每次发版重新出包并跑 `verify_kit.py`。
 
 出包命令：

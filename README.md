@@ -4,7 +4,7 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 调用 spectre 迭代，输出收敛报告。版图部分按工艺角色生成电感、传输线、变压器
 和耦合线，可接 EMX 做几何迭代。
 
-`Version 1.5.2 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
+`Version 1.6.0 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
 
 ## 功能
 

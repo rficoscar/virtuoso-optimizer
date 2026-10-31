@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.0 — 2026-10-31
+
+源码按职责拆分，行为不变；交付仍是单一全量文本包。`VERSION` 1.6.0。
+
+- **`lri/` 包（新增）**：`librf_opt.py` 的 176 个顶层定义按职责拆成 `common` /
+  `tech` / `tools` / `skillio` / `snp` / `emx` / `device` / `runner` / `layout` /
+  `ui_em` / `selftest_librf` 十一个模块，函数体逐语句原样迁移。`_HERE`/`SKILL_IL`
+  改为从包位置定位仓库根；`librf.il`、`lri_pcell.il` 仍在根目录。根目录
+  `librf_opt.py` 只做兼容再导出，`import librf_opt` 与 `--selftest` 用法不变。
+- **`lri/ui/` 子包（新增）**：`gui.py` 拆成 `plots` / `netlist` / `results` /
+  `reports` / `tech_tab` / `main`；根目录 `gui.py` 再导出 `run_gui`、
+  `OptimizerGui`、`PlotCanvas`、`_TechTab`、`_MANAGED_CFG_KEYS`、`_var_extra_*`。
+  `optimizer.py --gui` 分派与 `selftest.py` 对下划线接口的引用不受影响。
+- **交付**：打包脚本按 `git ls-files` 收集，拆分后文件数 68、xz 3 片
+  （43.6 万字符），仍只出全量包一种。新增代码按职责进子模块，根目录薄壳不再堆逻辑。
+- **验证**：`optimizer.py --selftest` 179 OK、`librf_opt.py --selftest` 124 ok/0 fail、
+  `em_opt.py --selftest` PASS、`--gui-smoke` OK；`verify_kit.py` PASS。
+
 ## 1.5.2 — 2026-10-31
 
 差分对称电感 PCell、工艺档派生链与版图评估框架。已有版图器件与优化器行为不变；
