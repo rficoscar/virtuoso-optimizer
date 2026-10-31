@@ -35,7 +35,10 @@ def _force_utf8_stdio():
 
 _force_utf8_stdio()
 
-_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 包根目录（lri/ 的上一级）
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # virtuoso_optimizer/
+_HERE = os.path.join(_PKG_ROOT, "data")                                  # 随包数据目录
+REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_ROOT))                  # 仓库根（src/ 上一级）
+TEST_FIXTURES = os.path.join(REPO_ROOT, "tests", "fixtures")
 
 SKILL_IL = os.path.join(_HERE, "librf.il")
 
@@ -58,7 +61,7 @@ TECHLIB_SUBDIRS = ()
 TECH_PROFILE_NAME = "tech_profile.json"
 
 try:
-    from proc_cross_section import (
+    from ..netlist.cross_section import (
         parse_proc as _xs_parse_proc,
         parse_layermap as _xs_parse_layermap,
         validate_flow_stack as _xs_validate_flow_stack)

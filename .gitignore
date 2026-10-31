@@ -3,6 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 打包 / 安装产物
+build/
+dist/
+*.egg-info/
+
 # 运行产物
 logs/
 work/
@@ -12,6 +17,7 @@ history.csv
 *.log.gz
 convergence.png
 netlist_create/
+src/virtuoso_optimizer/data/librf_emx_settings.json
 
 # 归档副本（工具只改名不删除）
 *.old-*

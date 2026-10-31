@@ -6,7 +6,7 @@ import os
 import re
 import time
 
-from optimizer import (
+from ...cli import (
     format_eng, parse_eng)
 
 _FREQ_ANALYSES = ("ac", "sp", "noise", "snoise", "pac", "psp", "xf")

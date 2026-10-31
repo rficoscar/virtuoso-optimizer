@@ -277,7 +277,7 @@ class _FallbackSimResult(object):
 
 def _fail(msg):
     try:
-        from optimizer import SimResult
+        from ..cli import SimResult
     except Exception:
         SimResult = _FallbackSimResult
     return SimResult(status="fail", message=msg)

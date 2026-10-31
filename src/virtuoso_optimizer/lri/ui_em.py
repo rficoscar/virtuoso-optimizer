@@ -8,7 +8,8 @@ import sys
 import threading
 
 from .common import (
-    _HERE, DEF_FREQ, DEF_EMX_TIMEOUT, LibrfError, _eprint, _which, parse_eng, fmt_eng, run_cmd)
+    _HERE, REPO_ROOT, DEF_FREQ, DEF_EMX_TIMEOUT, LibrfError, _eprint, _which,
+    parse_eng, fmt_eng, run_cmd)
 from .tech import (
     build_tech, require_tech_ready)
 from .tools import (
@@ -354,7 +355,8 @@ class _EmOptTab(object):
         script = None
         for cand in (os.path.join(_HERE, "gds_render.py"),
                      os.path.join(_HERE, "tools", "gds_render.py"),
-                     os.path.join(os.path.dirname(_HERE), "tools", "gds_render.py")):
+                     os.path.join(os.path.dirname(_HERE), "tools", "gds_render.py"),
+                     os.path.join(REPO_ROOT, "tools", "gds_render.py")):
             if os.path.isfile(cand):
                 script = cand
                 break

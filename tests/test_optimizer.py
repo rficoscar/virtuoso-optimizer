@@ -12,7 +12,33 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(BASE, "src"))
+sys.path.insert(0, HERE)
+
+from virtuoso_optimizer import algorithm as _algorithm  # noqa: E402
+from virtuoso_optimizer import cli as _cli  # noqa: E402
+from virtuoso_optimizer import gui as _gui  # noqa: E402
+from virtuoso_optimizer import librf_opt as _librf  # noqa: E402
+from virtuoso_optimizer.em import align as _em_align  # noqa: E402
+from virtuoso_optimizer.em import bridge as _em_bridge  # noqa: E402
+from virtuoso_optimizer.em import opt as _em_opt  # noqa: E402
+from virtuoso_optimizer.netlist import create as _netlist_create  # noqa: E402
+from virtuoso_optimizer.netlist import cross_section as _cross_section  # noqa: E402
+from virtuoso_optimizer.netlist import params as _netlist_params  # noqa: E402
+
+# 历史模块名别名：包内实现以 virtuoso_optimizer.* 为准，测试里沿用旧名。
+sys.modules.setdefault("optimizer", _cli)
+sys.modules.setdefault("algorithm", _algorithm)
+sys.modules.setdefault("librf_opt", _librf)
+sys.modules.setdefault("gui", _gui)
+sys.modules.setdefault("netlist_params", _netlist_params)
+sys.modules.setdefault("netlist_create", _netlist_create)
+sys.modules.setdefault("proc_cross_section", _cross_section)
+sys.modules.setdefault("em_bridge", _em_bridge)
+sys.modules.setdefault("em_align", _em_align)
+sys.modules.setdefault("em_opt", _em_opt)
 
 from optimizer import (  # noqa: F401
     EXAMPLE_CFG, LOG_MODE_COMPACT, LOG_MODE_FULL, MANIFEST_NAME,
@@ -1248,7 +1274,8 @@ class TestCompactRobust(_CompactBase):
 
 class TestTechProfile(unittest.TestCase):
     HERE = os.path.dirname(os.path.abspath(__file__))
-    TP_PATH = os.path.join(HERE, "tech_profile.json")
+    TP_PATH = os.path.join(BASE, "src", "virtuoso_optimizer", "data",
+                           "tech_profile.json")
     def _load(self, **kw):
         import librf_opt
         kw.setdefault("use_cache", False)
@@ -1309,7 +1336,7 @@ class TestTechProfile(unittest.TestCase):
         cwd = os.getcwd()
         old = os.environ.pop("LIBRF_TECH_PROFILE", None)
         try:
-            os.chdir(self.HERE)
+            os.chdir(os.path.dirname(self.TP_PATH))
             t = self._load(work=".")
         finally:
             os.chdir(cwd)
@@ -1361,18 +1388,25 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertEqual(type(runner).__name__, "MockRunner")
     def test_s3_iso_06_enabled_without_module_raises(self):
         import sys
+        from virtuoso_optimizer import em as em_pkg
         opt = self._opt(self._base_cfg(em_bridge=self._em()))
-        saved = sys.modules.pop("em_bridge", None)
-        sys.modules["em_bridge"] = None
+        name = "virtuoso_optimizer.em.bridge"
+        saved = sys.modules.pop(name, None)
+        sys.modules[name] = None
+        if hasattr(em_pkg, "bridge"):
+            delattr(em_pkg, "bridge")
         try:
             with self.assertRaises(ImportError) as cm:
                 opt._build_runner(mock=True)
             self.assertIn("em_bridge", str(cm.exception))
         finally:
             if saved is not None:
-                sys.modules["em_bridge"] = saved
+                sys.modules[name] = saved
+                em_pkg.bridge = saved
             else:
-                sys.modules.pop("em_bridge", None)
+                sys.modules.pop(name, None)
+                if hasattr(em_pkg, "bridge"):
+                    delattr(em_pkg, "bridge")
     def test_s3_iso_07_layout_em_still_works(self):
         try:
             import librf_opt  # noqa: F401 - layout_em needs the optional module
@@ -2188,8 +2222,7 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         import inspect
         import gui
         text = inspect.getsource(gui.OptimizerGui._show_param_help)
-        root = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(root, "optimizer.py"), encoding="utf-8") as f:
+        with open(_cli.__file__, encoding="utf-8") as f:
             engine = f.read()
         for key in ("mode", "portfolio", "init_points"):
             self.assertIn(key, engine)

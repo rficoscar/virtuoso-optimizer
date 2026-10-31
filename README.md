@@ -4,7 +4,7 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 调用 spectre 迭代，输出收敛报告。版图部分按工艺角色生成电感、传输线、变压器
 和耦合线，可接 EMX 做几何迭代。
 
-`Version 1.6.2 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
+`Version 1.7.0 · MIT · Python 3.6+（仅标准库；收敛图需要 matplotlib，可选）`
 
 ## 功能
 
@@ -23,6 +23,20 @@ Cadence Virtuoso / spectre 电路参数优化工具。修改原理图变量后�
 - EM 两阶段对齐：以实测或 EM 曲线为目标重跑同一理想网表，输出逐变量修正方向、
   曲线偏差和 aligned 结论。
 
+## 目录结构
+
+```
+src/virtuoso_optimizer/     主包（算法、CLI、网表、EM、版图 lri/、GUI）
+  data/                     随包数据：librf.il / lri_pcell.il / 工艺档与层映射
+tests/                      回归测试与 fixtures（不进交付包）
+docs/                       开发指南（不进交付包）
+eval/                       PCell 质量评估（GDS 几何、EMX、Calibre）
+tools/                      打包、工艺档生成等开发工具
+optimizer.py                薄入口：python optimizer.py <task.json>
+librf_opt.py / em_opt.py    兼容入口（--selftest）
+pyproject.toml              安装元数据；pip install -e . 后可用 virtuoso-optimizer
+```
+
 ## 快速开始
 
 ```sh
@@ -32,6 +46,9 @@ python3 optimizer.py task.json --mock --max-iter 20   # 无 license 走流程
 python3 optimizer.py task.json --dump-state       # 只解析 ADE 状态，不仿真
 python3 optimizer.py --selftest                   # 回归测试
 python3 optimizer.py --gui-smoke                  # GUI 无头冒烟
+
+pip install -e .                                  # 可选：安装为包
+virtuoso-optimizer --gui                          # 或 python -m virtuoso_optimizer
 ```
 
 界面需要在图形桌面中运行，或设置 `DISPLAY` 指向可用的 X 显示。没有显示时程序
@@ -46,9 +63,9 @@ python3 optimizer.py --gui-smoke                  # GUI 无头冒烟
 `metal_aux`。
 
 ```skill
-load("librf.il")
-load("lri_pcell.il")
-lriPcellTechSmic55()               ; 读 tech/smic55ll_ulp_rf_profile.il
+load("src/virtuoso_optimizer/data/librf.il")
+load("src/virtuoso_optimizer/data/lri_pcell.il")
+lriPcellTechSmic55()               ; 读 data/tech/smic55ll_ulp_rf_profile.il
 lriPcellDefine("MYLIB" "ind_sym") ; 注册 PCell，随后在 Library Manager 实例化
 ```
 
@@ -57,16 +74,17 @@ lriPcellDefine("MYLIB" "ind_sym") ; 注册 PCell，随后在 Library Manager 实
 
 ## 工艺档（换工艺不改代码）
 
-一个 `tech/<key>.json` 是唯一事实源，同时派生 SKILL 工艺档、GDS 层映射和评估
+一个 `data/tech/<key>.json` 是唯一事实源，同时派生 SKILL 工艺档、GDS 层映射和评估
 配置：
 
 ```sh
-python3 tools/gen_tech.py tech/smic55ll_ulp_rf.json --eval-config eval/config_smic55.json
+python3 tools/gen_tech.py src/virtuoso_optimizer/data/tech/smic55ll_ulp_rf.json \
+    --eval-config eval/config_smic55.json
 ```
 
-产物为 `tech/<key>_profile.il`（层角色、通孔链、`wide_space`、文字层）、
-`stream/<key>.map`、`eval/config_<key>.json`。换工艺时复制一份 JSON 改层号与
-DRC 数值即可；`tech/demo2m.json` 是两层金属的最小示例。
+产物为 `data/tech/<key>_profile.il`（层角色、通孔链、`wide_space`、文字层）、
+`data/stream/<key>.map`、`eval/config_<key>.json`。换工艺时复制一份 JSON 改层号与
+DRC 数值即可；`data/tech/demo2m.json` 是两层金属的最小示例。
 
 ## PCell 质量评估（eval/）
 
@@ -91,7 +109,7 @@ python3 bin/cli.py matrix --suite sym --config config_smic55.json --work runs/sy
 目标机不能传文件、只能通过 VNC 复制文本时，用 `tools/` 把项目打成纯文本安装
 脚本：本地复制整段脚本，在目标机文本编辑器中粘贴保存，`sh` 执行即可，脚本自带
 sha256 校验与解包。只出全量包一种（全部功能，不裁剪）；单元测试与
-CHANGELOG/DEVELOPMENT_GUIDE 不进包（`--include-tests` / `--include-docs` 可打回），
+CHANGELOG/docs 开发指南不进包（`--include-tests` / `--include-docs` 可打回），
 包内 `--selftest` 会提示未附带测试：
 
 ```sh

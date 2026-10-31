@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""tech_smoke.py - 换工艺冒烟：按 tech/<key>.json 生成的档构建一版真实 PCell。
+"""tech_smoke.py - 换工艺冒烟：按 data/tech/<key>.json 生成的档构建一版真实 PCell。
 
     python3 eval/bin/tech_smoke.py demo2m \
         --config eval/config_demo2m.json --work /abs/path/tech_demo2m
 
 前置（tools/gen_tech.py 已跑过）：
-    tech/<key>_profile.il  stream/<key>.map  eval/config_<key>.json
+    src/virtuoso_optimizer/data/tech/<key>_profile.il
+    src/virtuoso_optimizer/data/stream/<key>.map  eval/config_<key>.json
 
 流程：skillgen(tech=key) 建 cell -> strmout 用 <key>.map 导出 GDS ->
       geometry 检查（层角色按 config.stack 表重解析）。
@@ -26,7 +27,10 @@ import geometry           # noqa: E402
 import report as report_mod  # noqa: E402
 import skillgen           # noqa: E402
 
-DEF_CWD = os.getcwd()
+ROOT = os.path.dirname(os.path.dirname(HERE))
+DATA = os.path.join(ROOT, "src", "virtuoso_optimizer", "data")
+
+DEF_CWD = DATA
 
 BASE = {"rx": 60.0, "ry": 60.0, "n": 2, "w": 8.0, "s": 3.0,
         "chamfer": 0.5857864376, "lead_len": 20.0, "lead_gap": 3.0,
@@ -35,7 +39,7 @@ BASE = {"rx": 60.0, "ry": 60.0, "n": 2, "w": 8.0, "s": 3.0,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="换工艺冒烟（SKILL PCell + 几何检查）")
-    ap.add_argument("tech", help="工艺档 key（tech/<key>_profile.il）")
+    ap.add_argument("tech", help="工艺档 key（data/tech/<key>_profile.il）")
     ap.add_argument("--config", default=None,
                     help="评估配置；缺省 eval/config_<key>.json")
     ap.add_argument("--work", default=None, help="工作目录（必须是绝对路径）")
@@ -51,7 +55,7 @@ def main(argv=None):
         params.update(json.loads(a.params))
 
     case = {"id": "tech_" + a.tech, "kind": "sym", "params": params}
-    map_path = os.path.join(a.cwd, "stream", a.tech + ".map")
+    map_path = os.path.join(DATA, "stream", a.tech + ".map")
     r = skillgen.build(case, work, cwd=a.cwd, map_path=map_path, tech=a.tech)
     out = {"tech": a.tech, "build": r}
     if not r.get("ok"):

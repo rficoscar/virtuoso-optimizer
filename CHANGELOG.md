@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.7.0 — 2026-10-31
+
+仓库改为标准 src 布局；行为与 `python optimizer.py …` 调用方式不变。`VERSION` 1.7.0。
+
+- **目录**：实现进 `src/virtuoso_optimizer/`（cli / algorithm / librf_opt / gui +
+  `netlist/`、`em/`、`lri/`）；随包数据（`librf.il`、`lri_pcell.il`、
+  `tech_profile.json`、`tech/`、`stream/`）进 `data/`；测试进 `tests/`（含 fixtures），
+  开发指南进 `docs/`；根目录只留薄入口。
+- **入口**：根 `optimizer.py` / `librf_opt.py` / `em_opt.py` 把 `src/` 加入 `sys.path`
+  后转发到包内实现；新增 `pyproject.toml`，`pip install -e .` 后可 `virtuoso-optimizer`
+  或 `python -m virtuoso_optimizer`。包内 `--selftest` 从 `tests/` 定位。
+- **路径**：`lri/common._HERE` 指向包内 `data/`；`tools/gen_tech.py` 默认写
+  `data/tech`、`data/stream`；`eval/bin/skillgen.py`、`tech_smoke.py` 从包内 `data/`
+  取 SKILL/工艺/层映射，并注入 `LRI_TECH_DIR`。
+- **打包**：`make_kit.py` 排除项改为 `tests/*`、
+  `src/virtuoso_optimizer/lri/selftest_librf.py`、`CHANGELOG.md`、
+  `docs/DEVELOPMENT_GUIDE.md`。
+- **验证**：`--selftest` 179 OK、`librf_opt.py --selftest` 124 ok/0 fail、
+  `em_opt.py --selftest` PASS、`--gui-smoke` OK；wheel 构建通过且包含 `data/`；
+  包内 69 文件、36.7 万字符，仍是 2 片；VM 解包后 `--gui-smoke`、`--help` 与
+  两个兼容入口的缺测提示正常，`em_opt.py --selftest` PASS。
+
 ## 1.6.2 — 2026-10-31
 
 交付包不再携带 CHANGELOG 与开发指南；仓库与发版回归不变。`VERSION` 1.6.2。

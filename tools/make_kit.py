@@ -11,8 +11,8 @@
   MANIFEST.txt                分片校验和与重建命令
   probes/probe_08k.sh ...     粘贴上限标定用
 
-默认排除单元测试（selftest.py、test_proc_cross_section.py、lri/selftest_librf.py、
-fixtures/）与随附文档（CHANGELOG.md、DEVELOPMENT_GUIDE.md）：交付包只带运行时功能，
+默认排除单元测试（tests/、lri/selftest_librf.py）与随附文档
+（CHANGELOG.md、docs/DEVELOPMENT_GUIDE.md）：交付包只带运行时功能，
 完整回归与版本历史留在开发仓库。用 --include-tests / --include-docs 可以打回去。
 """
 import argparse, base64, fnmatch, gzip, hashlib, io, lzma, os, subprocess, sys, tarfile
@@ -32,10 +32,9 @@ def sh(cmd, cwd=None):
     return subprocess.check_output(cmd, cwd=cwd)
 
 # 交付包不含单测：测试文件只在开发仓库里，运行时功能不依赖它们。
-TESTS_EXCLUDE = ("selftest.py", "test_proc_cross_section.py",
-                 "lri/selftest_librf.py", "fixtures/*")
+TESTS_EXCLUDE = ("tests/*", "src/virtuoso_optimizer/lri/selftest_librf.py")
 # 交付包不含随附文档：README/LICENSE 留着，版本历史与开发指南只在仓库里。
-DOCS_EXCLUDE = ("CHANGELOG.md", "DEVELOPMENT_GUIDE.md")
+DOCS_EXCLUDE = ("CHANGELOG.md", "docs/DEVELOPMENT_GUIDE.md")
 
 def repo_files(repo):
     out = sh(["git", "-C", repo, "ls-files", "-z"])
@@ -102,7 +101,7 @@ def main():
     ap.add_argument("--include-tests", action="store_true",
                     help="把单元测试与 fixtures 也打进包（默认排除）")
     ap.add_argument("--include-docs", action="store_true",
-                    help="把 CHANGELOG.md、DEVELOPMENT_GUIDE.md 也打进包（默认排除）")
+                    help="把 CHANGELOG.md、docs/DEVELOPMENT_GUIDE.md 也打进包（默认排除）")
     a = ap.parse_args()
 
     repo = os.path.abspath(a.repo)
@@ -169,10 +168,9 @@ def main():
     man.append("files: %d  raw_tar: %d  %s: %d  base64: %d chars" % (
         len(files), len(raw), ext, len(blob), len(text)))
     man.append("tests: %s" % ("included" if a.include_tests else
-                              "excluded (selftest.py, test_proc_cross_section.py, "
-                              "lri/selftest_librf.py, fixtures/)"))
+                              "excluded (tests/, src/virtuoso_optimizer/lri/selftest_librf.py)"))
     man.append("docs: %s" % ("included" if a.include_docs else
-                             "excluded (CHANGELOG.md, DEVELOPMENT_GUIDE.md)"))
+                             "excluded (CHANGELOG.md, docs/DEVELOPMENT_GUIDE.md)"))
     man.append("chunks: %d at limit %d chars/paste" % (len(parts), a.limit))
     man.append("blob sha256: %s" % sha(blob))
     man.append("")

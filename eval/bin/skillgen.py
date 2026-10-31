@@ -23,7 +23,9 @@ import shutil
 import subprocess
 import time
 
-DEF_CWD = os.environ.get("LRI_WORKDIR") or os.getcwd()
+DEF_CWD = os.environ.get("LRI_WORKDIR") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "src", "virtuoso_optimizer", "data")
 DEF_LIB = "PCELL_RS4"
 DEF_VIRTUOSO = os.environ.get("LIBRF_VIRTUOSO",
                               "/opt/eda/cadence/IC618/tools/dfII/bin/virtuoso")
@@ -150,7 +152,7 @@ def build(case, work, cfg=None, cwd=DEF_CWD, lib=DEF_LIB, timeout=600,
           virtuoso=DEF_VIRTUOSO, strmout=DEF_STRMOUT, map_path=None, tech=None):
     """case: {'cell':str,'kind':str,'params':dict}。返回 dict（ok/gds/...）。
 
-    tech: 工艺档 key（tech/<key>_profile.il）；None = SMIC55 内置档。
+    tech: 工艺档 key（<data>/tech/<key>_profile.il）；None = SMIC55 内置档。
     """
     work = os.path.abspath(work)
     os.makedirs(work, exist_ok=True)
@@ -162,7 +164,7 @@ def build(case, work, cfg=None, cwd=DEF_CWD, lib=DEF_LIB, timeout=600,
     gds = os.path.join(work, cell + ".gds")
     slog = os.path.join(work, cell + "_strmout.log")
     ssum = os.path.join(work, cell + "_strmout.sum")
-    mp = layer_map(map_path or os.path.join(cwd, "stream", "pcell_rs4.map"))
+    mp = layer_map(map_path or os.path.join(work, "pcell_rs4.map"))
 
     with open(ilp, "w", encoding="utf-8") as f:
         f.write(_il_script(cell, kind, params, lib, cwd, tech=tech))
@@ -179,12 +181,15 @@ def build(case, work, cfg=None, cwd=DEF_CWD, lib=DEF_LIB, timeout=600,
     # SKILLGEN RESULT ret=nil，所以"没有 RESULT 行"重试一次不掩盖参数错误。
     m = None
     txt = ""
+    env = dict(os.environ)
+    if os.path.isdir(os.path.join(cwd, "tech")):
+        env.setdefault("LRI_TECH_DIR", os.path.join(cwd, "tech"))
     for attempt in (1, 2):
         try:
             with open(vout, "wb") as fo, open(verr, "wb") as fe:
                 pr = subprocess.run([virtuoso, "-nograph", "-log", logp,
                                      "-replay", ilp], cwd=cwd, timeout=timeout,
-                                    stdout=fo, stderr=fe)
+                                    stdout=fo, stderr=fe, env=env)
         except subprocess.TimeoutExpired:
             res["error"] = "virtuoso 超时（%ss）" % timeout
             return res

@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from optimizer import (
+from ...cli import (
     EXAMPLE_CFG, VERSION, Settings, Target, _iter_order, _read_text, _value_at,
     build_variables, format_eng, load_config, parse_eng, parse_netlist_parameters,
     resolve_netlist_path, resolve_run_dir, run_optimization, stop_all_runners, suggest_bounds,
@@ -271,7 +271,7 @@ class OptimizerGui:
         ))
     def _show_algo_help(self):
         try:
-            from algorithm import help_text
+            from ...algorithm import help_text
             text = help_text()
         except Exception as exc:
             text = "算法说明加载失败: %s" % exc
@@ -327,7 +327,7 @@ class OptimizerGui:
         self._build_progress_tab()
         self._build_result_tab()
         try:
-            import librf_opt
+            from ... import librf_opt
             librf_opt.register(self)
         except Exception as exc:
             print("librf_opt 未加载 (版图 EM 页不可用): %s" % exc)
@@ -463,7 +463,7 @@ class OptimizerGui:
     def _netlist_worker(self, cfg):
         try:
             try:
-                import netlist_create as _nc
+                from ...netlist import create as _nc
             except Exception as exc:
                 raise RuntimeError("netlist_create 模块不可用: %s" % exc)
             fn = getattr(_nc, "ensure_netlist", None)
@@ -517,7 +517,7 @@ class OptimizerGui:
             self._set_status("网表生成未完成: %s" % status)
             self._dialog("生成网表", text, error=True)
     def _env_probe(self):
-        import optimizer as _opt
+        from ... import cli as _opt
         filled = []
         for name, var in self.env_fields.items():
             if not var.get().strip():
@@ -541,7 +541,7 @@ class OptimizerGui:
         self._dialog("自动探测", msg)
     def _env_report(self):
         import subprocess as _sp
-        import optimizer as _opt
+        from ... import cli as _opt
         nl = chr(10)
         lines = ["环境自检（本机软件探查 + 进程环境）", ""]
         tools = _opt.discover_tools()
@@ -1264,7 +1264,7 @@ class OptimizerGui:
                          max_iter, tol, mock):
         try:
             try:
-                import optimizer as _opt
+                from ... import cli as _opt
             except Exception as exc:
                 raise RuntimeError("无法导入 optimizer: %s" % exc)
             fn = getattr(_opt, "run_em_align", None)
@@ -1328,7 +1328,7 @@ class OptimizerGui:
         em = report.get("em_align") if isinstance(report, dict) else None
         if not text and isinstance(em, dict):
             try:
-                import em_align as _ea
+                from ...em import align as _ea
                 text = _ea.format_markdown(em)
             except Exception as exc:
                 self._em_align_append_log("em_align.format_markdown 不可用: %s" % exc)

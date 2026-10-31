@@ -8,7 +8,7 @@ import re
 import sys
 
 from .common import (
-    _native_open, open, _HERE, DEF_FREQ, DEFAULT_TECH, LibrfError, note_created,
+    _native_open, open, _HERE, TEST_FIXTURES, DEF_FREQ, DEFAULT_TECH, LibrfError, note_created,
     safe_write_text, atomic_write_json, read_json, parse_eng, fmt_eng, run_cmd, _probe_data_file)
 from .tech import (
     load_tech_profile, _tech_deep_merge, build_tech, require_tech_ready, tech_layer, tech_text,
@@ -198,7 +198,7 @@ def _selftest():
                         "cell": "c1", "n": 3, "w": 10, "result": "/tmp/r.txt"})
     check("driver carries kind/seam", "'kind \"se\"" in _d and "'seam \"bottom\"" in _d)
     check("driver carries W/H numeric", "'W 160.0" in _d and "'tangle 180.0" in _d)
-    _fx = os.path.join(_HERE, "fixtures")
+    _fx = TEST_FIXTURES
     _cds = os.path.join(tmp, "cds.lib")
     with _native_open(_cds, "w") as _fh:
         _fh.write("DEFINE keepMe /k\n")

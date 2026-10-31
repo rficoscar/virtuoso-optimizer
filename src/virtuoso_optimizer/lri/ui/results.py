@@ -6,7 +6,7 @@ import json
 import math
 import os
 
-from optimizer import (
+from ...cli import (
     RealRunner)
 
 def read_result_any(iter_dir):

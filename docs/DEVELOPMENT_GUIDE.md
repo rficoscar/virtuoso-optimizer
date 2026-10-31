@@ -1,6 +1,6 @@
 # Virtuoso Optimizer 开发导览
 
-> 基线：1.6.2。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
+> 基线：1.7.0。定位用符号名，不写行号（压缩后行号随提交漂移，直接 grep 符号）。
 > 内容来自 AST 大纲、逐段精读和运行时实测（--help / --mock / patch_netlist）。
 
 ## 0. 一句话架构
@@ -12,24 +12,29 @@
 
 ## 1. 文件分工
 
+源码在 `src/virtuoso_optimizer/`，测试在 `tests/`，开发文档在 `docs/`。
+
 | 文件 | 行数 | 职责 | 主入口 |
 |---|---|---|---|
-| `optimizer.py` | 3683 | CLI、配置、Target 打分、Transform、Runner、主循环、报告 | `main` |
+| `cli.py` | 3683 | CLI、配置、Target 打分、Transform、Runner、主循环、报告 | `main` |
 | `algorithm.py` | 2958 | 14 种搜索策略 + 注册表 + 算法说明文案 | `create` |
-| `netlist_params.py` | 1460 | 层次网表解析与参数改写 | `patch_netlist` |
+| `netlist/params.py` | 1460 | 层次网表解析与参数改写 | `patch_netlist` |
 | `gui.py` | 17 | 兼容入口：再导出 `lri/ui/` 的历史接口 | `run_gui` |
 | `lri/ui/` | 4260 | Tk 图形界面实现：plots / netlist / results / reports / tech_tab / main（11 个页面） | `run_gui` |
-| `selftest.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
-| `librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
-| `lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
+| `data/librf.il` | 3799 | SKILL 侧：建版图（含差分对称 i3 内核）、eval serve（解析 psf 写 result.txt） | `_ensure_eval` 启动 |
+| `data/lri_pcell.il` | 202 | Virtuoso PCell 外壳：工艺档加载、CDF 参数、`pcDefinePCell` | `lriPcellDefine` |
 | `librf_opt.py` | 30 | 兼容入口：再导出 `lri/` 的历史接口（自测按需导入） | `register` |
 | `lri/` | 5276 | 版图器件生成 / EMX 迭代实现：common / tech / tools / skillio / snp / emx / device / runner / layout / ui_em / selftest_librf，含 i3 几何镜像与工艺门禁 | `register` |
-| `em_align.py` / `em_opt.py` / `em_bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
-| `netlist_create.py` / `proc_cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
+| `em/align.py` / `em/opt.py` / `em/bridge.py` | 1937 / 974 / 971 | 两阶段 EM 对齐、EM 优化、器件桥 | `run_em_align` |
+| `netlist/create.py` / `netlist/cross_section.py` | 1559 / 671 | 网表重生成、工艺剖面 | `create_netlist` / `build_cross_section` |
+| `tests/test_optimizer.py` | 2276 | 回归测试套件（179 个用例） | `--selftest` 装载 |
+| `tests/test_proc_cross_section.py` | 713 | 工艺剖面测试（随主套件装载） | — |
 
-根目录只留入口薄壳：`librf_opt.py` / `gui.py` 只负责再导出历史接口，实现放在 `lri/`
-与 `lri/ui/`。新增代码按职责进对应子模块，不要再往薄壳或大文件里堆；拆文件不增加
-文本包片数（片数只由压缩后的字节数决定）。
+仓库根的 `optimizer.py` / `librf_opt.py` / `em_opt.py` 只是薄入口：把 `src/` 加进
+`sys.path` 后转发到包内实现，保住 `python optimizer.py <task.json>` 的部署契约。
+包内 `librf_opt.py` / `gui.py` 是再导出门面；实现放在 `lri/` 与 `lri/ui/`。新增代码按
+职责进对应子模块，不要再往门面或大文件里堆；拆文件不增加文本包片数（片数只由压缩后
+的字节数决定）。
 
 纯标准库，零依赖；`matplotlib` 只用于可选收敛图（`plot_convergence`），导入失败静默跳过，
 不要加硬依赖。
@@ -49,9 +54,9 @@ argparse 参数：`config`（位置参数）、`--mock`、`--max-iter`、`--dump
 
 | 参数 | 调用 |
 |---|---|
-| `--selftest` | `run_selftests()` → subprocess 跑 `selftest.py` |
+| `--selftest` | `run_selftests()` → subprocess 跑 `tests/test_optimizer.py` |
 | `--reconstruct` | `_cli_reconstruct(argv)` |
-| `--gui` / `--gui-smoke` | `from gui import run_gui` |
+| `--gui` / `--gui-smoke` | `from .gui import run_gui` |
 | 缺 `config` | `ap.error` |
 | `--dump-state` | `dump_state(cfg)`（只解析 ADE 状态，不仿真） |
 | `--em-align` | `run_em_align(...)` → `print(json.dumps(report, indent=2))` |
@@ -73,14 +78,14 @@ argparse 参数：`config`（位置参数）、`--mock`、`--max-iter`、`--dump
 
 ## 3. 核心数据流与三个契约
 
-### 3.1 Transform（optimizer.py）
+### 3.1 Transform（cli.py）
 
 `Transform.__init__(variables, linking)`：变量按 `linking` 关系解析依赖顺序（`_resolve_order`）；
 `to_real(z)` / `to_unit(values)` 做物理量与 [0,1] 的归一。
 
 所有算法只在单位立方体里搜索，物理边界由这一层负责。新增 `scale` / `integer` 约束就改这里。
 
-### 3.2 策略契约（optimizer.py SpaceAdapter）
+### 3.2 策略契约（cli.py SpaceAdapter）
 
 `build_optimizer(strategy, transform, x0_values, all_names, seed=0, n_obj=1, n_constr=0, budget=None, **opts)`：
 
@@ -95,7 +100,7 @@ return SpaceAdapter(create(strategy, all_names, unit_bounds, x0=z0, ...), transf
 `tell(value, F, G)` 固定写成 `self.inner.tell([z], [f], [list(G)])`。
 历史坑：旧版把 `G` 直传会让约束引擎按元组解包崩掉。
 
-### 3.3 打分（optimizer.py evaluate_roles）
+### 3.3 打分（cli.py evaluate_roles）
 
 - `mode="scalar"`：`total = Σ max(e, 0) * weight`，`met = all(e <= 0)`
 - `mode="spec"` / `"pareto"`：`role="objective"` → F，`constraint` 与 `error` 都进 G
@@ -170,7 +175,7 @@ class AlgorithmBase(object):
 辅助：`constraint_violation(g)`、`deb_better(fa, ga, fb, gb)`、`scalar_of(f)`。
 RNG 状态用 `_rng_pack` / `_rng_unpack` JSON 化，续跑必需。
 
-### 4.4 标量 vs 多目标的接线（optimizer.py）
+### 4.4 标量 vs 多目标的接线（cli.py）
 
 ```python
 _SCALAR_ONLY = ("random", "grid", "simplex", "global", "de",
@@ -189,7 +194,7 @@ _SCALAR_ONLY = ("random", "grid", "simplex", "global", "de",
 `config` 视图的网表是层次的：变量可能出现在三处——顶层 `parameters` 行、`subckt` 头部的
 默认值、实例上的覆盖参数。只改顶层会出现「改了没用」的静默错误，这是本模块存在的唯一理由。
 
-### 5.2 解析管线（netlist_params.py）
+### 5.2 解析管线（netlist/params.py）
 
 ```
 文本
@@ -240,10 +245,10 @@ report = {
 - `patch_subckts=False` + `patch_instances=False` → 只改顶层，两条 warning 说明哪处没改
 - `scope_map={"wd": ["inst:X1"]}` → `counts={'top':0,'subckt':0,'instance':1}`
 
-### 5.5 optimizer.py 侧的胶水与降级
+### 5.5 cli.py 侧的胶水与降级
 
 `_netlist_params_module()` 导入失败的兜底：返回 None 时走
-`_legacy_parse_netlist_parameters` / `_legacy_rewrite_netlist_parameters`（只改顶层）。也就是说 netlist_params.py 可以独立演化，但一旦改崩，上层会静默退化成
+`_legacy_parse_netlist_parameters` / `_legacy_rewrite_netlist_parameters`（只改顶层）。也就是说 netlist/params.py 可以独立演化，但一旦改崩，上层会静默退化成
 「只改顶层」——排查「改了变量没生效」时先看这里有没有退化。
 
 其它网表工具：`netlist_analyses(text)`（静态找出网表有哪些分析语句，`_ANALYSIS_KEYWORDS`
@@ -283,7 +288,7 @@ report = {
 1. `Target.__init__` 的 `metric` 白名单加上名字（不加就直接 ValueError）
 2. `Target.metric_value` 加分支（`curves` 结构：`{output: {"x": [...], "y": [...]}}`）
 3. 若需要频点参数，仿照 `value_at` 的 `freq` 校验
-4. 补测试到 `selftest.py`；GUI 目标页的下拉在 `lri/ui/main.py` 的目标页里另有一份硬编码列表
+4. 补测试到 `tests/test_optimizer.py`；GUI 目标页的下拉在 `lri/ui/main.py` 的目标页里另有一份硬编码列表
 
 ### E3 新增 op / role
 
@@ -332,14 +337,14 @@ GUI 结果页读的是同一份 dict（`lri/ui/main.py` 的 report 展示处）�
    `python eval/bin/tech_smoke.py demo2m --config eval/config_demo2m.json`（换工艺冒烟）
    与 `python eval/bin/cli.py matrix --suite sym`（真 SKILL 扫掠，含 expect_fail）
 
-`selftest.py` 是 `unittest` 套件，由 `run_selftests` 用 `subprocess` 起子进程跑
-（隔离 `sys.path` 与 stdout），所以新测试加在 `selftest.py`，不要塞进 `optimizer.py`。
+`tests/test_optimizer.py` 是 `unittest` 套件，由 `run_selftests` 用 `subprocess` 起子进程跑
+（隔离 `sys.path` 与 stdout），所以新测试加在 `tests/`，不要塞进 `cli.py`。
 
 ## 8. 符号速查
 
 | 你要找的 | 符号 |
 |---|---|
-| CLI 总入口 | `optimizer.main` |
+| CLI 总入口 | `cli.main` |
 | 默认跑一次的完整流程 | `run_optimization` |
 | 主循环 | `Optimization.run` |
 | 单轮仿真 | `RealRunner._run_fast` |
@@ -348,10 +353,10 @@ GUI 结果页读的是同一份 dict（`lri/ui/main.py` 的 report 展示处）�
 | 策略工厂 | `build_optimizer` |
 | 策略注册表 | `algorithm.register` / `available` / `create` |
 | 算法说明文案 | `DESCRIPTIONS` / `help_text` |
-| 网表改写核心 | `netlist_params.patch_netlist` |
+| 网表改写核心 | `netlist.params.patch_netlist` |
 | 网表解析树 | `_parse` / `_analyze` |
 | GUI 入口 | `gui.run_gui` |
-| 回归测试 | `run_selftests` → `selftest.py` |
+| 回归测试 | `run_selftests` → `tests/test_optimizer.py` |
 
 ## 9. SKILL 侧契约（librf.il，注释已压缩进本节）
 
@@ -446,11 +451,10 @@ lab  = dbCreateLabel(cv list(txt "drawing") pt text just orient font height)  ; 
 
 - 安装脚本纯 ASCII；正文可容忍 CRLF（解码链 `tr -d '\r\n '`），在文本编辑器里粘贴保存后可直接 `sh` 执行。
 - 每片自带该片 sha256，最后一片额外校验整包 sha256 并解包到 `optimizer-<版本>/`。
-- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.6.2：61 文件、36.5 万字符）。
+- 单片不超过 200000 字符（RealVNC 剪贴板上限 256 kB）。全量包 xz 2 片（1.7.0：69 文件、36.7 万字符）。
 - 只出全量包一种（全部功能，不裁剪）；单元测试与随附文档不进包（`make_kit.py` 的
-  `TESTS_EXCLUDE` 排除 `selftest.py`、`test_proc_cross_section.py`、
-  `lri/selftest_librf.py`、`fixtures/`，`DOCS_EXCLUDE` 排除 `CHANGELOG.md`、
-  `DEVELOPMENT_GUIDE.md`；`--include-tests` / `--include-docs` 可打回）；
+  `TESTS_EXCLUDE` 排除 `tests/*`、`src/virtuoso_optimizer/lri/selftest_librf.py`，
+  `DOCS_EXCLUDE` 排除 `CHANGELOG.md`、`docs/DEVELOPMENT_GUIDE.md`；`--include-tests` / `--include-docs` 可打回）；
   每次发版重新出包并跑 `verify_kit.py`。
 
 出包命令：

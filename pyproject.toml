@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "virtuoso-optimizer"
+description = "Cadence Virtuoso/spectre 参数优化与 RF 版图/EM 自动化"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "rficoscar"}]
+requires-python = ">=3.6"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.scripts]
+virtuoso-optimizer = "virtuoso_optimizer.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "virtuoso_optimizer.VERSION"}
+
+[tool.setuptools.package-data]
+virtuoso_optimizer = [
+    "data/*.il",
+    "data/*.json",
+    "data/tech/*",
+    "data/stream/*",
+]

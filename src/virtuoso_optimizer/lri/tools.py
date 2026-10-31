@@ -12,7 +12,7 @@ from .tech import (
 
 def _import_discover():
     try:
-        import optimizer as _opt
+        from .. import cli as _opt
         return _opt.find_prog, _opt.find_file
     except Exception:
         return None, None

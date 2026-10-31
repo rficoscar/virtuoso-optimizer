@@ -43,7 +43,7 @@ def _abs_path(path, base=None):
 
 def _audit(kind, path=None, detail=""):
     try:
-        import optimizer as _optimizer
+        from .. import cli as _optimizer
         _optimizer.audit(kind, path, detail)
     except Exception:
         pass

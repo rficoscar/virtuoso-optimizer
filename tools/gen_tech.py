@@ -5,16 +5,16 @@
 一个 JSON 是唯一事实源：SKILL 几何内核、strmout 层映射、EMX/DRC 评估
 都从它派生，换工艺不改代码。
 
-    python3 tools/gen_tech.py tech/smic55ll_ulp_rf.json
-    python3 tools/gen_tech.py tech/x.json --out-dir tech --map-dir stream \
+    python3 tools/gen_tech.py src/virtuoso_optimizer/data/tech/smic55ll_ulp_rf.json
+    python3 tools/gen_tech.py src/virtuoso_optimizer/data/tech/x.json \
         --eval-config eval/config_x.json
 
 产物：
-    tech/<key>_profile.il    load() 后设置 librfTech / librfStack* / librfDrc
-    stream/<key>.map         仅含本 PCell 用到的层，strmout -map 用
-    eval/config_<key>.json   评估脚本用（layers/text/limits/emx/calibre）
+    data/tech/<key>_profile.il    load() 后设置 librfTech / librfStack* / librfDrc
+    data/stream/<key>.map         仅含本 PCell 用到的层，strmout -map 用
+    eval/config_<key>.json        评估脚本用（layers/text/limits/emx/calibre）
 
-JSON 结构见 tech/smic55ll_ulp_rf.json。校验项：
+JSON 结构见 data/tech/smic55ll_ulp_rf.json。校验项：
   * stack_order 里的金属必须在 metals 中定义；
   * 每个 via 的 lower/upper 必须是 stack_order 里相邻的一对；
   * defaults.metal_main 必须在 metal_aux 之上，且两者之间通孔链完整。
@@ -26,6 +26,9 @@ import io
 import json
 import os
 import sys
+
+DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "src", "virtuoso_optimizer", "data")
 
 
 def load(path):
@@ -303,8 +306,8 @@ def emit_eval(d):
 def main(argv):
     ap = argparse.ArgumentParser(description="工艺档 JSON -> SKILL/映射/评估配置")
     ap.add_argument("tech_json")
-    ap.add_argument("--out-dir", default="tech")
-    ap.add_argument("--map-dir", default="stream")
+    ap.add_argument("--out-dir", default=os.path.join(DATA, "tech"))
+    ap.add_argument("--map-dir", default=os.path.join(DATA, "stream"))
     ap.add_argument("--eval-config", default=None,
                     help="写出评估配置（缺省不写）")
     ap.add_argument("--check", action="store_true", help="只校验，不写文件")

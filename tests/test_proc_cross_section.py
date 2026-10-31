@@ -10,14 +10,15 @@ import sys
 import tempfile
 import unittest
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-if BASE not in sys.path:
-    sys.path.insert(0, BASE)
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(BASE, "src")
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
 
-import proc_cross_section as pcs
+import virtuoso_optimizer.netlist.cross_section as pcs
 
-PROC = os.path.join(BASE, "fixtures", "demo_stack.proc")
-LAYERMAP = os.path.join(BASE, "fixtures", "demo_stack.layermap")
+PROC = os.path.join(BASE, "tests", "fixtures", "demo_stack.proc")
+LAYERMAP = os.path.join(BASE, "tests", "fixtures", "demo_stack.layermap")
 
 BANNED_TOKENS = ("X" "MC", "55R" "FSOI", "1P" "5M", "AL" "PA",
                  "MI" "MB", "MI" "MT", "T" "M" "R1", "T" "M")
@@ -602,15 +603,16 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertNotIn("PA", _texts(canvas))
 
     def test_module_import_without_tk(self):
-        code = ("import sys; sys.path.insert(0, '.'); "
-                "import proc_cross_section; "
+        code = ("import sys; sys.path.insert(0, 'src'); "
+                "import virtuoso_optimizer.netlist.cross_section; "
                 "print('tkinter' in sys.modules)")
         out = subprocess.check_output([sys.executable, "-I", "-c", code],
                                       cwd=BASE)
         self.assertEqual(out.decode("utf-8", "replace").strip(), "False")
 
     def test_source_clean_and_sized(self):
-        path = os.path.join(BASE, "proc_cross_section.py")
+        path = os.path.join(SRC, "virtuoso_optimizer", "netlist",
+                            "cross_section.py")
         with io.open(path, "rb") as fh:
             text = fh.read().decode("utf-8")
         self.assertIn("横截面", text)
@@ -624,15 +626,16 @@ class ProcCrossSectionTest(unittest.TestCase):
         for token in BANNED_TOKENS:
             self.assertNotIn(token, text, token)
         for name in ("demo_stack.proc", "demo_stack.layermap"):
-            fixture = os.path.join(BASE, "fixtures", name)
+            fixture = os.path.join(BASE, "tests", "fixtures", name)
             with io.open(fixture, "rb") as fh:
                 content = fh.read().decode("utf-8")
             for token in BANNED_TOKENS:
                 self.assertNotIn(token, content, name + ":" + token)
 
     def test_py36_syntax(self):
-        paths = [os.path.join(BASE, "proc_cross_section.py"),
-                 os.path.join(BASE, "test_proc_cross_section.py")]
+        paths = [os.path.join(SRC, "virtuoso_optimizer", "netlist",
+                              "cross_section.py"),
+                 os.path.join(BASE, "tests", "test_proc_cross_section.py")]
         for path in paths:
             with io.open(path, "rb") as fh:
                 source = fh.read().decode("utf-8")

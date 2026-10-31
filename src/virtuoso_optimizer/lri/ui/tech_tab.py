@@ -88,7 +88,7 @@ class _TechTab:
             val = cfg.get(key)
             self.vars[key].set(default if val is None else str(val))
     def collect_tech(self):
-        import librf_opt
+        from ... import librf_opt
         v = {k: (var.get() or "").strip() for k, var in self.vars.items()}
         return librf_opt.build_tech(
             techlib=v.get("techlib") or None,
@@ -104,7 +104,7 @@ class _TechTab:
                 out[key] = v
         return out
     def check(self, parent=None, show_dialog=False):
-        import librf_opt
+        from ... import librf_opt
         try:
             prof = self.collect_tech()
             warns = librf_opt.require_tech_ready(prof)
@@ -141,7 +141,7 @@ class _TechTab:
         if self._xs_frame is not None:
             return
         try:
-            from proc_cross_section import build_cross_section_frame
+            from ...netlist.cross_section import build_cross_section_frame
         except Exception as exc:
             self._xs_frame = "unavailable"
             self.ttk.Label(self.xs_host, foreground="#888888",
