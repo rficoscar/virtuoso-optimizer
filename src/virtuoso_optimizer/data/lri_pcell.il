@@ -9,6 +9,17 @@
 ;   lriPcellDefine("MYLIB" "ind_sym")     ; register the cell in MYLIB
 ; Then instantiate ind_sym in Library Manager; the parameters are the CDF table below.
 ;
+; Fresh sessions: the compiled pcell body is stored in the library master and is
+; re-evaluated without loading this file. It self-bootstraps by searching
+; LRI_DATA_DIR, $LRI_HOME/src/virtuoso_optimizer/data, "." and
+; src/virtuoso_optimizer/data for librf.il / lri_pcell.il, then loads the tech
+; profile from LRI_TECH_DIR, ./tech or the inline SMIC table. If nothing is found
+; the instance fails with "librf.il not found" instead of silently using demo
+; M5/M4 layers.
+; Upgrading an existing PCell: load the new lri_pcell.il in any session and call
+; lriPcellDefine again with the same library/cell name; the master is redefined
+; in place and existing instances re-evaluate on the next open.
+;
 ; Parameters (one-to-one with the user-facing fields):
 ;   rx/ry    horizontal/vertical radius (outer-metal half axes; footprint = 2rx x 2ry + lead_len)
 ;   n        turns per arm (integer; total differential turns = 2n)
@@ -48,6 +59,11 @@ procedure(lriTechFind(name)
     when(lriTechDir  cands = append(cands list(lriTechDir)))
     d = getShellEnvVar("LRI_TECH_DIR")
     when(d && d != ""  cands = append(cands list(d)))
+    d = getShellEnvVar("LRI_DATA_DIR")
+    when(d && d != ""  cands = append(cands list(strcat(d "/tech"))))
+    when(boundp('lriPcellDataDir)
+      when(lriPcellDataDir && lriPcellDataDir != ""
+        cands = append(cands list(strcat(lriPcellDataDir "/tech")))))
     cands = append(cands list("./tech" "../tech"))
     p = nil
     foreach(c cands
