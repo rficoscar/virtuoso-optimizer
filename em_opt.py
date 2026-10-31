@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-"""em_opt.py — 电磁优化器 EmOptimizer（Python 3.6+ 纯 stdlib）。"""
 from __future__ import print_function
 
 import json
@@ -20,9 +19,6 @@ try:
     import algorithm as _alg
 except Exception:
     _alg = None
-# C-5：正式库来自 em_bridge.EmLibrary；缺失时退 _MockLibrary（仅 selftest）。
-# 双实现 fallback：distance_of / _q_at_f0 与 em_bridge 同名函数语义不同，
-# 改动任一侧需同步评估另一侧（本文件为离线最小实现）。
 try:
     from em_bridge import (EmLibrary as _RealLibrary,
                            DEVICE_STAGES as _DEV_STAGES,
@@ -58,7 +54,6 @@ GEOM_BOUNDS_DEFAULT = {
              "s": (1.5, 8.0), "dout": (50.0, 300.0), "gap": (2.0, 30.0)},
 }
 _ANG_KEYS = ("theta", "theta_e", "theta_o")
-# 元数据键不参与距离/J（与 em_bridge.distance_of 的 skip 集一致）
 _META_KEYS = ("f0", "band", "kind", "ports", "band_hi")
 _MISSING_PER = {"delta": None, "normalized": 99.0, "in_tol": False}
 
@@ -67,9 +62,7 @@ def _ensure_dir(path):
     if d and not os.path.isdir(d):
         os.makedirs(d)
 
-# 距离 / 误差核（契约 D4/D5）
 def _tol_eff(tol, key, t):
-    """有效容差：θ 为绝对度（"3%"→2.7°）；其余为 rel×|t|；缺省 0.05/5°。"""
     if key in _ANG_KEYS:
         if tol is None:
             return 5.0
@@ -86,7 +79,6 @@ def _tol_eff(tol, key, t):
     return rel * max(abs(float(t)), 1e-30)
 
 def error_kernel(actual, target, tol, key):
-    """φ = max(0, |Δ|-tol_eff) / max(tol_eff, ε·scale)。"""
     if actual is None or target is None:
         return 1.0
     try:
@@ -102,17 +94,12 @@ def error_kernel(actual, target, tol, key):
     return (raw - tol_eff) / max(tol_eff, 1e-3 * scale)
 
 def _metric_val(fp, key, f0=None):
-    """取值；Q@f0 缺失时回退 Qcurve 插值。"""
     av = (fp or {}).get(key)
     if av is None and key == "Q@f0":
         av = _q_at_f0(fp, f0)
     return av
 
 def distance_of(actual_fp, target, tolerances=None, f0=None):
-    """验收距离 d = max_i |Δ_i|/tol_i（θ 用 |Δθ|/theta_tol_deg）。
-
-    f0：Q@f0 的求值频点（调用方应传 request.f_op；缺省退回 target["f0"]）。
-    """
     tolerances = tolerances or {}
     f0 = f0 if f0 is not None else (target or {}).get("f0")
     per = {}
@@ -126,7 +113,6 @@ def distance_of(actual_fp, target, tolerances=None, f0=None):
         try:
             tv = float(tv)
         except (TypeError, ValueError):
-            # 工程字符串（"587p"）等非数值目标交给上层解析，不参与验收
             continue
         any_m = True
         av = _metric_val(actual_fp, key, f0)
@@ -140,13 +126,10 @@ def distance_of(actual_fp, target, tolerances=None, f0=None):
         per[key] = {"delta": delta, "normalized": norm, "in_tol": norm <= 1.0}
         dmax = max(dmax, norm)
     if not any_m:
-        # 没有可验收指标时不能算 0 距离（否则空目标会被当成达标）；
-        # 与 em_bridge.distance_of 一致返回 inf。
         return float("inf"), {}
     return dmax, per
 
 def _q_at_f0(fp, f0):
-    """Q@f0 回退：仅 Qcurve 线性插值（em_bridge 版另支持 Q dict，需同步评估）。"""
     if not fp or f0 is None:
         return None
     qc = fp.get("Qcurve") or []
@@ -172,7 +155,6 @@ def _q_at_f0(fp, f0):
     return qc[-1][1]
 
 def J_of(actual_fp, target, tolerances=None, weights=None, f0=None):
-    """搜索目标 J = Σ w_i φ_i。weight 只进 J，不进验收 d。"""
     tolerances = tolerances or {}
     weights = weights or {}
     f0 = f0 if f0 is not None else (target or {}).get("f0")
@@ -192,7 +174,6 @@ def J_of(actual_fp, target, tolerances=None, weights=None, f0=None):
     return total
 
 def _scalar_projection(fp):
-    """C-3：delivered = actual_fingerprint 的标量投影（history 列用）。"""
     out = {}
     for k, v in (fp or {}).items():
         if k.startswith("_") or isinstance(v, bool):
@@ -202,7 +183,6 @@ def _scalar_projection(fp):
     return out
 
 def _penalty_tell(algo, x, best_J):
-    """失败点 tell 大惩罚（不产生 BIG_ERROR 语义：仅在算法内部记账）。"""
     if algo is None:
         return
     try:
@@ -210,10 +190,7 @@ def _penalty_tell(algo, x, best_J):
     except Exception:
         pass
 
-# 结果库（最小实现；生产用 em_bridge.EmLibrary。API 冻结 query/put/nearest）
 class _MockLibrary(object):
-    """结果库 fallback（em_bridge 缺失 / selftest 显式注入）。"""
-
     def __init__(self, root=None):
         self.root = os.path.abspath(os.path.expanduser(
             root or os.path.join(os.getcwd(), "work", "em_lib")))
@@ -244,7 +221,6 @@ class _MockLibrary(object):
             f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
 
     def put(self, record):
-        """入库（幂等）。返回 record_id。失败点 usable=false 可入但 nearest 过滤。"""
         if not record:
             return None
         rec = dict(record)
@@ -268,7 +244,6 @@ class _MockLibrary(object):
     def query(self, device_type, target_fingerprint, tolerances=None,
               tech=None, emx_cfg_hash=None, constraints=None, f0=None,
               grid_spec=None):
-        """库侧匹配；签名/返回对齐 em_bridge.EmLibrary.query（C-4）。"""
         try:
             hits = self.nearest(device_type, target_fingerprint, k=5,
                                 tech=tech, emx_cfg_hash=emx_cfg_hash)
@@ -298,7 +273,6 @@ class _MockLibrary(object):
 
     def nearest(self, device_type, target_fingerprint, k=5, tech=None,
                 emx_cfg_hash=None, tolerances=None, f0=None):
-        """按验收距离 d 排序取 k 条可用记录（签名对齐 EmLibrary.nearest）。"""
         target = dict(target_fingerprint or {})
         if f0 is not None:
             target.setdefault("f0", f0)
@@ -322,12 +296,10 @@ class _MockLibrary(object):
         out.sort(key=lambda r: r.get("distance", 99))
         return out[: max(1, int(k))]
 
-# 请求构造（em_request/1）
 def build_request(device_type, target, tolerances=None, f_op=None,
                   weights=None, geom_prior=None, fixed_geom=None,
                   budget=None, tech=None, mock=False, library=None,
                   verbose=False):
-    """构造 EmOptimizer.solve 的请求 dict（schema em_request/1）。"""
     if not f_op:
         raise ValueError("em_request: f_op 必填（C-O4，不猜）")
     dev = (device_type or "ind").lower()
@@ -343,9 +315,7 @@ def build_request(device_type, target, tolerances=None, f_op=None,
         "library": library, "verbose": bool(verbose),
     }
 
-# Mock EM（无 license 全流程）
 def _mock_fingerprint(device_type, geom, f_op):
-    """合成单调指纹（与 v07 GeomRunner mock 同族；tl/cpl/xfmr 解析近似）。"""
     dev = (device_type or "ind").lower()
     g = geom or {}
     if dev in ("ind", "ct"):
@@ -385,12 +355,8 @@ def _mock_fingerprint(device_type, geom, f_op):
         return {"kind": "xfmr", "Lp": lp, "Ls": ls, "k": k, "L0": lp, "Ls0": ls, "Lunit": "H"}
     return {}
 
-# EmOptimizer
 class EmOptimizer(object):
-    """电磁优化器。solve(request) -> em_record/1。"""
-
     def __init__(self, library=None, work=None, make_em=None):
-        # C-5：优先正式库 em_bridge.EmLibrary；缺失才用 _MockLibrary
         if library is not None:
             self.library = library
         elif _RealLibrary is not None:
@@ -401,12 +367,11 @@ class EmOptimizer(object):
         else:
             self.library = _MockLibrary()
         self.work = os.path.abspath(os.path.expanduser(work or os.path.join(os.getcwd(), "work")))
-        self._make_em = make_em   # 可注入：geom -> fingerprint dict
+        self._make_em = make_em
         self._n_em = 0
         self._n_fail = 0
         self._cache = {}
         self._cache_path = os.path.join(self.work, ".em_opt_geom_cache.json")
-    # 几何 <-> 向量
     def _bounds(self, dev, geom_prior, fixed_geom):
         base = dict(GEOM_BOUNDS_DEFAULT.get(dev, GEOM_BOUNDS_DEFAULT["ind"]))
         keys = [k for k in base if k not in (fixed_geom or {})]
@@ -424,7 +389,7 @@ class EmOptimizer(object):
         g = dict(fixed_geom or {})
         for k, v in zip(keys, x):
             if k == "n" or k in ("np", "ns"):
-                g[k] = round(float(v) * 2.0) / 2.0   # 匝数半步进
+                g[k] = round(float(v) * 2.0) / 2.0
             else:
                 g[k] = round(float(v), 2)
         return g
@@ -438,17 +403,13 @@ class EmOptimizer(object):
         return json.dumps(geom, sort_keys=True)
 
     def _eval_geom(self, req, geom):
-        """跑一点 EM（或 mock）。返回 (fingerprint|None, status, message)。"""
         dev = req["device_type"]
-        # 缓存键 = device_type + f_op + 几何哈希：mock/真实指纹都随 f_op 变化，
-        # ind/ct 等器件同几何也可能得到不同 kind；cell 名仍只用几何哈希。
         ghash = self._geom_hash(geom)
         f_op = req.get("f_op")
         try:
             f0tag = "%.17g" % float(f_op)
         except (TypeError, ValueError):
             f0tag = str(f_op)
-        # mock/真实两条路径的指纹不可互换：同几何同频点也必须分开缓存。
         key = "%s|%s|%s|%s" % (dev, f0tag, ghash,
                                "mock" if req.get("mock") else "real")
         if key in self._cache:
@@ -478,13 +439,11 @@ class EmOptimizer(object):
         if _lo is None:
             return None, "infra", "librf_opt 不可用"
         try:
-            # cell 名用 sha1 前 8 位（跨进程稳定，不用内建 hash）
             try:
                 import hashlib as _hl
                 cell_tag = _hl.sha1(ghash.encode("utf-8")).hexdigest()[:8]
             except Exception:
                 cell_tag = "%08x" % (abs(hash(ghash)) % (10 ** 8))
-            # 频点必须非空：None/空会让 EMX 无扫频参数而挂起
             out = _lo.make_layout_emx(
                 dev if dev != "ct" else "ind", geom,
                 cell="emopt_%s_%s" % (dev, cell_tag), work=self.work,
@@ -495,8 +454,6 @@ class EmOptimizer(object):
                 emx_timeout=req.get("emx_timeout") or 120,
                 skill_timeout=req.get("skill_timeout") or 60)
             fp = out.get("fingerprint") or {}
-            # 真实路径：make_layout_emx 把 sNp 放在 out["snp"]，指纹默认在扫描
-            # 首点/DC 提取；优化目标在 f_op，用 sNp 按 f_op 重提取才与 mock 同口径。
             snp = out.get("snp")
             if snp and req.get("f_op"):
                 try:
@@ -529,9 +486,7 @@ class EmOptimizer(object):
                 json.dump(self._cache, f)
         except Exception:
             pass
-    # 热启动
     def warm_start_geom(self, req):
-        """库 nearest(k=5) -> x0。返回 (geom|None, origin)。"""
         dev = req["device_type"]
         lib = req.get("library") or self.library
         try:
@@ -551,13 +506,9 @@ class EmOptimizer(object):
             except ValueError:
                 geom = {}
         return (dict(geom), "lib_kNN") if geom else (None, "center")
-    # 主入口
     def solve(self, request):
-        """求解。返回 em_record/1 dict。不抛业务异常。"""
         req = dict(request or {})
         dev = (req.get("device_type") or "ind").lower()
-        # _eval_geom/_run_search_stage 直接取 req["device_type"]；此处归一化后回写，
-        # 否则省略 device_type 的请求会 KeyError 逃出 solve（违约“不抛业务异常”）。
         req["device_type"] = dev
         target = dict(req.get("target") or {})
         tol = dict(req.get("tolerances") or {})
@@ -601,8 +552,6 @@ class EmOptimizer(object):
             sub_tol = {k: tol.get(k) for k in keep}
             sub_w = {k: wts.get(k, 1.0) for k in keep}
             if not sub_t:
-                # 目标不含该 stage 的主指标（如 ind 只给 Q@f0）：空子目标会让
-                # distance 恒为 0、一轮即"达标"；退回全目标，至少让搜索有信号。
                 sub_t = dict(target)
                 sub_tol = dict(tol)
                 sub_w = dict(wts)
@@ -613,8 +562,6 @@ class EmOptimizer(object):
             fp, geom, J, d, st = self._run_search_stage(
                 req, sub_t, sub_tol, sub_w, keys, bounds, x_stage,
                 b_s, time_cap, t0)
-            # 跨 stage 只能用同一（全指标）键集比较：stage 子集的 J 随 key
-            # 增多单调变大，不能直接跨级比。故每级都用全 target 重算。
             full_d = full_J = None
             if fp is not None:
                 full_d, _full_per = distance_of(fp, target, tol, f0=f_op)
@@ -654,7 +601,6 @@ class EmOptimizer(object):
         return rec
 
     def _run_search_stage(self, req, target, tol, wts, keys, bounds, x0, max_em, time_cap, t0):
-        """单 stage 搜索循环。返回 (fp, geom, J, d, status)。"""
         dev = req["device_type"]
         fixed_geom = dict(req.get("fixed_geom") or {})
         algo_name = (req.get("budget") or {}).get("strategy") or DEV_ALGO.get(dev, "lshade")
@@ -706,12 +652,9 @@ class EmOptimizer(object):
                 if infra_streak >= 3:
                     return best_fp, best_geom, best_J, best_d, "infra_fail"
                 continue
-            # 非 infra 的尝试（成功或 dnc）才占预算：持续 dnc 时不能靠
-            # time_cap 空转到 1800 s。infra 不计入，但成功即清零连续计数。
             infra_streak = 0
             n_attempt += 1
             if st != "ok" or fp is None:
-                # 失败记账只在 _eval_geom（避免 em_fail 双计）
                 _penalty_tell(algo, x, best_J)
                 continue
             J = J_of(fp, target, tol, wts, f0=req.get("f_op"))
@@ -784,7 +727,6 @@ class EmOptimizer(object):
                        if not k.startswith("_") and k not in _META_KEYS},
             "weak_hit": weak,
             "warns": ["weak_hit distance=%.2f" % (d or 0)] if weak else [],
-            # em_bridge 的契约列名是 snp_path；真实 sNp 以 _snp 私有键随指纹缓存。
             "snp": (fp or {}).get("snp") or (fp or {}).get("_snp"),
             "source": "optimization",
             "em_meta": {"iters": self._n_em,
@@ -794,9 +736,7 @@ class EmOptimizer(object):
         })
         return rec
 
-# CLI 冒烟（mock）
 def _selftest():
-    """mock 全流程自测（无 license）。返回失败数。"""
     fails = 0
     work = os.path.join(os.getcwd(), "work", "emopt_selftest")
     lib_root = os.path.join(work, "em_lib")
@@ -847,7 +787,6 @@ def _selftest():
         print("  FAIL %s: %s" % (label, fail_d))
         return 1
 
-    # 回归 1：跨 stage 用全指标集选择，status 与全指标距离一致
     tl_fp = rec_t.get("actual_fingerprint") or {}
     tl_d, tl_st, tl_th = (rec_t.get("distance"), rec_t.get("status"),
                           tl_fp.get("theta"))
@@ -861,7 +800,6 @@ def _selftest():
                   "theta=%s <=1.2（仍选 stage-0）" % tl_th)
     fails += _chk(tl_st != "hit_grid", "tl 不再伪报 hit_grid",
                   "status=%s" % tl_st, "status=hit_grid")
-    # 回归 2a：Q@f0 用 f0 从 Qcurve 插值
     q_fp, q_tg, q_tol = ({"Qcurve": [[1e9, 7.0], [2e10, 9.0]]},
                          {"Q@f0": 8.0}, {"Q@f0": 0.2})
     d_q, per_q = distance_of(q_fp, q_tg, q_tol, f0=1e10)
@@ -872,7 +810,6 @@ def _selftest():
     fails += _chk(d_q0 == 99.0, "Q@f0 无 f0 回退 99", "d=99", "d=%s" % d_q0)
     fails += _chk(j_q == 0.0 and j_q0 == 1.0, "Q@f0 J f0 生效", "J=0/1",
                   "J=%s/%s" % (j_q, j_q0))
-    # 回归 2b：solve 全流程把 request.f_op 传给 Q@f0
     def _q_make(dev, geom, fop):
         return {"kind": "ind", "L0": 5.87e-10,
                 "Qcurve": [[1e9, 7.0], [2e10, 9.0]]}
@@ -887,7 +824,6 @@ def _selftest():
                   and q_rec.get("status") == "hit_grid", "solve Q@f0 接线",
                   "d=%s status=%s" % (q_rd, q_rec.get("status")),
                   "d=%s status=%s" % (q_rd, q_rec.get("status")))
-    # 回归 3a：元数据键（kind/ports/f0/band/band_hi）不计分
     meta_tg = {"L0": 1e-9, "kind": "ind", "ports": ["p1"], "f0": 1e9,
                "band": "b", "band_hi": 2e9}
     d_m, per_m = distance_of({"L0": 1e-9}, meta_tg, {"L0": 0.1})
@@ -897,7 +833,6 @@ def _selftest():
     fails += _chk(d_m == 0.0 and j_m == 0.0 and not bad_meta, "元数据键跳过",
                   "d=0 J=0 keys=%s" % sorted(per_m),
                   "d=%s J=%s keys=%s" % (d_m, j_m, bad_meta))
-    # 回归 3b：θ=None 不得抛 TypeError（数值 actual + None target）
     try:
         d_n, per_n = distance_of({"Z0": 50.0, "theta": 12.0},
                                  {"Z0": 50.0, "theta": None}, {"Z0": 0.05})
@@ -909,7 +844,6 @@ def _selftest():
     fails += _chk(theta_err is None and d_n == 0.0 and j_n == 0.0
                   and "theta" not in per_n, "theta=None 不崩", "d=0 J=0",
                   "err=%s" % theta_err)
-    # 回归 4：几何缓存键需含 device_type + f_op（原仅几何哈希）
     c_opt = EmOptimizer(library=_MockLibrary(root=os.path.join(work, "c_lib")),
                         work=os.path.join(work, "c_work"))
     c_geom = {"w": 10.0, "len": 200.0}
@@ -933,7 +867,6 @@ def _selftest():
     fails += _chk(c_ind.get("kind") == "ind" and c_ct.get("kind") == "ct",
                   "缓存按 device 分离", "ind/ct",
                   "%s/%s" % (c_ind.get("kind"), c_ct.get("kind")))
-    # 回归 5：省略 device_type 不得 KeyError（solve 内归一化后回写 req）。
     try:
         r_nd = EmOptimizer(library=_MockLibrary(root=os.path.join(work, "nd_lib")),
                            work=os.path.join(work, "nd_work")).solve(
@@ -945,7 +878,6 @@ def _selftest():
     fails += _chk(nd_err is None and r_nd.get("status") in
                   ("hit_grid", "best_effort"), "省略 device_type 不崩",
                   "status=%s" % r_nd.get("status"), "err=%r" % nd_err)
-    # 回归 6：字符串/元数据目标不参与验收；空目标不得算 d=0。
     d_s, per_s = distance_of({"L0": 5.87e-10},
                              {"L0": "587p", "kind": "ind"}, {"L0": 0.05})
     d_e, per_e = distance_of({"L0": 5.87e-10}, {"kind": "ind"}, {"L0": 0.05})
@@ -953,7 +885,6 @@ def _selftest():
                   and d_e == float("inf") and not per_e,
                   "非数值/空目标返回 inf", "d=%s/%s" % (d_s, d_e),
                   "d=%s/%s per=%s/%s" % (d_s, d_e, sorted(per_s), sorted(per_e)))
-    # 回归 7：持续 dnc 也占预算（旧实现会空转到 time_cap）。
     dnc_calls = [0]
     dnc_opt = EmOptimizer(library=_MockLibrary(root=os.path.join(work, "dnc_lib")),
                           work=os.path.join(work, "dnc_work"))
@@ -968,7 +899,6 @@ def _selftest():
                   "dnc 占预算", "calls=%d status=%s"
                   % (dnc_calls[0], dnc_rec.get("status")),
                   "calls=%d status=%s" % (dnc_calls[0], dnc_rec.get("status")))
-    # 回归 8：infra 连续计数成功即清零（旧实现三次累计即 infra_fail）。
     seq = ["infra", "ok", "infra", "infra", "ok", "ok", "ok", "ok", "ok"]
     seq_i = [0]
     inf_opt = EmOptimizer(library=_MockLibrary(root=os.path.join(work, "inf_lib")),
@@ -990,7 +920,6 @@ def _selftest():
                   "infra 计数成功清零", "calls=%d stage=%s"
                   % (seq_i[0], inf_stage.get("status")),
                   "calls=%d stage=%s" % (seq_i[0], inf_stage.get("status")))
-    # 回归 9：真实路径保留 sNp 并按 f_op 重提取指纹（不丢 out["snp"]）。
     if _lo is not None:
         saved_make = getattr(_lo, "make_layout_emx", None)
         saved_fp = getattr(_lo, "fingerprint_from_snp", None)

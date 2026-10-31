@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.5.0 — 2026-10-31
+
+代码压缩版。CLI 参数、GUI 页面与控件、报告 JSON 字段、配置键、测试断言的行为均不变；
+只删注释、docstring、死代码和重复逻辑。13 个源码文件合计 32329 → 29308 行
+（-3021，约 9.3%），相对 1.4.9 的 diff 为 +697/−3720。
+
+- **注释与 docstring**：Python 侧按 AST 等价校验后删除（去注释前后语法树逐节点相同），
+  SKILL 侧按 token 流等价校验后删除（字符串内容与括号结构逐字节保持），仅保留少量
+  「改了会静默出错」的约束注释（如 `tell` 的 `G` 必须包一层、spectre 退出码不可信、
+  `state_dir` 相对路径基准）。架构说明移入 `DEVELOPMENT_GUIDE.md`。
+- **死代码**：`optimizer.py` 删 `audit_line`、`strategy_names`、`_tell_algo`、
+  `Target.spec`；`librf_opt.py` 删 8 个未引用符号与一个空分支；`librf.il` 删 7 个
+  未被调用的过程；`gui.py` 删已失效的 `_em_hook` 属性。`em_opt.py` 虽未接入生产
+  路径，但有独立 CLI 自测且写入 1.2.x 的 CHANGELOG，保留。
+- **结构去重**：`optimizer.py` 合并 JSONL 读写、manifest 记录、失败记录路径；三个
+  重启半径计算收敛到 `_decay_radius`，三个 `restore` 的 RNG 解包收敛到
+  `_restore_common`。`netlist_params.py` 抽出 `_mask_block_comments` / `_apply_edits`。
+  `librf_opt.py` 抽出 `_prepare_write`（写入前备份）与 `_driver_text`（两处 driver.il
+  生成）。`proc_cross_section.py` 合并 `_int_map`/`_float_map` 为 `_num_map`。
+  `gui.py` 抽出表格增删改查辅助与变量扩展字段的改名/清理。`algorithm.py` 补
+  `AlgorithmBase` 的公共辅助。
+- **文档**：README 改成纯说明文，去掉修辞句；新增 `DEVELOPMENT_GUIDE.md`：架构与
+  数据流、策略注册契约、网表改写四规则、8 个扩展点、回归三步，以及 SKILL 侧双模式/
+  eval-serve 协议/版图几何不变量（原 `librf.il` 的 407 行注释压缩进 §9）。
+- **验证**：`--selftest` 179、`netlist_create` 20/20、`netlist_params` 125/125、
+  `em_align` 108、`em_opt` PASS、`librf_opt` 123、`test_proc_cross_section` 42、
+  `--gui-smoke` OK、`--help` 正常。改动均为等价变换，无功能变更。
+
 ## 1.4.9 — 2026-10-30
 
 跨模块一致性：补完 1.4.8 的续跑语义与空值配置链路，统一目标区间/频段与网表分析

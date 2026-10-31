@@ -1,20 +1,4 @@
 # -*- coding: utf-8 -*-
-"""proc_cross_section.py — EMX proc / layermap 横截面解析、叠层校验与 Tk 绘制（Python 3.6，纯 stdlib）。
-
-模块顶层不 import tkinter；draw_cross_section 只使用调用方传入的 canvas 对象。
-
-内置的 DEFAULT_FLOW 是一套通用示教叠层（金属 M1..M5 加顶层铝焊盘 AP），
-仅供演示与自测，不对应任何真实工艺。实际工艺请用 tech_profile.json 的可选
-"flow" 段覆盖（经 flow_from_profile 归一化），字段如下：
-    metals   有序金属名列表
-    vias     [[底层, 顶层, 通孔名], ...]
-    gaps     [[底层, 顶层, 期望间距 μm], ...]
-    gds      {金属名: GDS 层号}
-    via_gds  {通孔名: GDS 层号}
-    text     {文字层名: GDS 层号}
-    via_res  {通孔名: Ω/via}
-缺省（未提供 flow）时使用内置示教叠层。
-"""
 
 import ast
 import io
@@ -29,7 +13,6 @@ __all__ = ["ProcParseError", "DEFAULT_FLOW", "flow_from_profile",
 
 FLOW_KEYS = ("metals", "vias", "gaps", "gds", "via_gds", "text", "via_res")
 
-# 内置示教叠层：只用于演示，数值均为规整的虚构值。
 DEFAULT_FLOW = {
     "metals": ("M1", "M2", "M3", "M4", "M5", "AP"),
     "vias": (("M1", "M2", "V1"), ("M2", "M3", "V2"), ("M3", "M4", "V3"),
@@ -43,7 +26,6 @@ DEFAULT_FLOW = {
     "via_res": {"V1": 1.1, "V2": 0.9, "V3": 0.6, "V4": 0.35, "PA": 0.1},
 }
 
-# 兼容常量：由 DEFAULT_FLOW 派生，供旧调用方/测试直接引用。
 FLOW_METALS = tuple(DEFAULT_FLOW["metals"])
 EXPECTED_VIAS = tuple(tuple(item) for item in DEFAULT_FLOW["vias"])
 EXPECTED_GAPS = tuple(tuple(item) for item in DEFAULT_FLOW["gaps"])
@@ -57,27 +39,21 @@ EXTRA_METAL_COLORS = ("#8E6CFF", "#00A3A3", "#D64545", "#7A9E1E",
                       "#B565A7", "#2C7BE5")
 DIEL_FILLS = ("#F4F4F4", "#E8E8E8")
 
-
 class ProcParseError(Exception):
-    """proc / layermap 解析错误；消息含行号（若有）。"""
-
     def __init__(self, message, line=None, path=None):
         self.line, self.path = line, path
         if line is not None: message = "第 %d 行: %s" % (line, message)
         if path: message = "%s [%s]" % (message, path)
         Exception.__init__(self, message)
 
-
 def _read_lines(path):
     try:
         with io.open(str(path), "r", encoding="utf-8-sig", errors="replace") as fh: return fh.read().splitlines()
     except (IOError, OSError) as exc: raise ProcParseError("无法读取文件: %s" % exc, path=str(path))
 
-
 def _split_hash(line):
     pos = line.find("#")
     return (line[:pos], line[pos + 1:]) if pos >= 0 else (line, "")
-
 
 def _comment_name(comment, fallback):
     text = (comment or "").strip()
@@ -86,16 +62,12 @@ def _comment_name(comment, fallback):
     bits = text.split(None, 1)
     return bits[0], (bits[1].strip() if len(bits) > 1 else "")
 
-
 def _finite(value):
-    """Finite float for a number-like value; None for inf/nan/overflow/text."""
     try: value = float(value)
     except (TypeError, ValueError, OverflowError): return None
     return value if math.isfinite(value) else None
 
-
 def _safe_eval(expr, env):
-    """只允许数字/名字/四则运算的安全求值；失败或非有限数返回 None。"""
     try: tree = ast.parse(expr, mode="eval")
     except (SyntaxError, ValueError, TypeError): return None
     allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd, ast.Load, ast.Num, ast.Name)
@@ -104,9 +76,6 @@ def _safe_eval(expr, env):
         if isinstance(node, allowed): continue
         if const is not None and isinstance(node, const) and isinstance(node.value, (int, float)): continue
         return None
-    # Cap powers: reject nested powers and exponents outside +/-64. The
-    # exponent may be a constant expression or a defined name, but not a
-    # power itself (9**9**9 would otherwise be computed in full).
     for node in ast.walk(tree):
         if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Pow): continue
         if isinstance(node.left, ast.BinOp) and isinstance(node.left.op, ast.Pow): return None
@@ -121,10 +90,7 @@ def _safe_eval(expr, env):
     if isinstance(value, bool) or not isinstance(value, (int, float)): return None
     return _finite(value)
 
-
 def _numeric_env(defines):
-    # dtemp defaults to 0 C so define chains can use it, while an explicit
-    # `define dtemp = 25` must still override the default.
     env = {"dtemp": 0.0}
     for _round in range(3):
         changed = False
@@ -135,21 +101,17 @@ def _numeric_env(defines):
         if not changed: break
     return env
 
-
 def _as_number(text, defines, lineno, what, path=None):
     value = _finite(text)
     if value is None: value = _safe_eval(text, _numeric_env(defines))
     if value is None: raise ProcParseError("%s 不是有效数字: %r" % (what, text), line=lineno, path=path)
     return value
 
-
 def _stack_entry(entry, kind, order):
     item = dict(entry); item["kind"], item["order"] = kind, order
     return item
 
-
 def parse_proc(path):
-    """解析 EMX proc 文件；失败抛 ProcParseError（含行号）。"""
     path = str(path)
     data = {"path": path,
             "assumes": {"units": "microns", "res": "ohms/sq", "via": "ohms/via"},
@@ -222,9 +184,7 @@ def parse_proc(path):
         raise ProcParseError("未识别到任何 proc 指令（空文件或格式错误）", line=1, path=path)
     return data
 
-
 def parse_layermap(path):
-    """解析 layermap；坏行跳过并记录到 bad_lines。"""
     result = {"by_name": {}, "by_layer": {}, "pairs": [], "bad_lines": []}
     for lineno, raw in enumerate(_read_lines(str(path)), 1):
         text = raw.split("#", 1)[0].strip()
@@ -241,7 +201,6 @@ def parse_layermap(path):
         result["by_layer"].setdefault((layer, datatype), []).append(name)
     return result
 
-
 def _name_list(items):
     out = []
     for item in items or ():
@@ -249,8 +208,7 @@ def _name_list(items):
         if name and name not in out: out.append(name)
     return tuple(out)
 
-
-def _int_map(raw):
+def _num_map(raw, cast=float):
     out = {}
     if isinstance(raw, dict):
         for key, value in raw.items():
@@ -258,21 +216,8 @@ def _int_map(raw):
             if not name: continue
             number = _finite(value)
             if number is None: continue
-            out[name] = int(number)
+            out[name] = cast(number)
     return out
-
-
-def _float_map(raw):
-    out = {}
-    if isinstance(raw, dict):
-        for key, value in raw.items():
-            name = str(key).strip()
-            if not name: continue
-            number = _finite(value)
-            if number is None: continue
-            out[name] = number
-    return out
-
 
 def _via_list(raw):
     out = []
@@ -282,7 +227,6 @@ def _via_list(raw):
         name = str(item[2]).strip() if len(item) > 2 else ""
         if bottom and top: out.append((bottom, top, name))
     return tuple(out)
-
 
 def _pair_list(raw):
     out = []
@@ -294,9 +238,7 @@ def _pair_list(raw):
         if low and high: out.append((low, high, value))
     return tuple(out)
 
-
 def _normalize_flow(raw):
-    """把一份 flow 规格归一化为固定形状；缺项留空，不回落默认。"""
     raw = raw if isinstance(raw, dict) else {}
     metals = raw.get("metals")
     if metals is None: metals = raw.get("stack")
@@ -304,26 +246,16 @@ def _normalize_flow(raw):
         "metals": _name_list(metals),
         "vias": _via_list(raw.get("vias")),
         "gaps": _pair_list(raw.get("gaps")),
-        "gds": _int_map(raw.get("gds")),
-        "via_gds": _int_map(raw.get("via_gds")),
-        "text": _int_map(raw.get("text")),
-        "via_res": _float_map(raw.get("via_res")),
+        "gds": _num_map(raw.get("gds"), int),
+        "via_gds": _num_map(raw.get("via_gds"), int),
+        "text": _num_map(raw.get("text"), int),
+        "via_res": _num_map(raw.get("via_res")),
     }
-
 
 def _empty_flow(flow):
     return not any(flow.get(key) for key in FLOW_KEYS)
 
-
 def flow_from_profile(profile=None):
-    """把 profile（或 tech_profile.json 的整份内容）归一化为 flow 字典。
-
-    支持三种形态：
-      - profile 为 None / 空 / 非 dict：返回内置示教叠层；
-      - profile 是 tech_profile 字典且含 "flow" 段：只用该段；
-      - profile 直接就是 flow 段字典（或有序金属名列表）。
-    未提供的字段留空（不回落示教值），便于只覆盖部分校验项。
-    """
     raw = profile
     if isinstance(profile, dict) and "flow" in profile:
         raw = profile.get("flow")
@@ -338,12 +270,7 @@ def flow_from_profile(profile=None):
         return _normalize_flow(DEFAULT_FLOW)
     return flow
 
-
 def build_stack(proc_data, metals=None):
-    """按 proc 顺序累加 z（μm）；返回 entries / top / flow。
-
-    metals 指定要收集的流程金属名（缺省用内置示教叠层的金属链）。
-    """
     wanted = tuple(metals) if metals else FLOW_METALS
     entries, flow, z, top, top_inf = [], {}, 0.0, None, False
     for raw in (proc_data or {}).get("stack", []):
@@ -359,7 +286,6 @@ def build_stack(proc_data, metals=None):
         if item.get("kind") == "conductor" and item.get("name") in wanted:
             flow[item["name"]] = item
     return {"entries": entries, "top": top, "flow": flow, "top_is_infinite": top_inf}
-
 
 def _gap_items(expected_gaps, flow_gaps):
     if expected_gaps:
@@ -377,14 +303,7 @@ def _gap_items(expected_gaps, flow_gaps):
         return out
     return [tuple(item) for item in (flow_gaps or ())]
 
-
 def validate_flow_stack(proc_data, layermap_data=None, expected_gaps=None, tol=0.02, flow=None):
-    """返回 (errors, warnings)；硬错仅限缺金属/顺序/缺通孔/GDS 对不上，其余为 warning。
-
-    flow 为 None 或空时使用内置示教叠层；实际工艺请传 flow_from_profile(profile)。
-    默认按 flow 的 gaps 校验金属间距，调用方可用 expected_gaps 覆盖（列表或
-    {(低, 高): 期望μm} 字典）。可解析的电阻率缺失、文字层缺失等只记为 warning。
-    """
     spec = flow_from_profile(flow)
     metals = tuple(spec["metals"])
     if not isinstance(proc_data, dict) or not proc_data.get("stack"):
@@ -445,25 +364,20 @@ def validate_flow_stack(proc_data, layermap_data=None, expected_gaps=None, tol=0
             elif tuple(got) != (want, 5): warnings.append("layermap 文字层层号不符: %s 为 %d/%d，期望 %d/5" % (text_name, got[0], got[1], want))
     return errors, warnings
 
-
 def _is_major_dielectric(entry):
     label = ("%s %s" % (entry.get("name", ""), entry.get("note", ""))).upper()
     return any(k in label for k in ("STI", "ILD", "IMD", "ESL", "PASS"))
 
-
 def _metal_color_map(metals):
-    """按 flow 金属顺序给出颜色；示教金属有固定色，其余用备用色循环。"""
     colors = {}
     for index, name in enumerate(metals or ()):
         colors[name] = METAL_COLORS.get(name) or EXTRA_METAL_COLORS[index % len(EXTRA_METAL_COLORS)]
     return colors
 
-
 def _text_color(color):
     try: red, green, blue = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
     except (ValueError, TypeError): return "#102A43"
     return "#FFFFFF" if (0.299 * red + 0.587 * green + 0.114 * blue) / 255.0 < 0.62 else "#102A43"
-
 
 def _draw_impl(canvas, proc_data, layermap_data, width, height, warnings, spec):
     canvas.delete("all")
@@ -663,12 +577,7 @@ def _draw_impl(canvas, proc_data, layermap_data, width, height, warnings, spec):
                  via_name, anchor="w", fill="#42526E")
     return counter[0]
 
-
 def draw_cross_section(canvas, proc_data, layermap_data=None, width=None, height=None, flow=None):
-    """在调用方提供的 Canvas 上绘制横截面；不创建 Tk root。
-
-    flow 缺省时使用内置示教叠层（见 flow_from_profile）。
-    """
     if canvas is None:
         return {"ok": False, "items": 0, "warnings": [], "errors": ["canvas 为空"]}
     spec = flow_from_profile(flow)
@@ -683,9 +592,7 @@ def draw_cross_section(canvas, proc_data, layermap_data=None, width=None, height
                 "errors": errors + ["绘图异常: %s" % exc]}
     return {"ok": True, "items": items, "warnings": warnings, "errors": errors}
 
-
 def build_cross_section_frame(parent, proc_var, layermap_var=None, height=420):
-    """返回 ttk.Frame（Canvas + 状态行）；250ms debounce 重绘。"""
     import tkinter as tk
     from tkinter import ttk
     frame = ttk.Frame(parent)

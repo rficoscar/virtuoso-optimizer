@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-"""em_bridge.py — EM 结果库 / 匹配 / 桥接（唯一实现）。"""
 from __future__ import print_function
 
 import json
@@ -17,8 +16,6 @@ __all__ = [
     "clip_to_region", "stage_report", "stage_keys_of", "DEVICE_STAGES",
 ]
 
-# 契约常量
-
 SCHEMA_VERSION = 1
 RECORD_SCHEMA = "em_record/1"
 REQUEST_SCHEMA = "em_request/1"
@@ -35,14 +32,11 @@ DEFAULT_TOL = {"L0": 0.01, "Q@f0": 0.15, "SRF": 0.25, "theta_tol_deg": 2.0}
 DEFAULT_SRF_MARGIN = 1.25
 DEFAULT_Q_MIN = 5.0
 
-# 字段名单点（冻结后改名只动这里 + 下方 _F 映射）
-
 class _F(object):
-    """契约字段名单点。改名表生效时只改本类。"""
-    DISTANCE = "distance"              # C-2 唯一质量名
-    ACTUAL = "actual_fingerprint"      # C-3 真值
-    DELIVERED = "delivered"            # C-3 标量投影
-    DELTA = "delta_vs_request"         # 物理相对偏差（非排序键）
+    DISTANCE = "distance"
+    ACTUAL = "actual_fingerprint"
+    DELIVERED = "delivered"
+    DELTA = "delta_vs_request"
     REQUEST = "request_fingerprint"
     GRID_KEY = "grid_key"
     RECORD_ID = "record_id"
@@ -62,8 +56,6 @@ class _F(object):
     EM_META = "em_meta"
     GRID_SPEC = "grid_spec"
 
-# 纯函数：哈希 / 格栅 / 匹配
-
 def _sha1_file(path):
     import hashlib
     h = hashlib.sha1()
@@ -76,7 +68,6 @@ def _ang_key(key):
     return key in _ANG_KEYS
 
 def quantize_electrical(value, grid_spec, key=None):
-    """D7 格栅量化：θ 用 step_abs_deg；其余 step_rel*|value|（0 时用 step_rel）。"""
     if value is None:
         raise ValueError("quantize_electrical: value is None")
     spec = grid_spec or DEFAULT_GRID_SPEC
@@ -92,7 +83,6 @@ def quantize_electrical(value, grid_spec, key=None):
     return round(v / step) * step
 
 def validate_grid_spec(grid_spec, tolerances=None):
-    """C-B4 硬校验：s ≤ 2·tol（相对键）/ step_abs_deg ≤ 2·theta_tol_deg。"""
     spec = grid_spec or DEFAULT_GRID_SPEC
     tols = tolerances or DEFAULT_TOL
     rel = float(spec.get("step_rel", 0.01))
@@ -117,7 +107,6 @@ def validate_grid_spec(grid_spec, tolerances=None):
     return True
 
 def grid_key_of(device_type, target, grid_spec, tech=None, cfg_hash=None):
-    """库格点键：device_type:L0=360p 形式（D1 主指标，契约 §2.2）。"""
     spec = grid_spec or DEFAULT_GRID_SPEC
     dev = (device_type or "ind").lower()
     parts = []
@@ -132,7 +121,6 @@ def grid_key_of(device_type, target, grid_spec, tech=None, cfg_hash=None):
     return "%s:%s" % (dev, ",".join(parts))
 
 def _as_rel_tol(tol, key):
-    """容差→相对小数（D4）；θ 走绝对度。接受 "3%" 字符串。"""
     if _ang_key(key):
         if tol is None:
             return DEFAULT_TOL.get("theta_tol_deg", 2.0)
@@ -160,7 +148,6 @@ _HZ_LETTERS = (
 )
 
 def _as_hz(v):
-    """工程字符串/数值 → Hz（28G/2.4Gig/2.4GHz/500meg/28e9/1.5M）。"""
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -257,7 +244,6 @@ def _metric_val(fp, key, f0=None):
     return fp.get(key)
 
 def distance_of(actual_fp, target_fp, tolerances=None, f0=None):
-    """C-1/C-2 验收距离 distance = max_i |Δ_i| / tol_i（θ 绝对度）。"""
     tolerances = tolerances or {}
     target_fp = target_fp or {}
     actual_fp = actual_fp or {}
@@ -306,7 +292,6 @@ DEVICE_STAGES = {
 }
 
 def stage_keys_of(device_type, stage=None):
-    """某器件 stage 的指标键集。stage=None → 最后一档（全指标）。"""
     seq = DEVICE_STAGES.get((device_type or "ind").lower(), DEVICE_STAGES["ind"])
     if stage is None:
         return seq[-1]
@@ -314,7 +299,6 @@ def stage_keys_of(device_type, stage=None):
     return seq[idx]
 
 def stage_report(actual_fp, target_fp, tol, f0=None, device_type=None):
-    """逐级 stage 达成报告（QueryResult.stage_in_tol 数据源）。"""
     dev = (device_type or (target_fp or {}).get("kind") or "ind").lower()
     seq = DEVICE_STAGES.get(dev, DEVICE_STAGES["ind"])
     f0 = f0 if f0 is not None else (target_fp or {}).get("f0")
@@ -335,7 +319,6 @@ def stage_report(actual_fp, target_fp, tol, f0=None, device_type=None):
             "n_stages": len(seq)}
 
 def fingerprint_match(target_fp, actual_fp, tol, f0=None, stage=None, device_type=None):
-    """C-1: (ok, distance)。ok ⇔ 硬门槛过 ∧ distance≤1。"""
     if not target_fp or not actual_fp:
         return False, float("inf")
     tg = target_fp
@@ -371,7 +354,6 @@ def fingerprint_match(target_fp, actual_fp, tol, f0=None, stage=None, device_typ
     return d <= 1.0, float(d)
 
 def delta_vs_request_of(actual_fp, target_fp, f0=None):
-    """物理相对偏差 (actual-request)/request，仅误差预算（C-2 非排序键）。"""
     out = {}
     target_fp = target_fp or {}
     actual_fp = actual_fp or {}
@@ -394,14 +376,11 @@ def delta_vs_request_of(actual_fp, target_fp, f0=None):
     return out
 
 def delivered_of(device_type, actual_fp):
-    """C-3：delivered = 主指标标量投影（history 列用，非真值）。"""
     keys = _DELIVERED_KEYS.get((device_type or "ind").lower(), ("L0",))
     fp = actual_fp or {}
     if len(keys) == 1:
         return fp.get(keys[0])
     return dict((k, fp.get(k)) for k in keys)
-
-# EmLibrary（SQLite 主 / JSON 回退）—— 唯一实现（C-5）
 
 _SQL_DDL = """
 CREATE TABLE IF NOT EXISTS em_record (
@@ -431,7 +410,6 @@ CREATE INDEX IF NOT EXISTS idx_em_sha ON em_record (snp_sha1);
 """
 
 def clip_to_region(target_fp, region, device_type=None):
-    """3D 策略 C：把查询目标夹紧进可达域（track prior）。"""
     if not target_fp or not region:
         return dict(target_fp or {}), []
     out = dict(target_fp)
@@ -456,7 +434,6 @@ def clip_to_region(target_fp, region, device_type=None):
     return out, events
 
 def _empty_result(status, request, warns, record=None, message=None):
-    """错误/空结果骨架（键集与 QueryResult 对齐）。"""
     out = {_F.STATUS: status, _F.REQUEST: request, _F.ACTUAL: None,
            _F.DELIVERED: None, _F.DELTA: {}, _F.DISTANCE: None,
            _F.WARNS: warns, "record": record}
@@ -465,8 +442,6 @@ def _empty_result(status, request, warns, record=None, message=None):
     return out
 
 class EmLibrary(object):
-    """EM 结果库。只 INSERT 不 UPDATE；取优 ORDER BY distance ASC。"""
-
     def __init__(self, path=None):
         root = path or os.environ.get("LIBRF_EM_LIB") or os.path.join(os.getcwd(), "work", "em_lib")
         root = os.path.abspath(os.path.expanduser(str(root)))
@@ -481,13 +456,12 @@ class EmLibrary(object):
             self.root = root
             self.db_path = os.path.join(root, "em_lib.sqlite3")
         self.snp_dir = os.path.join(self.root, "snp")
-        self._records = []          # JSON 回退 / 缓存
+        self._records = []
         self._conn = None
         if self._json_mode:
             self._load_jsonl()
         else:
             self._open_sqlite()
-    # 存储后端
     def _open_sqlite(self):
         d = os.path.dirname(self.db_path)
         if d and not os.path.isdir(d):
@@ -495,7 +469,6 @@ class EmLibrary(object):
         if not os.path.isdir(self.snp_dir):
             os.makedirs(self.snp_dir)
         self._conn = sqlite3.connect(self.db_path)
-        # row_factory 使 _row_to_rec 可按列名取值；不是默认行为，勿删
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SQL_DDL)
         self._conn.commit()
@@ -532,9 +505,7 @@ class EmLibrary(object):
             except Exception:
                 pass
             self._conn = None
-    # put（入库，幂等）
     def put(self, record):
-        """C-2/C-5：只 INSERT。幂等键 snp_sha1（或 record_id）。返回 record_id。"""
         if not record or not isinstance(record, dict):
             return None
         rec = dict(record)
@@ -609,9 +580,7 @@ class EmLibrary(object):
              rec.get("created_utc") or
              time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())))
         self._conn.commit()
-    # get_by_key（C-4 精确键）
     def get_by_key(self, grid_key):
-        """精确格点键查找；同键多行取 distance 最小（C-2）。"""
         if not grid_key:
             return None
         if self._json_mode:
@@ -650,10 +619,8 @@ class EmLibrary(object):
                     d[key] = raw
         d[_F.USABLE] = bool(d.get("usable", 1))
         return d
-    # nearest（热启动，list + distance）
     def nearest(self, device_type, target_fingerprint, k=5, tech=None,
                 emx_cfg_hash=None, tolerances=None, f0=None):
-        """返回 list[record]，每条带 distance，升序（C-2）。"""
         target_fingerprint = target_fingerprint or {}
         tols = tolerances or DEFAULT_TOL
         f0 = f0 if f0 is not None else target_fingerprint.get("f0")
@@ -699,11 +666,9 @@ class EmLibrary(object):
             rec = self._row_to_rec(row)
             if rec:
                 yield rec
-    # query（C-4 对外签名，四分支）
     def query(self, device_type, target_fingerprint, tolerances=None,
               tech=None, emx_cfg_hash=None, constraints=None, f0=None,
               grid_spec=None):
-        """四分支 QueryResult：hit_grid / hit_nearest|best_effort / miss / error。"""
         try:
             target_fingerprint = dict(target_fingerprint or {})
             if not target_fingerprint:
@@ -780,9 +745,7 @@ class EmLibrary(object):
             "clipped": bool(clip_events),
             "record": rec,
         }
-    # 可达域
     def achievable_region(self, device_type):
-        """主指标 [lo,hi] 聚合（≥5 条才给，否则 None）。"""
         dev = (device_type or "ind").lower()
         keys = _DELIVERED_KEYS.get(dev, ("L0",))
         vals = dict((k, []) for k in keys)
@@ -804,9 +767,7 @@ class EmLibrary(object):
             if vs:
                 out[k] = (min(vs), max(vs))
         return out or None
-    # sNp 内容寻址登记（只增）
     def register_snp(self, src_path):
-        """把 sNp 拷入库 snp/<sha1_16>.sNp（内容寻址，只增不改）。"""
         if not src_path or not os.path.isfile(src_path):
             return None
         sha = _sha1_file(src_path)
@@ -819,11 +780,7 @@ class EmLibrary(object):
             shutil.copyfile(src_path, dst)
         return sha, dst
 
-# EmBridge（Runner 协议 + resolve）
-
 class EmBridge(object):
-    """电路优化器前置 Runner：格栅化→查库→缺失调度 EmOptimizer→发布 sNp。"""
-
     def __init__(self, cfg, delegate=None, em_optimizer=None, library=None):
         self.cfg = cfg or {}
         eb = self.cfg.get("em_bridge") or {}
@@ -835,10 +792,8 @@ class EmBridge(object):
         self.library = library or EmLibrary(lib_path)
         self.fallback = eb.get("fallback", "actual")
         self.mode = eb.get("mode", "track")
-        self._last_geom = {}   # track 模式：上轮 solve 终值作 geom_prior
-    # 单器件 resolve
+        self._last_geom = {}
     def resolve(self, request):
-        """request: em_request/1 dict。返回 QueryResult（含 em_opt 求解）。"""
         req = request or {}
         try:
             dev = req.get(_F.DEVICE) or req.get("type") or "ind"
@@ -873,8 +828,6 @@ class EmBridge(object):
         if self.mode == "track" and not prior and dev in self._last_geom:
             prior = self._last_geom[dev]
         sreq = dict(req)
-        # resolve 已解析出 dev/f0；补回请求，避免 solve 因缺 device_type/f_op
-        # 直接返回 error（真实路径等价于“0 次 EM 评估”）。
         sreq.setdefault("device_type", dev)
         if sreq.get("f_op") is None and f0 is not None:
             sreq["f_op"] = f0
@@ -888,7 +841,6 @@ class EmBridge(object):
             return _empty_result("miss", target, ["em_opt empty"])
         rec = dict(entry)
         if rec.get(_F.STATUS) in ("error", "miss") and not rec.get(_F.ACTUAL):
-            # 硬失败不得当作 best_effort 入库（否则库里多一条 usable 的假结果）。
             return _empty_result(rec.get(_F.STATUS), target,
                                  list(rec.get(_F.WARNS) or []),
                                  message=rec.get("reason") or rec.get(_F.STATUS))
@@ -900,11 +852,8 @@ class EmBridge(object):
         rec[_F.REQUEST] = dict(target)
         rec.setdefault(_F.USABLE, True)
         rec.setdefault(_F.SOURCE, "optimization")
-        # em_opt 用 "snp" 键带回 sNp 路径；契约列名是 snp_path。
         snp_src = rec.get(_F.SNP_PATH) or rec.get("snp")
         if snp_src:
-            # 先登记（内容寻址拷贝并算 sha1）再入库，否则行里 sha1 为空，
-            # put() 的幂等键永远命中不了，同一 sNp 会重复入库。
             try:
                 reg = self.library.register_snp(snp_src)
             except Exception as exc:
@@ -944,9 +893,7 @@ class EmBridge(object):
         g = ((qr or {}).get("record") or {}).get(_F.GEOM)
         if g:
             self._last_geom[dev] = dict(g)
-    # Runner 协议
     def run(self, values, iter_dir):
-        """委托 delegate.run；em_actual 回写三值（契约 §2.6）。"""
         if self.delegate is None:
             raise RuntimeError("EmBridge.run: delegate 未注入")
         em_actual = {}
@@ -962,7 +909,6 @@ class EmBridge(object):
             try:
                 f_op = _as_hz(dev_cfg.get("f_op") or dev_cfg.get("f0"))
             except (TypeError, ValueError) as exc:
-                # 配置校验只保证非空；坏频率不能杀掉整次电路优化。
                 em_actual[var] = {
                     "requested": values[var], "target": target,
                     _F.STATUS: "error", _F.DISTANCE: None,
@@ -994,8 +940,6 @@ class EmBridge(object):
                     values_actual[var] = float(dv)
             em_actual[var] = {
                 "requested": target.get(metric),
-                # GUI「EM 融合」页按 QueryResult 契约读取 target/status/
-                # snp_path/record；缺这些键时 requested 列与 snp 行恒为空。
                 "target": dict(target),
                 _F.STATUS: qr.get(_F.STATUS),
                 _F.GRID_KEY: qr.get(_F.GRID_KEY),

@@ -1,12 +1,4 @@
 # -*- coding: utf-8 -*-
-"""test_proc_cross_section.py — proc 横截面模块的 headless 单元测试。
-
-针对内置示教叠层与 fixtures/demo_stack.*（纯虚构数据）。
-纯标准库；模块顶层不 import tkinter。运行：
-    cd optimizer_public && python -m unittest test_proc_cross_section
-或（隔离模式）：
-    cd optimizer_public && python -I test_proc_cross_section.py
-"""
 
 import ast
 import copy
@@ -27,10 +19,8 @@ import proc_cross_section as pcs
 PROC = os.path.join(BASE, "fixtures", "demo_stack.proc")
 LAYERMAP = os.path.join(BASE, "fixtures", "demo_stack.layermap")
 
-# 脱敏自检用：运行时拼接，避免本文件自身出现厂名/工艺代号。
 BANNED_TOKENS = ("X" "MC", "55R" "FSOI", "1P" "5M", "AL" "PA",
                  "MI" "MB", "MI" "MT", "T" "M" "R1", "T" "M")
-
 
 def _custom_flow():
     return {"metals": ["MA", "MB"],
@@ -40,7 +30,6 @@ def _custom_flow():
             "via_gds": {"VA": 110},
             "text": {"MATXT": 101, "MBTXT": 102},
             "via_res": {"VA": 0.5}}
-
 
 CUSTOM_PROC = ("layer 100 11.9 #sub_si\n"
                "conductor 0.5 0.1 MA\n"
@@ -55,10 +44,7 @@ CUSTOM_LAYERMAP = ("MA drawing 101 0\n"
                    "MATXT drawing 101 5\n"
                    "MBTXT drawing 102 5\n")
 
-
 class FakeCanvas(object):
-    """记录 Canvas 调用的无显示替身。"""
-
     def __init__(self, width=800, height=420):
         self.width, self.height = width, height
         self.items = []
@@ -94,22 +80,17 @@ class FakeCanvas(object):
     def bind(self, *args, **kwargs):
         self.bindings.append((args, kwargs))
 
-
 def _texts(canvas):
     return [item[2].get("text", "") for item in canvas.items
             if item[0] == "text"]
 
-
 def _rects(canvas):
     return [item[2] for item in canvas.items if item[0] == "rectangle"]
-
 
 def _has_label(texts, name):
     return any(text == name or text.startswith(name + " ") for text in texts)
 
-
 class ProcCrossSectionTest(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls.proc = pcs.parse_proc(PROC)
@@ -127,7 +108,6 @@ class ProcCrossSectionTest(unittest.TestCase):
             fh.write(text)
         return path
 
-    # ---------------------------------------------------------------- API
     def test_api_and_constants(self):
         for name in ("parse_proc", "parse_layermap", "build_stack",
                      "validate_flow_stack", "draw_cross_section",
@@ -162,7 +142,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(set(base["text"]),
                          {"M1TXT", "M2TXT", "M3TXT", "M4TXT", "M5TXT",
                           "APTXT"})
-        # 返回的是独立副本，改它不影响模块默认值
         self.assertIsNot(base["gds"], pcs.DEFAULT_FLOW["gds"])
         base["gds"]["M1"] = 999
         self.assertEqual(pcs.DEFAULT_FLOW["gds"]["M1"], 61)
@@ -195,14 +174,12 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(flow["gds"]["MB"], 102)
 
     def test_flow_from_profile_accepts_name_list(self):
-        # Documented shorthand: an ordered list of metal names.
         flow = pcs.flow_from_profile(["MA", "MB"])
         self.assertEqual(flow["metals"], ("MA", "MB"))
         self.assertEqual(flow["vias"], ())
         self.assertEqual(flow["gds"], {})
         self.assertEqual(flow["via_res"], {})
 
-    # -------------------------------------------------------------- parse
     def test_parse_proc_fixture(self):
         data = self.proc
         flow = [c for c in data["conductors"] if c["name"] in pcs.FLOW_METALS]
@@ -251,7 +228,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(self.layermap["bad_lines"], [])
         self.assertGreaterEqual(len(self.layermap["pairs"]), 20)
 
-    # -------------------------------------------------------------- stack
     def test_build_stack(self):
         stack = pcs.build_stack(self.proc)
         flow = stack["flow"]
@@ -274,7 +250,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertAlmostEqual(stack["flow"]["M3"]["z0"],
                                502.10, places=6)
 
-    # ----------------------------------------------------------- validate
     def test_validate_current_proc(self):
         errors, warnings = pcs.validate_flow_stack(self.proc, self.layermap)
         self.assertEqual(errors, [])
@@ -382,8 +357,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         _errors, warnings = pcs.validate_flow_stack(self.proc, layermap)
         self.assertTrue([w for w in warnings if "M5TXT" in w and
                          "文字层" in w], warnings)
-        # A layer missing from the layermap is an error; a missing text
-        # layer is only a warning.
         layermap = copy.deepcopy(self.layermap)
         del layermap["by_name"]["M2"]
         errors, _warnings = pcs.validate_flow_stack(self.proc, layermap)
@@ -395,7 +368,6 @@ class ProcCrossSectionTest(unittest.TestCase):
                         warnings)
 
     def test_validate_tolerance(self):
-        # A 0.01 um deviation is quiet at the default 0.02, loud at 0.005.
         data = copy.deepcopy(self.proc)
         for entry in data["stack"]:
             if entry.get("kind") == "dielectric" and \
@@ -413,7 +385,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue([w for w in warnings if "layermap" in w], warnings)
 
-    # -------------------------------------------------------- bad inputs
     def test_parse_errors(self):
         with self.assertRaises(pcs.ProcParseError):
             pcs.parse_proc(self._write("empty.proc", ""))
@@ -436,13 +407,11 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertTrue([e for e in errors if "缺少流程金属" in e], errors)
 
     def test_parse_assume_capacitor_and_define(self):
-        # assume-only input must parse; an unknown assume is ignored.
         data = pcs.parse_proc(self._write(
             "assume.proc", "assume micron\nassume bogus\n"))
         self.assertEqual(data["assumes"]["units"], "microns")
         self.assertTrue([line for _no, line in data["ignored"]
                          if "assume bogus" in line], data["ignored"])
-        # capacitor rows are parsed, not silently dropped into ignored.
         data = pcs.parse_proc(self._write(
             "cap.proc", "capacitor M1 M2 0.5*area\nlayer 1 4\n"))
         self.assertEqual(data["capacitors"][0]["bottom"], "M1")
@@ -463,13 +432,10 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(len(result["bad_lines"]), 2)
 
     def test_parse_rejects_non_finite_numbers(self):
-        # "inf" is the infinity keyword; it must not become an infinite
-        # thickness that turns every later z coordinate into inf.
         data = pcs.parse_proc(self._write(
             "inf.proc", "layer inf 4 #air\nconductor 0.5 0.1 MA\n"))
         self.assertIsNone(data["dielectrics"][0]["thickness"])
         self.assertAlmostEqual(pcs.build_stack(data)["top"], 0.5)
-        # A non-finite resistivity is unknown, not a crash (rho=None).
         rho = pcs.parse_proc(self._write(
             "rhonf.proc", "conductor 0.5 nan MA\nlayer 1 4\n"))
         self.assertIsNone(rho["conductors"][0]["rho"])
@@ -491,8 +457,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(pcs._safe_eval("2**10", {}), 1024.0)
 
     def test_define_dtemp_overrides_default(self):
-        # dtemp defaults to 0, but an explicit define must drive rho:
-        # 0.08 * (1 + 0.003 * 25) = 0.086.
         data = pcs.parse_proc(self._write(
             "dtemp.proc", "define dtemp = 25\ndefine r0 = 0.08\n"
             "define rho1 = r0*(1+0.003*dtemp)\n"
@@ -500,8 +464,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertAlmostEqual(data["conductors"][0]["rho"], 0.086)
 
     def test_define_uses_default_dtemp(self):
-        # A define that references dtemp without redefining it must see
-        # the same 0 C default as a conductor expression: 0.08.
         data = pcs.parse_proc(self._write(
             "dtemp_default.proc", "define r0 = 0.08\n"
             "define rho1 = r0*(1+0.003*dtemp)\n"
@@ -509,12 +471,9 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertAlmostEqual(data["conductors"][0]["rho"], 0.08)
 
     def test_safe_eval_power_exponents(self):
-        # 1.4.7 capped powers but also rejected valid exponents:
-        # negative constants, defined names and constant expressions.
         self.assertAlmostEqual(pcs._safe_eval("10**-3", {}), 0.001)
         self.assertEqual(pcs._safe_eval("2**p", {"p": 3}), 8.0)
         self.assertEqual(pcs._safe_eval("2**(1+1)", {}), 4.0)
-        # The cap still rejects blow-up expressions immediately.
         for expr, env in (("9**9**9", {}), ("(9**64)**64", {}),
                           ("2**65", {}), ("2**-65", {}),
                           ("2**p", {"p": 65}), ("2**q", {})):
@@ -538,7 +497,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         self.assertEqual(flow["text"], {})
         self.assertEqual(flow["via_res"], {})
 
-    # -------------------------------------------------------------- draw
     def test_draw_cross_section(self):
         canvas = FakeCanvas(900, 520)
         result = pcs.draw_cross_section(canvas, self.proc, self.layermap)
@@ -586,7 +544,6 @@ class ProcCrossSectionTest(unittest.TestCase):
         for name in ("MA", "MB"):
             self.assertTrue(_has_label(texts, name), name)
         self.assertIn("VA", texts)
-        # Without a layermap the drawing falls back to the flow's GDS map.
         self.assertTrue([t for t in texts if t.startswith("MA ") and
                          "101/0" in t], texts)
         self.assertTrue([t for t in texts if t.startswith("MB ") and
@@ -644,7 +601,6 @@ class ProcCrossSectionTest(unittest.TestCase):
                          if "未找到通孔 PA" in w], result["warnings"])
         self.assertNotIn("PA", _texts(canvas))
 
-    # ------------------------------------------------------- import/source
     def test_module_import_without_tk(self):
         code = ("import sys; sys.path.insert(0, '.'); "
                 "import proc_cross_section; "
@@ -656,10 +612,8 @@ class ProcCrossSectionTest(unittest.TestCase):
     def test_source_clean_and_sized(self):
         path = os.path.join(BASE, "proc_cross_section.py")
         with io.open(path, "rb") as fh:
-            text = fh.read().decode("utf-8")  # 严格解码
+            text = fh.read().decode("utf-8")
         self.assertIn("横截面", text)
-        # Anti-bloat guard: the 1.4.7 parser fixes needed a little headroom
-        # over the old 760-line cap; keep the limit explicit.
         self.assertLessEqual(len(text.splitlines()), 800)
         self.assertNotIn("dataclass", text)
         self.assertNotIn(":" "=", text)
@@ -689,7 +643,6 @@ class ProcCrossSectionTest(unittest.TestCase):
                 tree = ast.parse(source, filename=path)
             self.assertIsNotNone(tree)
 
-    # -------------------------------------------------------------- frame
     def test_build_cross_section_frame_smoke(self):
         try:
             import tkinter as tk
@@ -754,7 +707,6 @@ class ProcCrossSectionTest(unittest.TestCase):
                 root.destroy()
             except Exception:
                 pass
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

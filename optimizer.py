@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-'Virtuoso Optimizer.'
-VERSION = "1.4.9"
+VERSION = "1.5.0"
 import argparse
 import csv
 import glob
@@ -16,26 +14,18 @@ import subprocess
 import sys
 import time
 import zlib
-# ===== 文本 I/O 一律按 UTF-8，与进程 locale 解耦 =====
-# 目标机 Python 3.6 + C locale（无 PEP 538/540）下，默认 open() 用 ASCII
-# 读中文网表会 UnicodeDecodeError（版图日志报错的根因）。这里罩住
-# open()：文本模式默认 utf-8，读 errors="replace"，写严格；二进制照旧。
 import builtins
 _native_open = builtins.open
 
-# ===== 操作审计（v08c 移植）：文件读写/创建/归档 与 外部程序调用 =====
-# kind: read / write / create / append / backup / archive / exec / refuse
 _AUDIT = []
-_AUDIT_SINK = None      # GUI 注册的回调 fn(rec)
-_AUDIT_FILE = None      # 落盘路径 audit.jsonl
+_AUDIT_SINK = None
+_AUDIT_FILE = None
 
 def audit_sink(fn):
-    """GUI 注册实时回调（每条记录都会推过去）。"""
     global _AUDIT_SINK
     _AUDIT_SINK = fn
 
 def audit_file(path):
-    """指定审计落盘路径（输出目录确定后调用）。"""
     global _AUDIT_FILE
     _AUDIT_FILE = path
 
@@ -43,7 +33,6 @@ def audit_dump():
     return list(_AUDIT)
 
 def audit(kind, path=None, detail=""):
-    """记录一次操作。path 一律存绝对路径（相对路径当场解析）。"""
     if path:
         try:
             path = os.path.abspath(os.path.expanduser(str(path)))
@@ -65,13 +54,7 @@ def audit(kind, path=None, detail=""):
             pass
     return rec
 
-def audit_line(rec):
-    """记录 -> GUI 日志窗口的一行文本。"""
-    return "%s  %-7s %s%s" % (rec["ts"], rec["kind"], rec["path"],
-                              ("  " + rec["detail"]) if rec["detail"] else "")
-
 def open(file, mode="r", *args, **kwargs):  # noqa: A001 - 有意覆盖内建 open
-    """UTF-8 文本打开（仅影响本模块），并记审计。二进制模式照旧。"""
     if "b" not in mode:
         if "encoding" not in kwargs:
             kwargs["encoding"] = "utf-8"
@@ -91,17 +74,8 @@ def open(file, mode="r", *args, **kwargs):  # noqa: A001 - 有意覆盖内建 op
             pass
     return _native_open(file, mode, *args, **kwargs)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# Search-engine registry lives in algorithm.py (same folder).
 from algorithm import available, create  # noqa: E402
-# optimizer.py may run as a script (__main__). Register the alias so
-# `from optimizer import ...` in gui.py reuses this module instead of
-# importing a second copy of every class.
 sys.modules.setdefault("optimizer", sys.modules[__name__])
-# ===== Tool discovery on the target machine =====
-# 不写死绝对路径，运行时现场探查（命中即停）：显式环境变量 -> 环境
-# 目录提示 -> PATH -> 安装树扫描。每个结果带 "src" 标签
-# (env/hint/which/root/none)，供 GUI 自检展示来源。
-# Conventional Cadence/EMX install roots, walked when the env hints fail.
 EDA_ROOT_GLOBS = (
     "/opt/eda/*", "/opt/eda/*/*", "/eda/*", "/eda/*/*",
     "/usr/eda/*", "/usr/eda/*/*", "/opt/cadence/*", "/usr/cadence/*",
@@ -109,7 +83,6 @@ EDA_ROOT_GLOBS = (
 )
 
 def _eda_root_dirs():
-    """Directories that may contain an EDA tool tree."""
     out = []
     for var in ("CADHOME", "CDS", "CDSDIR", "CDS_INST_DIR", "CDSHOME",
                 "CDS_ROOT", "CDSROOT", "SPECTRE_HOME"):
@@ -120,7 +93,7 @@ def _eda_root_dirs():
         for hit in glob.glob(pattern):
             if os.path.isdir(hit):
                 out.append(hit)
-    seen, uniq = set(), []           # de-dup, keep order
+    seen, uniq = set(), []
     for d in out:
         d = os.path.normpath(d)
         if d not in seen:
@@ -129,39 +102,32 @@ def _eda_root_dirs():
     return uniq
 
 def _runnable(path):
-    'True for an existing regular file.'
     return bool(path) and os.path.isfile(path)
 
 def find_prog(name, env_vars=(), subdirs=(), must_be="file"):
-    '在本机定位 `name` -> (path_or_None, source_tag)。'
     def _ok(p):
         if not p:
             return False
         if must_be == "dir":
             return os.path.isdir(p)
         return _runnable(p)
-    # 1. explicit override
     for var in env_vars:
         val = os.environ.get(var)
         if val:
             val = os.path.expanduser(val.strip())
             if _ok(val):
                 return val, "env"
-            # allow the variable to name a directory holding the tool
             cand = os.path.join(val, name)
             if _ok(cand):
                 return cand, "env"
-    # 2. directory hints from the environment
     for root in _eda_root_dirs():
         for sub in subdirs:
             cand = os.path.join(root, sub, name) if sub else os.path.join(root, name)
             if _ok(cand):
                 return cand, "hint"
-    # 3. PATH
     hit = shutil.which(name)
     if hit and _ok(hit):
         return hit, "which"
-    # 4. conventional EDA roots, one level of child dirs
     for root in _eda_root_dirs():
         for child in sorted(glob.glob(os.path.join(root, "*"))):
             if not os.path.isdir(child):
@@ -173,7 +139,6 @@ def find_prog(name, env_vars=(), subdirs=(), must_be="file"):
     return None, "none"
 
 def find_file(basename, env_vars=(), extra_dirs=(), exts=("",)):
-    """Locate a data file (layermap / proc / cds.lib). Returns (path, src)."""
     def _ok(p):
         return bool(p) and os.path.isfile(p)
     for var in env_vars:
@@ -202,7 +167,6 @@ def find_file(basename, env_vars=(), extra_dirs=(), exts=("",)):
     return None, "none"
 
 def discover_tools():
-    '探查本机全部所需工具（不写绝对路径）。'
     tools = {}
     tools["spectre"] = dict(zip(("path", "src"), find_prog(
         "spectre", ("SPECTRE_BIN",),
@@ -225,7 +189,6 @@ def discover_tools():
     return tools
 
 def tool_report(tools=None):
-    """Human-readable discovery report for the GUI self-check."""
     tools = tools if tools is not None else discover_tools()
     src_cn = {"env": "环境变量", "hint": "环境目录", "which": "PATH",
               "root": "安装目录扫描", "none": "未找到"}
@@ -235,11 +198,9 @@ def tool_report(tools=None):
         tag = src_cn.get(t.get("src"), t.get("src"))
         lines.append("%-9s %s  [%s]" % (key, t.get("path") or "未找到", tag))
     return "\n".join(lines)
-# Cache so the probe runs once per process.
 _TOOL_CACHE = {}
 
 def resolve_prog(kind, explicit=None):
-    '`kind`("spectre"/"virtuoso"/...) 的最终程序路径。'
     if explicit:
         exp = os.path.expanduser(str(explicit).strip())
         if exp and os.path.isfile(exp):
@@ -255,8 +216,6 @@ def resolve_prog(kind, explicit=None):
     if hit:
         return hit
     return explicit or kind
-# ===== Engineering numbers =====
-# Suffixes used by spectre: T G meg k m u n p f a. "meg" is mega.
 _ENG_SUFFIX = {
     "t": 1e12,
     "g": 1e9,
@@ -273,7 +232,6 @@ _ENG_RE = re.compile(
     r"^\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([A-Za-z]*)\s*$")
 
 def parse_eng(text):
-    """Parse an engineering string to float."""
     if isinstance(text, (int, float)):
         return float(text)
     m = _ENG_RE.match(str(text))
@@ -288,7 +246,6 @@ def parse_eng(text):
     return value
 
 def format_eng(value):
-    """Format a float as an engineering string."""
     if value == 0:
         return "0"
     sign = "-" if value < 0 else ""
@@ -301,7 +258,6 @@ def format_eng(value):
     return f"{sign}{value:g}"
 
 def suggest_bounds(init_text):
-    'Suggest min and max around one init value.'
     value = parse_eng(init_text)
     if value > 0:
         return format_eng(0.5 * value), format_eng(2.0 * value)
@@ -309,16 +265,11 @@ def suggest_bounds(init_text):
         return format_eng(2.0 * value), format_eng(0.5 * value)
     return "0", ""
 
-# ===== ADE state parsing =====
-
 def _read_text(path):
-    # encoding 显式 utf-8：C locale 目标机上 locale 编码是 ASCII，
-    # 不写 encoding 的 open() 会用 ASCII 读中文网表并丢字节（sha1 失配）。
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 def parse_variables(state_dir):
-    """Return list of dicts: name, expression."""
     text = _read_text(os.path.join(state_dir, "variables.state"))
     names = re.findall(r'->name = "([^"]*)"', text)
     exprs = re.findall(r'->expression = "([^"]*)"', text)
@@ -329,11 +280,9 @@ def parse_variables(state_dir):
     return out
 
 def parse_outputs(state_dir):
-    """Return list of dicts: name, expression_raw."""
     path = os.path.join(state_dir, "outputs.state")
     text = _read_text(path)
     out = []
-    # Each output struct has ->name and ->expression.
     for m in re.finditer(r'->name = "([^"]*)"', text):
         name = m.group(1)
         tail = text[m.end():m.end() + 4000]
@@ -345,7 +294,6 @@ def parse_outputs(state_dir):
     return out
 
 def parse_analyses(state_dir):
-    """Return list of analyses: type and fields dict."""
     path = os.path.join(state_dir, "analyses.state")
     text = _read_text(path)
     items = {}
@@ -362,7 +310,6 @@ def parse_analyses(state_dir):
     return out
 
 def parse_model_files(state_dir):
-    """Return model file paths listed in modelSetup.state."""
     path = os.path.join(state_dir, "modelSetup.state")
     if not os.path.exists(path):
         return []
@@ -370,23 +317,18 @@ def parse_model_files(state_dir):
     return re.findall(r'"(/[^"]+)"', text)
 
 def summarize(state_dir):
-    """Return a summary dict of one state cellview."""
     return {
         "variables": parse_variables(state_dir),
         "outputs": parse_outputs(state_dir),
         "analyses": parse_analyses(state_dir),
         "model_files": parse_model_files(state_dir),
     }
-# ===== Targets and error computation =====
 BIG_ERROR = 1e6
 
 class Target:
-    """One target of the config. Point target or curve target."""
     def __init__(self, spec):
-        self.spec = spec
         self.output = spec["output"]
         self.metric = spec.get("metric", "scalar")
-        # role: "error" (weighted total), "constraint" (G), "objective" (F).
         self.role = spec.get("role", "error")
         if self.role not in ("error", "constraint", "objective"):
             raise ValueError("bad role: %s" % self.role)
@@ -396,9 +338,6 @@ class Target:
             if not isinstance(band, (list, tuple)) or len(band) != 2:
                 raise ValueError("band must be [lo, hi]: %r" % (band,))
             lo, hi = parse_eng(band[0]), parse_eng(band[1])
-            # Same order normalization as em_align._parse_band: a swapped
-            # band used to cut every point and peg the target at BIG_ERROR
-            # for the whole run.
             self.band = [min(lo, hi), max(lo, hi)]
         self.op = spec.get("op", ">=")
         self.goal = parse_eng(spec.get("goal", 0))
@@ -414,18 +353,13 @@ class Target:
                 and not (self.band[0] <= self.freq <= self.band[1]):
             raise ValueError("value_at freq %r is outside band %s"
                              % (spec.get("freq"), self.band))
-        # curve target fields
         self.curve_op = spec.get("curve_op")
         self.limit = spec.get("limit")
-        # Validate now so errors surface when the user adds the
-        # target, not halfway through a long optimization.
         if self.op not in (">=", "<=",
                            "==", "range"):
             raise ValueError("bad op: %s" % self.op)
         if self.op == "range" and self.goal2 is not None \
                 and self.goal > self.goal2:
-            # Same idea as the band normalization: a user who swaps the
-            # two range bounds used to get a target no value can satisfy.
             self.goal, self.goal2 = self.goal2, self.goal
         if self.metric not in ("scalar", "band_min",
                                "band_max", "band_flatness",
@@ -447,15 +381,20 @@ class Target:
                 parse_eng(_v)
         if self.op == "range" and self.goal2 is None:
             raise ValueError("range needs goal2")
+        self.limit_pts = None
+        if self.curve_op:
+            self.limit_pts = [(parse_eng(a), parse_eng(b))
+                              for a, b in zip(self.limit["x"], self.limit["y"])]
 
-    def metric_value(self, curves):
-        """Compute the metric from named curve data."""
+    def _points(self, curves):
         data = get_curve(curves, self.output)
         if data is None:
             return None
-        x, y = data
-        pts = _cut_band(x, y, self.band)
-        if not pts:
+        pts = _cut_band(data[0], data[1], self.band)
+        return pts or None
+    def metric_value(self, curves):
+        pts = self._points(curves)
+        if pts is None:
             return None
         ys = [p[1] for p in pts]
         if self.metric == "scalar":
@@ -473,7 +412,6 @@ class Target:
         raise ValueError(f"bad metric: {self.metric}")
 
     def error(self, curves):
-        """Return normalized error. Zero or negative means met."""
         if self.curve_op:
             return self._curve_error(curves)
         value = self.metric_value(curves)
@@ -481,7 +419,6 @@ class Target:
             return BIG_ERROR
         return self._point_error(value)
     def _point_error(self, value):
-        """Violation of a point target, normalized by tolerance."""
         if self.op == ">=":
             raw = self.goal - value
         elif self.op == "<=":
@@ -497,19 +434,12 @@ class Target:
             raise ValueError(f"bad op: {self.op}")
         return raw / self.tol
     def _curve_error(self, curves):
-        """Curve target. Return worst point violation, normalized."""
-        data = get_curve(curves, self.output)
-        if data is None:
+        pts = self._points(curves)
+        if pts is None:
             return BIG_ERROR
-        x, y = data
-        pts = _cut_band(x, y, self.band)
-        if not pts:
-            return BIG_ERROR
-        lim_x = [parse_eng(v) for v in self.limit["x"]]
-        lim_y = [parse_eng(v) for v in self.limit["y"]]
         worst = None
         for xi, yi in pts:
-            ly = _value_at(list(zip(lim_x, lim_y)), xi)
+            ly = _value_at(self.limit_pts, xi)
             if ly is None:
                 continue
             if self.curve_op == "above":
@@ -527,7 +457,6 @@ class Target:
         return worst / self.tol
 
 def get_curve(curves, name):
-    """Resolve a curve by exact name or unique prefix."""
     if name in curves:
         return curves[name]
     hits = [k for k in curves if k.startswith(name)]
@@ -542,7 +471,6 @@ def _cut_band(x, y, band):
     return [(xi, yi) for xi, yi in zip(x, y) if lo <= xi <= hi]
 
 def _value_at(pts, freq):
-    """Linear interpolation at freq. Return None when out of range."""
     if freq is None or not pts:
         return None
     pts = sorted(pts)
@@ -558,13 +486,7 @@ def _value_at(pts, freq):
             return y0 + t * (y1 - y0)
     return None
 
-# ===== Engine: variable transform (log/integer/linking) =====
-# Maps free unit coordinates z in [0,1]^n to physical variable values
-# with log/linear scaling, integer rounding and linked variables.
-# Init/min/max arrive as already-parsed floats (no eng-string parsing).
-
 class Transform(object):
-    'Physical <-> unit mapping over the declared design variables.'
     def __init__(self, variables, linking=None):
         if not variables:
             raise ValueError("variables must be non-empty")
@@ -588,7 +510,6 @@ class Transform(object):
                 init = lo
             elif init > hi:
                 init = hi
-            # Default scale: span >= 10x with min > 0 -> log10 sampling.
             scale_req = spec.get("scale", "auto")
             if scale_req not in ("auto", "linear", "log"):
                 raise ValueError("bad scale %r for %r" % (scale_req, name))
@@ -597,7 +518,6 @@ class Transform(object):
             elif scale_req == "linear":
                 use_log = False
             else:
-                # auto: decades of span with positive bounds -> log10
                 use_log = (lo > 0.0 and hi / lo >= 10.0)
             if use_log and lo <= 0.0:
                 raise ValueError("log scale needs min > 0 for %r" % name)
@@ -634,7 +554,6 @@ class Transform(object):
                       if v["name"] not in self._links]
         self._order = self._resolve_order()
     def _resolve_order(self):
-        """Linked names in dependency order; raise on cycles."""
         resolved = set(self._free)
         pending = [v["name"] for v in self._vars if v["name"] in self._links]
         order = []
@@ -658,16 +577,13 @@ class Transform(object):
 
     @property
     def free_names(self):
-        """Names of the free (non-linked) variables, in input order."""
         return list(self._free)
 
     @property
     def n_free(self):
-        """Number of free variables."""
         return len(self._free)
 
     def to_real(self, z):
-        'Unit vector -> dict of physical values (all variables).'
         z = list(z)
         if len(z) != len(self._free):
             raise ValueError("expected %d free coords, got %d"
@@ -678,7 +594,6 @@ class Transform(object):
         return self._expand(values)
 
     def to_unit(self, values):
-        'Physical values -> free unit vector in [0,1]^n_free.'
         out = []
         for name in self._free:
             if name not in values:
@@ -686,7 +601,6 @@ class Transform(object):
             out.append(self._to_unit_one(name, float(values[name])))
         return out
     def _from_unit(self, name, u):
-        """One unit coordinate -> physical value (rounded if integer)."""
         var = self._by_name[name]
         if u < 0.0:
             u = 0.0
@@ -704,7 +618,6 @@ class Transform(object):
             v = lo + u * (hi - lo)
         return self._finish(name, v)
     def _to_unit_one(self, name, v):
-        """One physical value -> unit coordinate (no rounding)."""
         var = self._by_name[name]
         lo, hi = var["min"], var["max"]
         if hi == lo:
@@ -723,7 +636,6 @@ class Transform(object):
             return 1.0
         return u
     def _finish(self, name, v):
-        """Integer round then clamp to [min, max]."""
         var = self._by_name[name]
         lo, hi = var["min"], var["max"]
         if var["integer"]:
@@ -734,7 +646,6 @@ class Transform(object):
             v = hi
         return v
     def _expand(self, values):
-        """Free values + links -> full physical dict in declaration order."""
         out = {}
         for var in self._vars:
             name = var["name"]
@@ -753,14 +664,7 @@ class Transform(object):
             out[name] = self._finish(name, v)
         return dict((var["name"], out[var["name"]]) for var in self._vars)
 
-# ===== Engine: roles, constraints, scalarisation =====
-
-# Turns targets (output/metric/op/goal/weight/error(curves), plus
-# role) into F/G vectors per settings.mode.
-# BIG_ERROR is defined once near "Targets and error computation".
-
 def _role_of(target):
-    """Role of one target; v03 targets without .role are "error"."""
     role = getattr(target, "role", "error")
     if role is None:
         role = "error"
@@ -775,7 +679,6 @@ def _key_of(target, index):
     return "%s:%s:%d" % (target.output, target.metric, index)
 
 def _safe_error(target, curves):
-    """Target error guarded against NaN/Inf/None/bad data."""
     try:
         e = target.error(curves)
     except Exception:
@@ -791,7 +694,6 @@ def _safe_error(target, curves):
     return e
 
 def classify_roles(targets):
-    """Split targets by role -> (error_targets, obj_targets, con_targets)."""
     err_t, obj_t, con_t = [], [], []
     for t in targets:
         role = _role_of(t)
@@ -804,7 +706,6 @@ def classify_roles(targets):
     return err_t, obj_t, con_t
 
 def evaluate_roles(targets, curves, mode="scalar"):
-    'Evaluate targets under one mode; NaN/Inf become BIG_ERROR.'
     if mode not in ("scalar", "pareto", "spec"):
         raise ValueError("bad mode %r" % (mode,))
     errors = {}
@@ -830,17 +731,12 @@ def evaluate_roles(targets, curves, mode="scalar"):
             F.append(e)
             obj_vals.append((e, _weight_of(t)))
         else:
-            # constraint and error roles both act as constraints
             G.append(e)
-    # "met" is a property of every target, not of the scalarized total:
-    # in spec/pareto the total only sums the objectives, so a violated
-    # constraint must not read as targets_met.
     met = all(e <= 0.0 for e in errors.values())
     if mode == "pareto":
         total = sum(e * w for e, w in obj_vals) if obj_vals else 0.0
         return {"total": float(total), "F": F, "G": G, "errors": errors,
                 "met": met}
-    # mode == "spec"
     if obj_vals:
         total = sum(e * w for e, w in obj_vals)
     else:
@@ -849,18 +745,13 @@ def evaluate_roles(targets, curves, mode="scalar"):
         total = worst
     return {"total": float(total), "F": F, "G": G, "errors": errors,
             "met": met}
-# ===== Engine: failure classification and penalties =====
-# Outcomes map to INFRA (tooling, retry free), DNC (simulator refused,
-# penalize) or TIMEOUT (budget blow).
 INFRA = "INFRA"
 DNC = "DNC"
 TIMEOUT = "TIMEOUT"
-# Substrings that mark infrastructure faults rather than design faults.
 _INFRA_KEYS = ("license", "netlist", "eval serve")
-_INFRA_KEYS_CN = ("找不到",)  # "not found"
+_INFRA_KEYS_CN = ("找不到",)
 
 def classify(status, message, wall=None, timeout=None):
-    """Map one outcome to None | INFRA | DNC | TIMEOUT (ok -> None)."""
     if status is not None and str(status).lower() == "ok":
         return None
     text = "" if message is None else str(message)
@@ -877,17 +768,14 @@ def classify(status, message, wall=None, timeout=None):
     return DNC
 
 class PenaltyLedger(object):
-    'Escalating penalties for hard failures; INFRA never penalized.'
     def __init__(self):
         self.fail_count = 0
         self.infra_count = 0
 
     def dnc_penalty(self, fail_index, f_worst):
-        """Penalty for failure number fail_index: f_worst + 1e4*(1+i)."""
         return float(f_worst) + 1.0e4 * (1.0 + float(fail_index))
 
     def penalty(self, kind, f_worst):
-        """Penalty float for one failure kind; None for ok/INFRA (retry)."""
         if kind is None:
             return None
         if kind == INFRA:
@@ -896,10 +784,6 @@ class PenaltyLedger(object):
         value = self.dnc_penalty(self.fail_count, f_worst)
         self.fail_count += 1
         return value
-
-# ===== Engine: kick / restart machinery =====
-# Three failed log-domain kicks escalate to a full restart around the
-# best point; restart radii decay with every restart.
 
 def _clip_point(pt, bounds):
     out = []
@@ -913,7 +797,6 @@ def _clip_point(pt, bounds):
     return out
 
 def _kick_logmul(x_best, bounds, rng, spread):
-    """Log10-domain multiplicative kick for strictly positive bounds."""
     pt = []
     for i, v in enumerate(x_best):
         lo, hi = bounds[i]
@@ -925,7 +808,6 @@ def _kick_logmul(x_best, bounds, rng, spread):
     return _clip_point(pt, bounds)
 
 def _kick_additive(x_best, bounds, rng, spread):
-    """Additive kick: gaussian noise scaled by each bound span."""
     pt = []
     for i, v in enumerate(x_best):
         lo, hi = bounds[i]
@@ -933,7 +815,6 @@ def _kick_additive(x_best, bounds, rng, spread):
     return _clip_point(pt, bounds)
 
 def _kick_mixed(x_best, bounds, rng, spread):
-    """Per-dimension mix of log-multiplicative and additive kicks."""
     pt = []
     for i, v in enumerate(x_best):
         lo, hi = bounds[i]
@@ -945,7 +826,6 @@ def _kick_mixed(x_best, bounds, rng, spread):
     return _clip_point(pt, bounds)
 
 def _ensure_moved(y, x_best, bounds, rng):
-    """Force at least one coordinate to move after clipping."""
     n = len(x_best)
     for i in range(n):
         lo, hi = bounds[i]
@@ -965,7 +845,6 @@ def _ensure_moved(y, x_best, bounds, rng):
     return y
 
 def make_kick(x_best, bounds, rng, spread=0.2):
-    """Three perturbed copies of x_best: log-mul, additive, mixed."""
     if not isinstance(rng, random.Random):
         raise TypeError("rng must be random.Random")
     x_best = [float(v) for v in x_best]
@@ -978,12 +857,7 @@ def make_kick(x_best, bounds, rng, spread=0.2):
         kicks[i] = _ensure_moved(kicks[i], x_best, bounds, rng)
     return kicks
 
-# ===== Engine: snapshot journal (strict resume) =====
-# Events append to events.jsonl for replay; snapshots rotate with an
-# atomic latest copy so a crash never loses the last good state.
-
 def to_jsonable(obj):
-    """Recursively convert tuples to lists for JSON encoding."""
     if isinstance(obj, tuple):
         return [to_jsonable(v) for v in obj]
     if isinstance(obj, list):
@@ -996,7 +870,6 @@ def to_jsonable(obj):
     return obj
 
 def from_jsonable(obj):
-    """Recursively convert JSON lists back to tuples (RNG state shape)."""
     if isinstance(obj, list):
         return tuple(from_jsonable(v) for v in obj)
     if isinstance(obj, dict):
@@ -1006,8 +879,54 @@ def from_jsonable(obj):
         return out
     return obj
 
+def _append_jsonl(path, obj, fsync=False):
+    line = json.dumps(to_jsonable(obj), ensure_ascii=False)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        if fsync:
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except (OSError, ValueError):
+                pass
+
+def _read_jsonl(path, skip_bad=False):
+    if not os.path.isfile(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                if not skip_bad:
+                    raise
+    return out
+
+def _values_from_record(rec, names=None, require_all=False, strict=False):
+    raw = rec.get("variables") or {}
+    keys = list(raw) if names is None else list(names)
+    values = {}
+    for name in keys:
+        if name not in raw:
+            if require_all:
+                return None
+            continue
+        text = raw[name]
+        try:
+            values[name] = (text if isinstance(text, (int, float))
+                            else parse_eng(text))
+        except Exception:
+            if strict:
+                raise
+            if require_all:
+                return None
+    return values
+
 class RunJournal(object):
-    """Append-only event log plus rotating atomic snapshots."""
     keep_snapshots = 3
     def __init__(self, directory):
         self.directory = directory
@@ -1018,33 +937,13 @@ class RunJournal(object):
         self._snap_seq = self._scan_seq()
 
     def log_event(self, event):
-        """Append one event dict as a JSON line to events.jsonl."""
-        line = json.dumps(to_jsonable(event), ensure_ascii=False)
-        f = open(self.events_path, "a", encoding="utf-8")
-        try:
-            f.write(line)
-            f.write("\n")
-        finally:
-            f.close()
+        _append_jsonl(self.events_path, event)
         return event
 
     def read_events(self):
-        """All logged events as plain dicts (for replay trimming)."""
-        if not os.path.isfile(self.events_path):
-            return []
-        events = []
-        f = open(self.events_path, "r", encoding="utf-8")
-        try:
-            for line in f:
-                line = line.strip()
-                if line:
-                    events.append(json.loads(line))
-        finally:
-            f.close()
-        return events
+        return _read_jsonl(self.events_path)
 
     def snapshot(self, state_dict):
-        """Atomic snapshot.json write plus numbered rotation (keep 3)."""
         payload = json.dumps(to_jsonable(state_dict), indent=2,
                              sort_keys=True)
         self._atomic_write(self.snapshot_path, payload)
@@ -1056,7 +955,6 @@ class RunJournal(object):
         return numbered
 
     def load_latest(self):
-        """Latest snapshot as a state dict (tuple-restored) or None."""
         path = self.snapshot_path
         if not os.path.isfile(path):
             numbered = self._numbered()
@@ -1073,7 +971,6 @@ class RunJournal(object):
             return None
         return from_jsonable(raw)
     def _atomic_write(self, path, text):
-        """Write text to path via tmp file + os.replace."""
         tmp = path + ".tmp"
         f = open(tmp, "w", encoding="utf-8")
         try:
@@ -1083,7 +980,6 @@ class RunJournal(object):
         os.replace(tmp, path)
         audit("write", path, "atomic")
     def _numbered(self):
-        """Sorted [(seq, path), ...] of snapshot-<k>.json files."""
         entries = []
         try:
             names = os.listdir(self.directory)
@@ -1101,7 +997,6 @@ class RunJournal(object):
         entries = self._numbered()
         return entries[-1][0] if entries else 0
     def _prune(self):
-        """归档超出 keep_snapshots 的旧快照（改名，不删除）。"""
         entries = self._numbered()
         while len(entries) > self.keep_snapshots:
             _seq, path = entries.pop(0)
@@ -1110,13 +1005,7 @@ class RunJournal(object):
             except OSError:
                 pass
 
-# ===== Engine: sensitivity and run summary =====
-# Spearman screening tells which knobs drove the search; the move
-# table shows how far the best point travelled; build_summary
-# assembles the report.json summary node.
-
 def _ranks(xs):
-    """Average ranks (1-based) with tied values averaged."""
     n = len(xs)
     order = sorted(range(n), key=lambda i: xs[i])
     ranks = [0.0] * n
@@ -1132,7 +1021,6 @@ def _ranks(xs):
     return ranks
 
 def spearman_rank(xs, ys):
-    """Spearman rank correlation (ties averaged); 0.0 if degenerate."""
     if xs is None or ys is None:
         return 0.0
     n = min(len(xs), len(ys))
@@ -1163,7 +1051,6 @@ def spearman_rank(xs, ys):
     return rho
 
 def sensitivity_report(history_vars, history_vals):
-    """(name, rho, n) rows sorted by |rho| then name, one per variable."""
     if not history_vars or not history_vals:
         return []
     n = min(len(history_vars), len(history_vals))
@@ -1197,7 +1084,6 @@ def sensitivity_report(history_vars, history_vals):
     return out
 
 def move_table(init_vars, best_vars, bounds):
-    'Rows of name/init/best/normalized_move ((best-init)/span).'
     if not isinstance(init_vars, dict):
         raise TypeError("init_vars must be a dict")
     if not isinstance(best_vars, dict):
@@ -1226,7 +1112,6 @@ def move_table(init_vars, best_vars, bounds):
     return rows
 
 def build_summary(history, best, extra=None):
-    'Summary node of report.json: sensitivity, moves, counters.'
     hist_vars = list(history.get("vars", []))
     hist_vals = list(history.get("vals", []))
     init_vars = history.get("init_vars")
@@ -1243,13 +1128,7 @@ def build_summary(history, best, extra=None):
         summary.update(extra)
     return summary
 
-# ===== Engine: SpaceAdapter + strategy builder =====
-# Builds registry strategies and adapts the serial one-point run loop
-# to the batch ask/tell contract: ask() -> physical point; tell(value,
-# F=None, G=None) / restart(spread) / snapshot().
-
 class SpaceAdapter(object):
-    'Drive one registry (batch) algorithm one point at a time.'
     batch_api = True
     def __init__(self, algo, transform, all_names):
         self.inner = algo
@@ -1261,12 +1140,10 @@ class SpaceAdapter(object):
         self._inject = []
 
     def inject(self, points_phys):
-        'Queue physical points asked before algorithm suggestions.'
         for vals in points_phys:
             self._inject.append(self.transform.to_unit(vals))
 
     def seed_history(self, points_phys):
-        'Fold past (values, y, g) evaluations into the inner model.'
         pts = []
         for item in points_phys:
             if item is None:
@@ -1312,10 +1189,7 @@ class SpaceAdapter(object):
             f = F[0] if (F and isinstance(F[0], (list, tuple))) else F
             if isinstance(f, (list, tuple)):
                 f = sum(f)
-        # Inner engines take one constraint vector per point (G[i]), so
-        # wrap this point's flat vector.  Passing G as-is made G[0] a
-        # float and crashed constraint engines in spec/pareto mode.
-        self.inner.tell([z], [f], [list(G)] if G else None)
+        self.inner.tell([z], [f], [list(G)] if G else None)  # G 必须包一层
 
     def snapshot(self):
         return {"name": self.name, "inner": self.inner.snapshot()}
@@ -1326,30 +1200,19 @@ class SpaceAdapter(object):
 
     def restart(self, spread=0.15):
         self.inner.restart(spread)
-# Strategies that only ever see one scalar objective (simplex and global
-# included: their registry ports score scalar F[0] like the old classes).
-# weighted/worstspec are NOT here: their job is to scalarise the objective
-# vector themselves, so they must receive it unscaled.
 _SCALAR_ONLY = ("random", "grid", "simplex", "global", "de", "lshade",
                 "cmaes", "cmaes_ipop", "tpe")
 
 def build_optimizer(strategy, transform, x0_values, all_names, seed=0,
                     n_obj=1, n_constr=0, budget=None, **opts):
-    'Construct one registry strategy, wrapped for the serial loop.'
     if strategy in _SCALAR_ONLY and n_obj > 1:
-        n_obj = 1   # scalar engines collapse multi-F at tell time
+        n_obj = 1
     unit_bounds = [(0.0, 1.0)] * transform.n_free
     z0 = transform.to_unit(x0_values)
     algo = create(strategy, list(transform.free_names), unit_bounds,
                   x0=z0, n_obj=n_obj, n_constr=n_constr, seed=seed,
                   budget=budget, **opts)
     return SpaceAdapter(algo, transform, all_names)
-
-def strategy_names():
-    """All strategy names the GUI should offer (the registry has them all)."""
-    return available()
-
-# ===== Simulation runners =====
 
 class SimResult:
     def __init__(self, curves=None, status="ok", message="", raw_path=None,
@@ -1358,13 +1221,10 @@ class SimResult:
         self.status = status
         self.message = message
         self.raw_path = raw_path
-        # Step timings from the SKILL TIMING lines; wall is the full
-        # iteration time measured on the Python side.
         self.timing = timing or {}
         self.wall = wall
 
 class MockRunner:
-    'Synthetic simulation model for tests and demos.'
     EXAMPLE_VARS = ("L1", "L2", "k0", "cin")
     def __init__(self, config):
         self.config = config
@@ -1384,14 +1244,10 @@ class MockRunner:
             for xi, yi in zip(x, y):
                 f.write(f"{xi:.6e} {yi:.6f}\n")
         if _log_mode_of(self.config) == LOG_MODE_COMPACT:
-            # Non-GUI dump: gzip it and drop the plain copy. result.txt
-            # stays plain for the GUI (key iters only, see RunLogger).
             try:
                 gzip_file_in_place(raw, keep_stub=False)
             except Exception:
                 pass
-        # Same format as the SKILL eval serve: the GUI history and
-        # the live views read result.txt and must work in mock too.
         with open(os.path.join(iter_dir, "result.txt"), "w",
                   encoding="utf-8") as f:
             f.write("STATUS ok\n")
@@ -1404,7 +1260,6 @@ class MockRunner:
                 f.write("CURVE_END\n")
         return SimResult(curves=curves, raw_path=raw)
     def _output_names(self):
-        """Curve names from the target outputs."""
         names = []
         for t in self.config.get("targets", []):
             name = t.get("output")
@@ -1412,26 +1267,21 @@ class MockRunner:
                 names.append(name)
         return names or ["S21 dB20"]
     def _synthetic_curve(self, values, output):
-        """Build one synthetic curve. Pick the model by variable names."""
         if set(values) == set(self.EXAMPLE_VARS):
             return self._example_curve(values)
         return self._generic_curve(values)
     def _example_curve(self, values):
-        """Build one synthetic S21 curve in dB over 16G to 56G."""
         l1 = values["L1"] / 250e-12
         l2 = values["L2"] / 280e-12
         k0 = values["k0"]
         cin = values["cin"] / 100e-15
-        # Base gain peak near l1=1.30, l2=1.15, k0=0.75, cin=1.5.
         gain0 = 5.0 - 5.0 * (l1 - 1.30) ** 2 - 4.0 * (l2 - 1.15) ** 2
         gain0 += -3.0 * (k0 - 0.75) ** 2 - 1.5 * (cin - 1.5) ** 2
-        # Ripple grows with L1/L2 mismatch and extreme k0.
         ripple = 40.0 * (l1 / l2 - 1.05) ** 2 + 25.0 * (k0 - 0.70) ** 2
         x = []
         y = []
         f = 16e9
         while f <= 56.0001e9:
-            # Band tilt with cin.
             tilt = 0.8 * (cin - 1.5) * (f - 34e9) / 10e9
             val = gain0 + tilt + ripple * math.cos((f - 24e9) / 20e9 * math.pi)
             x.append(f)
@@ -1439,7 +1289,6 @@ class MockRunner:
             f += 0.1e9
         return x, y
     def _generic_curve(self, values):
-        'Build one smooth synthetic curve for any variable set.'
         dev = 0.0
         for name, val in values.items():
             lo, hi = self.ranges.get(name, (0.0, 1.0))
@@ -1459,7 +1308,6 @@ class MockRunner:
             y.append(gain0 + ripple * math.cos(phase))
         return x, y
     def _freq_range(self):
-        """Frequency range from the target bands. Default 1G to 10G."""
         pts = []
         for t in self.config.get("targets", []):
             for val in (t.get("band") or []):
@@ -1477,7 +1325,6 @@ def _is_netlist_comment(line):
     return line.startswith(("//", "*", ";", "#"))
 
 def _legacy_parameters_spans(text):
-    'Line spans (first, last) of every top level `parameters` line.'
     lines = text.splitlines()
     spans = []
     depth = 0
@@ -1508,7 +1355,6 @@ def _legacy_parameters_spans(text):
     return spans
 
 def _legacy_parameters_payload(lines, span):
-    """Whitespace joined tokens of one parameters statement."""
     first, last = span
     parts = []
     for k in range(first, last + 1):
@@ -1524,7 +1370,6 @@ def _legacy_parameters_payload(lines, span):
     return " ".join(parts)
 
 def _legacy_parse_netlist_parameters(text):
-    """name -> value of the top level parameters line(s)."""
     lines = text.splitlines()
     params = {}
     for span in _legacy_parameters_spans(text):
@@ -1535,7 +1380,6 @@ def _legacy_parse_netlist_parameters(text):
     return params
 
 def _legacy_rewrite_netlist_parameters(text, line):
-    'Replace the top level parameters statement(s) with one `line`.'
     spans = _legacy_parameters_spans(text)
     if not spans:
         return text, 0
@@ -1554,7 +1398,6 @@ def _legacy_rewrite_netlist_parameters(text, line):
     return new_text, len(spans)
 
 def _netlist_params_module():
-    """The hierarchy-aware patcher, or None on an old installation."""
     try:
         import netlist_params
         return netlist_params
@@ -1562,23 +1405,17 @@ def _netlist_params_module():
         return None
 
 def parse_netlist_parameters(text):
-    """Top level parameters (hierarchy-aware module when present)."""
     mod = _netlist_params_module()
     if mod is not None:
         return mod.parse_netlist_parameters(text)
     return _legacy_parse_netlist_parameters(text)
 
 def rewrite_netlist_parameters(text, line):
-    """Replace top level parameters statements; compact logs rely on this."""
     mod = _netlist_params_module()
     if mod is not None:
         return mod.rewrite_netlist_parameters(text, line)
     return _legacy_rewrite_netlist_parameters(text, line)
 
-# Analysis types a spectre deck can carry. Kept in sync with the deck
-# merger (netlist_create._ANALYSES) and the parameter patcher
-# (netlist_params._ANALYSIS); a type missing here makes preflight reject
-# a valid deck.
 _ANALYSIS_KEYWORDS = frozenset((
     "ac", "acmatch", "acnoise", "dc", "dcmatch", "dcop", "disto", "envlp",
     "fourier", "hb", "hbac", "hbnoise", "hbsp", "montecarlo", "mpde",
@@ -1587,8 +1424,6 @@ _ANALYSIS_KEYWORDS = frozenset((
     "tran", "xf",
 ))
 
-# First tokens that are statements, never analysis names. A `save sp`
-# line must not be mistaken for an sp analysis.
 _NETLIST_DIRECTIVES = frozenset((
     "simulator", "global", "include", "ahdl_include", "hdl_include",
     "parameters", "subckt", "ends", "inline", "model", "library",
@@ -1599,13 +1434,6 @@ _NETLIST_DIRECTIVES = frozenset((
 ))
 
 def netlist_analyses(text):
-    """Analysis types defined in a spectre deck, in file order.
-
-    Spectre writes analyses as ``<name> <type> key=val ...`` (ADE:
-    ``ac1 ac start=...``, ``sp1 sp ports=[...]``), so the type is the
-    second token.  A type-first form (``sp sp ports=[...]``) is accepted
-    too for hand-written decks.
-    """
     found = []
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -1620,20 +1448,12 @@ def netlist_analyses(text):
             kind = toks[1].lower()
         elif head in _ANALYSIS_KEYWORDS and not (
                 len(toks) > 1 and toks[1].startswith("(")):
-            # Type-first form. An instance's second token is a node
-            # list starting with "(", so it cannot land here.
             kind = head
         if kind:
             found.append(kind)
     return found
 
 def resolve_netlist_path(cfg):
-    """The spectre deck a real run will read.
-
-    An explicit ``netlist`` wins; otherwise the newest input.scs under
-    the cell's simulation tree, preferring the requested view, exactly
-    as RealRunner discovers it.  Returns an absolute path or "".
-    """
     cfg = cfg or {}
     raw = str(cfg.get("netlist") or "").strip()
     if raw:
@@ -1655,15 +1475,8 @@ def resolve_netlist_path(cfg):
     return hits[0]
 
 def preflight_netlist(cfg):
-    """Fail fast when the deck cannot produce any output.
-
-    Raises RuntimeError with an actionable message; returns a short
-    description on success so callers can log it.
-    """
     cfg = cfg or {}
     explicit = bool(str(cfg.get("netlist") or "").strip())
-    # Without an explicit netlist the runner discovers one under the
-    # cell's simulation tree; check it only when a cell/library is named.
     if not explicit and not (cfg.get("library") or cfg.get("cell")):
         return ""
     path = resolve_netlist_path(cfg)
@@ -1690,8 +1503,6 @@ def preflight_netlist(cfg):
     return "分析: %s" % "/".join(found)
 
 class RealRunner:
-    'Run one iteration: spectre direct + eval serve.'
-    # Runners with a live virtuoso process.
     live = set()
     def __init__(self, config, skill_dir, env=None):
         self.config = config
@@ -1700,7 +1511,6 @@ class RealRunner:
         self.proc = None
         self.sim_proc = None
         self.deck = None
-        # Fixed variables: written into every sim run, never optimized.
         self.fixed = {}
         for item in config.get("fixed_variables", []) or []:
             name = item.get("name")
@@ -1712,14 +1522,10 @@ class RealRunner:
 
     @classmethod
     def stop_all(cls):
-        """Stop every running virtuoso process."""
         for runner in list(cls.live):
             runner.terminate()
 
     def terminate(self):
-        'Stop all child processes now.'
-        # One read only. The worker thread can clear self.proc at any time.
-        # Ask the serve loops politely first. Then kill process groups.
         try:
             os.makedirs(self.queue_dir, exist_ok=True)
             with open(os.path.join(self.queue_dir, "STOP"), "w"):
@@ -1735,15 +1541,12 @@ class RealRunner:
                 timer.daemon = True
                 timer.start()
     def _kill_group(self, proc, force):
-        'Signal the whole process group of one virtuoso run.'
         import signal
         if proc.poll() is not None:
             self._cleanup_helpers(proc.pid)
             return
         pgid = None
         try:
-            # Windows has no process groups/SIGKILL; fall back to the
-            # portable terminate()/kill() calls below.
             if hasattr(os, "getpgid"):
                 pgid = os.getpgid(proc.pid)
         except OSError:
@@ -1761,7 +1564,6 @@ class RealRunner:
                 pass
     @staticmethod
     def _cleanup_helpers(pid):
-        """Kill leftover cds helper daemons of one virtuoso session."""
         try:
             subprocess.run(
                 ["pkill", "-f", f"mpssession virtuoso{pid}($| )"],
@@ -1774,22 +1576,20 @@ class RealRunner:
         result = self._run_fast(values, iter_dir)
         result.wall = time.time() - t0
         return result
+    def _fail(self, message):
+        return SimResult(status="fail", message=message)
     def _run_fast(self, values, iter_dir):
-        """Rewrite deck parameters, run spectre, extract outputs."""
         deck = self._load_deck()
         if deck is None:
             where = self.config.get("netlist") or os.path.join(
                 os.path.expanduser(self.config.get("sim_root",
                                                  "~/simulation")),
-                self.config.get("library", ""), 
+                self.config.get("library", ""),
                 self.config.get("cell", ""))
-            return SimResult(status="fail",
-                             message="no spectre deck: %s 无结果"
-                                     % where + 
-                                     "（设计页填「网表」或点「查找网表」）")
+            return self._fail("no spectre deck: %s 无结果"
+                              "（设计页填「网表」或点「查找网表」）" % where)
         if not self._ensure_eval():
-            return SimResult(status="fail",
-                             message="cannot start eval serve")
+            return self._fail("cannot start eval serve")
         text, params = deck
         merged = dict(params)
         for name, val in self.fixed.items():
@@ -1800,9 +1600,6 @@ class RealRunner:
         patch_report = None
         mod = _netlist_params_module()
         if mod is not None and hasattr(mod, "patch_netlist"):
-            # Scope aware: top level, shadowing subckt defaults and literal
-            # instance overrides (config view netlists). Values stay numeric
-            # so the module formats them; fixed values may be expressions.
             new_text, patch_report = mod.patch_netlist(
                 text, dict(values), fixed=dict(self.fixed),
                 options=self.config.get("netlist_patch") or {})
@@ -1815,19 +1612,17 @@ class RealRunner:
             if not patch_report.get("ok"):
                 missing = ", ".join(patch_report.get("missing") or []) \
                     or "未知变量"
-                return SimResult(
-                    status="fail",
-                    message="网表里找不到变量 %s；已检查顶层 parameters、"
-                            "子电路 parameters 与实例参数。详见 "
-                            "netlist_patch.json" % missing)
+                return self._fail(
+                    "网表里找不到变量 %s；已检查顶层 parameters、"
+                    "子电路 parameters 与实例参数。详见 "
+                    "netlist_patch.json" % missing)
         else:
             new_text, replaced = rewrite_netlist_parameters(text, line)
             if not replaced:
-                return SimResult(status="fail",
-                                 message="网表顶层没有 parameters 行, 无法写入变量"
-                                         "（检查网表; 子电路内的 parameters 行"
-                                         "不会被改写）")
-        # 清掉旧 result 以免误判完成；铁律下改为归档不删除
+                return self._fail(
+                    "网表顶层没有 parameters 行, 无法写入变量"
+                    "（检查网表; 子电路内的 parameters 行"
+                    "不会被改写）")
         try:
             _archive_aside(os.path.join(iter_dir, "result.txt"))
         except OSError:
@@ -1835,8 +1630,6 @@ class RealRunner:
         deck_path = os.path.join(iter_dir, "input.scs")
         with open(deck_path, "w", encoding="utf-8") as f:
             f.write(new_text)
-        # spectre direct. The psf output lands in <iter_dir>/psf.
-        # Path is probed on this machine; the config need not name one.
         spectre = resolve_prog("spectre",
                                self.config.get("spectre_bin") or "spectre")
         env = self._environment()
@@ -1852,8 +1645,7 @@ class RealRunner:
                     stdout=slog, stderr=subprocess.STDOUT)
         except OSError as exc:
             self._compact_after_spectre(iter_dir, new_text, line, patch_report)
-            return SimResult(status="fail",
-                             message=f"cannot start spectre: {exc}")
+            return self._fail(f"cannot start spectre: {exc}")
         try:
             self.sim_proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -1861,21 +1653,16 @@ class RealRunner:
             self.sim_proc.wait()
             self.sim_proc = None
             self._compact_after_spectre(iter_dir, new_text, line, patch_report)
-            return SimResult(status="fail", message="spectre timeout")
+            return self._fail("spectre timeout")
         sim_wall = time.time() - t0
         proc = self.sim_proc
         self.sim_proc = None
         self._cleanup_helpers(proc.pid)
         self._compact_after_spectre(iter_dir, new_text, line, patch_report)
-        # Ideal transformer decks fail the DC operating point on
-        # purpose. spectre exits non-zero but still writes the SP
-        # results. Trust the psf data, not the exit code.
+        # 成败只看 psf 非空；spectre 退出码不可信（DC 不收敛但 sp 结果仍会写出）
         psf_dir = os.path.join(iter_dir, "psf")
         if not os.path.isdir(psf_dir) or not os.listdir(psf_dir):
-            return SimResult(status="fail",
-                             message=f"spectre exit {proc.returncode}, "
-                                     f"no psf output")
-        # Ask the eval serve for the outputs.
+            return self._fail(f"spectre exit {proc.returncode}, no psf output")
         result_path = os.path.join(iter_dir, "result.txt")
         req = os.path.join(self.queue_dir, "eval_req.txt")
         t_req = time.time()
@@ -1888,11 +1675,8 @@ class RealRunner:
             if self._result_ready(result_path):
                 curves, status, message, timing = self._read_result(result_path)
                 timing["sim"] = sim_wall
-                # Round trip when the SKILL side did not report it.
                 timing.setdefault("eval", time.time() - t_req)
                 keep_raw = _save_raw_of(self.config)
-                # 0: drop psf now. 1: keep every psf. 2: RunLogger
-                # keeps only key iters (best/fail/first/last) later.
                 if keep_raw == 0:
                     _archive_aside(os.path.join(iter_dir, "psf"))
                 return SimResult(curves=curves, status=status,
@@ -1903,13 +1687,12 @@ class RealRunner:
                 self._cleanup_helpers(serve.pid if serve else 0)
                 self.proc = None
                 self.live.discard(self)
-                return SimResult(status="fail", message="eval serve died")
+                return self._fail("eval serve died")
             time.sleep(0.1)
         self.terminate()
-        return SimResult(status="fail", message="eval timeout")
+        return self._fail("eval timeout")
     def _compact_after_spectre(self, iter_dir, full_text, params_line,
                                patch_report=None):
-        'log_mode=compact: dedup netlist and gzip spectre.log.'
         if _log_mode_of(self.config) != LOG_MODE_COMPACT:
             return
         try:
@@ -1922,7 +1705,6 @@ class RealRunner:
         except Exception as exc:
             print("compact spectre.log skipped: %s" % exc, file=sys.stderr)
     def _load_deck(self):
-        """Load the spectre deck template and its parameters line."""
         if self.deck is not None:
             return self.deck
         path = self.config.get("netlist") or self._find_deck()
@@ -1936,15 +1718,8 @@ class RealRunner:
               "启动前按 auto_netlist 决定是否从原理图/config 重新生成")
         return self.deck
     def _find_deck(self):
-        """Deck picked by the shared resolver (explicit netlist or newest).
-
-        Kept as a method so callers/tests keep the same entry point; the
-        view preference and discovery rules live in resolve_netlist_path
-        so preflight checks the exact file this runner will read.
-        """
         return resolve_netlist_path(self.config) or None
     def _ensure_eval(self):
-        """Start the output eval serve when it is not running."""
         if self.proc is not None and self.proc.poll() is None:
             return True
         state_dir = self.config.get("state_dir") or ""
@@ -1982,18 +1757,13 @@ class RealRunner:
         return True
     @staticmethod
     def _result_ready(path):
-        """True when the result file has its final STATUS line."""
         try:
             with open(path, errors="ignore") as f:
                 return any(line.startswith("STATUS") for line in f)
         except OSError:
             return False
     def _environment(self):
-        """Process environment for one simulation run."""
         env = self.env.copy()
-        # No display for the child. A fatal error must not open a GUI
-        # dialog that keeps the process alive. Batch mode does not
-        # need X at all.
         env.pop("DISPLAY", None)
         env.pop("WAYLAND_DISPLAY", None)
         for key, val in self.config.get("env", {}).items():
@@ -2005,7 +1775,6 @@ class RealRunner:
         return env
     @staticmethod
     def _read_result(path):
-        'Parse the result file written by SKILL.'
         curves = {}
         status = "fail"
         message = ""
@@ -2030,7 +1799,6 @@ class RealRunner:
                         except ValueError:
                             pass
                 elif parts[0] == "SCALAR":
-                    # SCALAR <name with spaces> <value>
                     try:
                         value = float(parts[-1])
                     except ValueError:
@@ -2055,20 +1823,11 @@ class RealRunner:
                     xs.append(xv)
                     ys.append(yv)
         return curves, status, message, timing
-# ===== Iteration logging =====
-# Base folder of the automatic run layout. See resolve_run_dir().
 DEFAULT_LOG_ROOT = "logs"
-# Old fixed default of output_dir reads as "not set": each GUI start
-# gets its own <logs>/<circuit>/<run_timestamp>/ folder.
 PLACEHOLDER_OUTPUT_DIR = "logs/run"
 
 def _safe_segment(text):
-    """One filesystem-safe path element from a free text name."""
     raw = str(text or "").strip()
-    # ASCII only: Python 3.6 on a C locale has an ASCII filesystem
-    # encoding and os.makedirs on a Chinese directory name raises
-    # UnicodeEncodeError. Names that lose non-ASCII characters get a
-    # short crc32 suffix so different circuits never collide.
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
     cleaned = cleaned[:60] or "circuit"
     if any(ord(ch) > 127 for ch in raw):
@@ -2076,7 +1835,6 @@ def _safe_segment(text):
     return cleaned
 
 def circuit_id(cfg):
-    'Folder name of one circuit: library_cell, else name, else stub.'
     cfg = cfg or {}
     cid = str(cfg.get("library_cell") or "").strip()
     lib = str(cfg.get("library") or "").strip()
@@ -2090,14 +1848,12 @@ def circuit_id(cfg):
     return _safe_segment(cid)
 
 def _fp_number(value):
-    'Normalize a number-ish config value for the resume fingerprint.'
     try:
         return round(float(parse_eng(value)), 12)
     except Exception:
         return str(value)
 
 def _fp_target(spec):
-    'Identity view of one target, tolerant of "6" vs 6 round trips.'
     if not isinstance(spec, dict):
         return str(spec)
     out = dict(spec)
@@ -2114,11 +1870,6 @@ def _fp_target(spec):
     return out
 
 def config_fingerprint(cfg):
-    """Identity hash of one run; resume may only continue the same job.
-
-    Settings users legitimately change between sessions (max_iter,
-    patience, seed, improve_rel, strategy) are deliberately excluded.
-    """
     cfg = cfg or {}
     settings = cfg.get("settings") or {}
     variables = []
@@ -2163,7 +1914,6 @@ def config_fingerprint(cfg):
     return hashlib.sha1(blob).hexdigest()
 
 def _read_json_dict(path):
-    'Read a JSON object; return {} when missing or broken.'
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -2172,7 +1922,6 @@ def _read_json_dict(path):
         return {}
 
 def make_run_dir(root, circuit):
-    'Create <root>/<circuit>/run_<timestamp> and return its path.'
     base = os.path.abspath(os.path.expanduser(str(root or DEFAULT_LOG_ROOT)))
     folder = os.path.join(base, _safe_segment(circuit))
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -2185,34 +1934,28 @@ def make_run_dir(root, circuit):
         except OSError:
             if not os.path.isdir(path):
                 raise
-            # Same second, or a leftover folder: try the next suffix.
     raise RuntimeError("can not create a run folder below %s" % folder)
 
 def _looks_like_run_dir(path):
-    """True for a folder this tool created (run_YYYYMMDD_HHMMSS...)."""
     return bool(re.match(r"^run_\d{8}_\d{6}",
                          os.path.basename(os.path.abspath(path))))
 
 def _base_of_run_dir(path):
-    """Base folder below a run folder: <base>/<circuit>/run_x -> <base>."""
     abs_path = os.path.abspath(os.path.expanduser(str(path or "")))
     if _looks_like_run_dir(abs_path):
         return os.path.dirname(os.path.dirname(abs_path))
     return abs_path
 
 def _dir_is_empty(path):
-    """True when the folder exists and holds no entry."""
     try:
         return os.path.isdir(path) and not os.listdir(path)
     except OSError:
         return False
 
 def resolve_run_dir(cfg, resume=False, prev=None):
-    'Pick the output folder of one optimization start.'
     raw = os.path.expanduser(str((cfg or {}).get("output_dir") or "").strip())
     if resume and raw:
         run_dir = os.path.abspath(raw)
-        # 恢复时保留 auto 标志，否则下次新起点会把 logs 根当 run 目录。
         base = _base_of_run_dir(run_dir)
         if prev and prev[2] and os.path.abspath(prev[2]) == run_dir:
             auto = bool(prev[1])
@@ -2223,7 +1966,6 @@ def resolve_run_dir(cfg, resume=False, prev=None):
     prev_state = prev or None
     if raw and prev_state and prev_state[2] and \
             os.path.abspath(raw) == os.path.abspath(prev_state[2]):
-        # The field still shows our last run folder: keep its base.
         base, auto = prev_state[0], prev_state[1]
     elif not raw or raw == PLACEHOLDER_OUTPUT_DIR:
         base, auto = DEFAULT_LOG_ROOT, True
@@ -2232,16 +1974,13 @@ def resolve_run_dir(cfg, resume=False, prev=None):
     if auto:
         run_dir = make_run_dir(base, circuit_id(cfg))
     elif not os.path.isdir(base) or _dir_is_empty(base):
-        # The folder the user asked for. Same as the old behaviour.
         run_dir = os.path.abspath(os.path.expanduser(base))
         os.makedirs(run_dir, exist_ok=True)
     else:
-        # Data already lives there: a new run folder, never a clobber.
         run_dir = make_run_dir(_base_of_run_dir(base), circuit_id(cfg))
     return run_dir, (base, auto, run_dir)
 
-def _archive_aside(path):
-    """改名为 <name>.old-<ts> 归档，不删除。铁律：不删除/覆盖已有文件。"""
+def _archive_aside(path):  # 只改名归档，不删除
     if not os.path.exists(path):
         return None
     dst = "%s.old-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
@@ -2252,24 +1991,17 @@ def _archive_aside(path):
     os.rename(path, dst)
     audit("archive", path, "-> " + os.path.basename(dst))
     return dst
-# ===== Compact iteration logging (log_mode=compact) =====
-# One shared deck_base.scs + per-iteration parameters lines rebuild
-# any input.scs losslessly; spectre.log is gzipped with a readable
-# tail; save_raw=2 keeps key psf/; manifest.jsonl indexes every iter.
 LOG_MODE_COMPACT = "compact"
 LOG_MODE_FULL = "full"
-# Last N bytes of spectre.log kept uncompressed for a quick peek.
 SPECTRE_LOG_TAIL = 4096
 NETLIST_META_NAME = "input.scs.params"
 NETLIST_BASE_NAME = "deck_base.scs"
 MANIFEST_NAME = "manifest.jsonl"
 
 def _sha1_text(text):
-    """Hex sha1 of a unicode string (utf-8 bytes)."""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 def _sha1_file(path):
-    """Hex sha1 of a file on disk. "" when unreadable."""
     try:
         h = hashlib.sha1()
         with open(path, "rb") as f:
@@ -2283,21 +2015,18 @@ def _sha1_file(path):
         return ""
 
 def _log_mode_of(cfg):
-    """'compact' (default) or 'full'. Unknown values fall back to compact."""
     raw = str((cfg or {}).get("log_mode") or LOG_MODE_COMPACT).strip().lower()
     if raw == LOG_MODE_FULL:
         return LOG_MODE_FULL
     return LOG_MODE_COMPACT
 
 def _save_raw_of(cfg):
-    """0=drop psf, 1=keep all, 2=keep key iters only (default 1)."""
     try:
         return int((cfg or {}).get("save_raw", 1))
     except (TypeError, ValueError):
         return 1
 
 def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
-    'Store one input.scs as deck_base.scs + one parameters line.'
     iter_dir = os.path.abspath(iter_dir)
     run_dir = os.path.dirname(iter_dir)
     base_path = os.path.join(run_dir, NETLIST_BASE_NAME)
@@ -2310,9 +2039,6 @@ def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
         "sha1": sha,
         "bytes_full": len(full_text.encode("utf-8")),
     }
-    # Config/hierarchy netlists also patch subckt defaults or instance
-    # overrides. A single top parameters line cannot reproduce that, so
-    # keep the full input.scs instead of a lossy compact record.
     counts = (patch_report or {}).get("counts") or {}
     if counts.get("subckt") or counts.get("instance"):
         meta["base"] = None
@@ -2323,14 +2049,13 @@ def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
             json.dump(meta, f, indent=2, ensure_ascii=False)
         return meta
     if os.path.isfile(base_path):
-        try:
+        try:  # 仅当 base+params_line 能逐字节重建 full_text 才归档 input.scs
             rebuilt, replaced = rewrite_netlist_parameters(
                 _read_text(base_path), params_line)
             base_ok = bool(replaced) and _sha1_text(rebuilt) == sha
         except Exception:
             base_ok = False
     else:
-        # First compact netlist of this run: the base is this full text.
         try:
             with open(base_path, "w", encoding="utf-8") as f:
                 f.write(full_text)
@@ -2345,8 +2070,6 @@ def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
         json.dump(meta, f, indent=2, ensure_ascii=False)
     if not base_ok:
         return meta
-    # 唯一字节已在 deck_base.scs + params_line。铁律：旧产物归档改名，
-    # 不删除 —— 全文副本退居 .old-*，工作集里只剩 compact 记录。
     try:
         if os.path.isfile(full_path):
             _archive_aside(full_path)
@@ -2355,7 +2078,6 @@ def compact_netlist_file(iter_dir, full_text, params_line, patch_report=None):
     return meta
 
 def reconstruct_input_scs(run_dir, index, dest=None):
-    'Rebuild the full input.scs of one iteration from the run folder.'
     run_dir = os.path.abspath(os.path.expanduser(str(run_dir)))
     iter_dir = os.path.join(run_dir, "iter_%04d" % int(index))
     meta_path = os.path.join(iter_dir, NETLIST_META_NAME)
@@ -2391,7 +2113,6 @@ def reconstruct_input_scs(run_dir, index, dest=None):
     return text, (None if dest is None else _write_recon(dest, index, text))
 
 def _write_recon(dest, index, text):
-    """Write reconstructed netlist to dest (file) or dest/iter_XXXX.scs."""
     dest = os.path.abspath(os.path.expanduser(str(dest)))
     if os.path.isdir(dest) or dest.endswith(os.sep) or dest.endswith("/"):
         os.makedirs(dest, exist_ok=True)
@@ -2406,7 +2127,6 @@ def _write_recon(dest, index, text):
     return path
 
 def compact_spectre_log(iter_dir, tail_bytes=SPECTRE_LOG_TAIL):
-    'gzip the full spectre.log; keep a readable tail + error lines.'
     path = os.path.join(iter_dir, "spectre.log")
     if not os.path.isfile(path):
         return None
@@ -2434,8 +2154,6 @@ def compact_spectre_log(iter_dir, tail_bytes=SPECTRE_LOG_TAIL):
         return {"bytes": raw_size, "gz": gz_path, "tail_kept": False}
     err_lines = [ln for ln in text.splitlines()
                  if re.search(r"error|fatal|fail|warning|unknown", ln, re.I)]
-    # Cap the tail so the kept file never grows past the original:
-    # at most tail_bytes, and never more than half of the raw text.
     tail_n = int(tail_bytes)
     if tail_n > 0:
         tail_n = min(tail_n, max(256, len(text) // 2))
@@ -2461,7 +2179,6 @@ def compact_spectre_log(iter_dir, tail_bytes=SPECTRE_LOG_TAIL):
     }
 
 def gzip_file_in_place(path, keep_stub=True):
-    'gzip one file to <path>.gz; the original becomes a stub or archive.'
     if not os.path.isfile(path):
         return None
     try:
@@ -2471,7 +2188,6 @@ def gzip_file_in_place(path, keep_stub=True):
         return None
     gz_path = path + ".gz"
     raw_sha = hashlib.sha1(raw).hexdigest()
-    # Skip only when the existing .gz already IS this exact content.
     if os.path.isfile(gz_path):
         try:
             with gzip.open(gz_path, "rb") as gz:
@@ -2484,7 +2200,7 @@ def gzip_file_in_place(path, keep_stub=True):
                         pass
                 return gz_path
         except (OSError, IOError, EOFError):
-            pass  # unreadable/stale .gz → rewrite below
+            pass
     tmp_path = gz_path + ".tmp"
     try:
         with gzip.open(tmp_path, "wb") as gz:
@@ -2505,7 +2221,6 @@ def gzip_file_in_place(path, keep_stub=True):
         except OSError:
             pass
     else:
-        # 铁律：归档改名，不删除。唯一字节已在刚写的 .gz。
         try:
             if os.path.isfile(path):
                 _archive_aside(path)
@@ -2514,7 +2229,6 @@ def gzip_file_in_place(path, keep_stub=True):
     return gz_path
 
 class RunLogger:
-    'One folder per iteration, history CSV, optional convergence plot.'
     def __init__(self, out_dir, fresh=False, meta=None, log_mode=None,
                  save_raw=None):
         self.out_dir = out_dir
@@ -2530,13 +2244,9 @@ class RunLogger:
             self.save_raw = 1
         self.iterations: list = []
         self._best_total = None
-        self._pending_psf = None      # latest ordinary psf still on disk
+        self._pending_psf = None
         self._pending_index = None
         if fresh:
-            # 新起点不接旧数据，但铁律是不删除已有文件 —— 只归档改名。
-            # The journal is part of the old run too: a stale snapshot
-            # would be restored by run() and later resumes would replay
-            # events above the new snapshot's index_next.
             try:
                 for name in (self.history_path, self.manifest_path,
                              os.path.join(out_dir, "events.jsonl")):
@@ -2549,8 +2259,6 @@ class RunLogger:
             except OSError:
                 pass
         if meta:
-            # run_meta.json says which circuit and which start owns
-            # this folder. Optional: never kill a run over it.
             try:
                 with open(os.path.join(out_dir, "run_meta.json"), "w",
                           encoding="utf-8") as f:
@@ -2564,7 +2272,6 @@ class RunLogger:
         return path
 
     def seed_best(self, total):
-        'Restore the historical best total (resume).'
         if isinstance(total, (int, float)):
             tval = float(total)
             if math.isfinite(tval) and (self._best_total is None
@@ -2572,7 +2279,6 @@ class RunLogger:
                 self._best_total = tval
 
     def log_iteration(self, index, variables, objective, status, extra=None):
-        """Save one iteration and append to history."""
         path = self.iter_dir(index)
         record = {
             "index": index,
@@ -2591,7 +2297,6 @@ class RunLogger:
         return record
 
     def finalize(self):
-        'End of run: only the true last iter keeps a pending psf.'
         if self._pending_psf is None:
             return
         last = self.iterations[-1]["index"] if self.iterations else None
@@ -2599,8 +2304,6 @@ class RunLogger:
             if last is not None and self._pending_index != last:
                 self._expire_ordinary(self._pending_psf, self._pending_index)
             else:
-                # Last iter keeps its files; refresh manifest so it is
-                # not marked provisional.
                 self._refresh_manifest(self._pending_psf, self._pending_index,
                                        "ordinary", pending=False)
         except Exception as exc:
@@ -2608,7 +2311,6 @@ class RunLogger:
         self._pending_psf = None
         self._pending_index = None
     def _expire_ordinary(self, iter_path, index=None):
-        'An ordinary iter is no longer the last: shrink what we keep.'
         if self.save_raw == 2:
             self._archive_psf(iter_path)
         if self.log_mode == LOG_MODE_COMPACT:
@@ -2623,7 +2325,6 @@ class RunLogger:
         if index is not None:
             self._refresh_manifest(iter_path, index, "ordinary", pending=False)
     def _archive_psf(self, iter_path):
-        """Archive psf/ aside (iron rule: rename, never delete)."""
         psf = os.path.join(iter_path, "psf")
         if not os.path.isdir(psf):
             return
@@ -2632,7 +2333,6 @@ class RunLogger:
         except OSError as exc:
             print("psf archive skipped: %s" % exc, file=sys.stderr)
     def _apply_psf_policy(self, path, index, status, objective):
-        'Classify the iteration and apply the key-iter retention rules.'
         total = (objective or {}).get("total")
         is_fail = (status or "") != "ok"
         is_first = (index == 0)
@@ -2649,21 +2349,18 @@ class RunLogger:
         if is_fail or is_first or is_best:
             return ("fail" if is_fail else
                     "first" if is_first else "best")
-        # Ordinary success: retain only the newest as "last" candidate.
         if self._pending_psf and self._pending_psf != path:
             self._expire_ordinary(self._pending_psf, self._pending_index)
         self._pending_psf = path
         self._pending_index = index
         return "ordinary"
     def _file_entry(self, path):
-        """sha1/bytes of one artifact for the manifest."""
         try:
             size = os.path.getsize(path)
         except OSError:
             return None
         return {"sha1": _sha1_file(path), "bytes": size}
     def _collect_files(self, path):
-        """Current on-disk artifacts of one iteration (post-retention)."""
         files = {}
         for name in ("record.json", "result.txt", "result.txt.gz",
                      "input.scs", NETLIST_META_NAME, "spectre.log",
@@ -2683,22 +2380,27 @@ class RunLogger:
         if any(n.startswith("psf.old-") for n in names):
             return "archived"
         return "none"
-    def _write_manifest(self, record, path, keep_reason):
-        'One JSON line per iteration: what was stored and its hash.'
-        index = record["index"]
-        provisional = (keep_reason == "ordinary")
+    def _manifest_entry(self, path, index, keep_reason, when, pending,
+                        extra=None):
         entry = {
-            "index": index,
-            "time": record["time"],
-            "status": record["status"],
+            "index": int(index),
+            "time": when,
             "log_mode": self.log_mode,
             "save_raw": self.save_raw,
             "psf_kept": keep_reason,
-            "objective_total": (record.get("objective") or {}).get("total"),
             "files": self._collect_files(path),
             "psf": self._psf_state(path),
-            "provisional": provisional,
+            "provisional": bool(pending),
         }
+        if extra:
+            entry.update(extra)
+        return entry
+    def _write_manifest(self, record, path, keep_reason):
+        entry = self._manifest_entry(
+            path, record["index"], keep_reason, record["time"],
+            keep_reason == "ordinary",
+            {"status": record["status"],
+             "objective_total": (record.get("objective") or {}).get("total")})
         meta_path = os.path.join(path, NETLIST_META_NAME)
         if os.path.isfile(meta_path):
             try:
@@ -2715,40 +2417,20 @@ class RunLogger:
         self._append_manifest(entry)
         return entry
     def _refresh_manifest(self, path, index, keep_reason, pending=False):
-        'Append the post-retention file set for one iteration.'
         if index is None:
             return
-        entry = {
-            "index": int(index),
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "type": "retention",
-            "log_mode": self.log_mode,
-            "save_raw": self.save_raw,
-            "psf_kept": keep_reason,
-            "files": self._collect_files(path),
-            "psf": self._psf_state(path),
-            "provisional": bool(pending),
-        }
+        entry = self._manifest_entry(
+            path, index, keep_reason, time.strftime("%Y-%m-%d %H:%M:%S"),
+            pending, {"type": "retention"})
         self._append_manifest(entry)
         return entry
     def _append_manifest(self, entry):
-        """Append one JSON line; flush so a kill loses at most one line."""
-        line = json.dumps(to_jsonable(entry), ensure_ascii=False)
-        with open(self.manifest_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.write("\n")
-            try:
-                f.flush()
-                os.fsync(f.fileno())
-            except (OSError, ValueError):
-                pass
+        _append_jsonl(self.manifest_path, entry, fsync=True)
     def _append_history(self, record):
-        # An empty file (fresh run) still needs its header line.
         exists = (os.path.exists(self.history_path)
                   and os.path.getsize(self.history_path) > 0)
         fields = ["index", "time", "status", "total"]
         var_names = sorted(record["variables"].keys())
-        # 仅当本 run 有 em_actual 时追加 em 列（无 em 时与旧版逐位一致）
         em_cols = []
         em_vals = []
         extra = record.get("extra") or {}
@@ -2775,7 +2457,6 @@ class RunLogger:
             json.dump(report, f, indent=2)
 
     def plot_convergence(self):
-        """Plot objective over iterations. Optional."""
         try:
             import matplotlib
             matplotlib.use("Agg")
@@ -2796,36 +2477,19 @@ class RunLogger:
         return path
 
 def read_manifest(manifest_path):
-    'Effective (latest) manifest entry per iteration index.'
     out = {}
-    if not os.path.isfile(manifest_path):
-        return out
-    with open(manifest_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue  # half-written kill line: identifiable as stale
-            if "index" not in entry:
-                continue
+    for entry in _read_jsonl(manifest_path, skip_bad=True):
+        if isinstance(entry, dict) and "index" in entry:
             out[int(entry["index"])] = entry
     return out
-# ===== Optimization session =====
-# Penalty given to the optimizer when a simulation fails. Same magnitude
-# as BIG_ERROR (a failed sim is the worst possible evaluation).
 SIM_FAIL_TOTAL = BIG_ERROR
 
 class Settings:
-    """Optimization limits read from the config file."""
     MODES = ("scalar", "spec", "pareto")
 
     @staticmethod
     def allowed_strategies():
-        """Strategy names from the algorithms registry."""
-        return strategy_names()
+        return available()
     def __init__(self, cfg):
         cfg = cfg or {}
         try:
@@ -2858,22 +2522,15 @@ class Settings:
                 f"settings.mode must be 'scalar', 'spec' or 'pareto', "
                 f"got {self.mode!r}")
         if self.strategy == "nsga2" and self.mode == "scalar":
-            # Pareto engine needs objective roles; promote quietly.
             self.mode = "pareto"
 
 class Best:
-    """Best objective value and variables seen so far."""
     def __init__(self):
         self.total = None
         self.vars = None
         self.errors = None
 
     def update(self, total, values, errors, force=False):
-        """Store a new strict best. Return True when it is a new best.
-
-        force=True replaces an infeasible best with a feasible point whose
-        scalarized total happens to be larger (spec/pareto modes).
-        """
         if not math.isfinite(total):
             return False
         if not force and self.total is not None and total >= self.total:
@@ -2882,13 +2539,11 @@ class Best:
         self.vars = dict(values)
         self.errors = errors
         return True
-# ===== em_bridge 配置解析（S3 电路集成；enabled=false 时零影响） =====
 _EM_BRIDGE_MODES = ("once", "precover", "track")
 _EM_BRIDGE_FALLBACKS = ("actual", "clip", "penalty")
 _EM_DEVICE_TYPES = ("ind", "ct", "xfmr", "tl", "cpl")
 
 def parse_em_bridge_cfg(cfg):
-    '解析 cfg["em_bridge"] → 规范 dict；缺段/关闭返回 None。'
     raw = (cfg or {}).get("em_bridge")
     if not raw or not raw.get("enabled"):
         return None
@@ -2923,7 +2578,6 @@ def parse_em_bridge_cfg(cfg):
         if tech in (None, ""):
             raise ValueError("em_bridge.devices[%d].tech 必填（防跨工艺错配）" % i)
         tol = dict(d.get("tolerances") or raw.get("tolerances") or {})
-        # 缺省回填（三层：库默认 < 全局 < 本条）
         tol.setdefault("L0", 0.02)
         tol.setdefault("Q", 0.30)
         tol.setdefault("srf_margin", 1.5)
@@ -2932,7 +2586,6 @@ def parse_em_bridge_cfg(cfg):
         grid = dict(d.get("grid_spec") or raw.get("grid_spec") or {})
         grid.setdefault("step_rel", tol.get("L0", 0.02))
         grid.setdefault("step_abs_deg", 2.0)
-        # s ≤ 2·tol 硬校验（L-Rev-P2-1/B4：写路径硬校验）
         step_rel = float(grid.get("step_rel", 0.02))
         for m in ("L0", "Lp", "Ls", "Z0", "Ze", "Zo"):
             t = tol.get(m)
@@ -2972,14 +2625,11 @@ def parse_em_bridge_cfg(cfg):
     }
 
 class Optimization:
-    'One optimization run of one config.'
     def __init__(self, cfg, mock=False, max_iter=None, on_event=None,
                  stop_check=None, resume=None):
         self.cfg = cfg
         self.on_event = on_event
         self.stop_check = stop_check
-        # Explicit fresh start: never restore algorithm state or replay
-        # events from the previous run in this folder.
         self._fresh = (resume is False)
         self.settings = Settings(cfg.get("settings", {}))
         self.max_iter = (self.settings.max_iter if max_iter is None
@@ -2988,16 +2638,10 @@ class Optimization:
             raise ValueError("max_iter must be >= 1")
         self.names, x0, self.bounds = build_variables(cfg)
         self.targets = [Target(t) for t in cfg["targets"]]
-        # S3: em_bridge 段解析；None = 关闭/缺段（隔离铁律）
         self.em_bridge_cfg = parse_em_bridge_cfg(cfg)
         out_dir = cfg.get("output_dir", "logs/run")
         self.out_dir = os.path.abspath(os.path.expanduser(out_dir))
-        # resume=False: a brand new run. No old records, no old best
-        # point, iteration index of history.csv and record.json = 0.
         history = load_previous(self.out_dir) if resume is not False else []
-        # A resume may only continue the same job. Without this guard a
-        # folder left by another circuit/targets is silently adopted and
-        # its best point is reported as this run's result.
         fingerprint = config_fingerprint(cfg)
         if history:
             old_fp = _read_json_dict(
@@ -3030,15 +2674,10 @@ class Optimization:
         self.start = ((max(rec.get("index", -1) for rec in history) + 1)
                       if history else 0)
         self._restore(history)
-        # save_raw=2 的 best 判定要认历史最优，否则 resume 后首个 ok
-        # 会被误判新 best 多留 psf。
         if self.best.total is not None:
             self.logger.seed_best(self.best.total)
-        # 历史热启动候选（仅在没有快照可还原时使用）。
         self._history_seeds = self._collect_history_seeds(history)
-        # Start from the best point of earlier sessions when it exists.
         best_vars = self.best.vars
-        # Missing names of old records fall back to the init point.
         start_point = ([best_vars.get(n, x0[i])
                         for i, n in enumerate(self.names)]
                        if best_vars else x0)
@@ -3048,8 +2687,6 @@ class Optimization:
         self._build_algorithm()
         self._build_engine_tools()
     def _build_transform(self):
-        """Variable transform (log/integer/linking); absent keys keep
-        the linear-everything behaviour."""
         specs = []
         for v in self.cfg.get("variables", []) or []:
             name = v["name"]
@@ -3066,8 +2703,6 @@ class Optimization:
             specs.append(spec)
         return Transform(specs, self.cfg.get("linking") or [])
     def _build_algorithm(self):
-        """Build the configured strategy from the algorithms registry
-        (simplex/global included), wrapped for the serial run loop."""
         strat = self.settings.strategy
         self.transform = self._build_transform()
         err_t, obj_t, con_t = classify_roles(self.targets)
@@ -3076,9 +2711,6 @@ class Optimization:
                                  if self.settings.mode != "scalar" else 0)
         opts = {}
         if strat == "weighted" and self.settings.mode != "scalar" and obj_t:
-            # The weighted strategy combines objective errors itself; give
-            # it the same per-target weights the scalar total would use.
-            # All-zero weights fall back to equal weighting (as before).
             weights = [_weight_of(t) for t in obj_t]
             if sum(weights) > 0.0:
                 opts["weights"] = weights
@@ -3091,11 +2723,9 @@ class Optimization:
             strat, self.transform, self.start_values, self.names,
             seed=self.settings.seed, n_obj=n_obj, n_constr=n_constr,
             budget=self.max_iter, **opts)
-        # Warm start: run loop asks these first.
         if init_pts:
             self.algo.inject(init_pts)
     def _load_init_points(self):
-        """Warm-start points from settings.init_points (CSV)."""
         path = (self.cfg.get("settings", {}) or {}).get("init_points")
         if not path:
             return []
@@ -3119,11 +2749,9 @@ class Optimization:
                     pts.append(dict(zip(self.names, vals)))
         return pts
     def _build_engine_tools(self):
-        """Run-level bookkeeping: failure penalties and the journal."""
         self.penalty_ledger = PenaltyLedger()
         self.journal = RunJournal(self.out_dir)
     def _build_runner(self, mock):
-        'Build the mock runner or the Virtuoso runner.'
         if mock:
             runner = MockRunner(self.cfg)
         else:
@@ -3137,7 +2765,6 @@ class Optimization:
                 "em_bridge 与 layout_em 互斥：电学参数模式与几何参数模式"
                 "不得同时启用（请关掉其中一个）")
         if em_on:
-            # 懒加载：缺 em_bridge.py 且 enabled=true 必须报错，不静默降级
             try:
                 import em_bridge
             except ImportError as exc:
@@ -3160,21 +2787,15 @@ class Optimization:
                 raise
         return runner
     def _restore(self, history):
-        """Restore best point and stall counter from earlier sessions."""
         for rec in history:
             total = rec.get("objective", {}).get("total")
             if rec.get("status") == "ok" and total is not None:
-                values = {n: parse_eng(rec["variables"][n]) for n in self.names
-                          if n in rec["variables"]}
+                values = _values_from_record(rec, self.names, strict=True)
                 if self.best.update(total, values, rec["objective"]):
                     self.best_it = rec.get("index")
-        # A zero patience must not slice the full history.
         tail = (history[-self.settings.patience:]
                 if self.settings.patience > 0 else [])
         for rec in tail:
-            # Fail rows never count as "no improvement": the main
-            # loop skips them as well.  Same threshold as the live
-            # stall check (improve_rel), not a strict comparison.
             if rec.get("status") != "ok":
                 continue
             total = rec.get("objective", {}).get("total")
@@ -3183,7 +2804,6 @@ class Optimization:
             if total >= self.best.total * (1.0 - self.settings.improve_rel):
                 self.no_improve += 1
     def _collect_history_seeds(self, history):
-        'Past successful evaluations as (values, total) seed pairs.'
         seeds = []
         for rec in history:
             if rec.get("status") != "ok":
@@ -3193,25 +2813,11 @@ class Optimization:
                 continue
             if not math.isfinite(float(total)):
                 continue
-            raw = rec.get("variables") or {}
-            values = {}
-            ok = True
-            for name in self.names:
-                text = raw.get(name)
-                if text is None:
-                    ok = False
-                    break
-                try:
-                    values[name] = (text if isinstance(text, (int, float))
-                                    else parse_eng(text))
-                except Exception:
-                    ok = False
-                    break
-            if ok:
+            values = _values_from_record(rec, self.names, require_all=True)
+            if values is not None:
                 seeds.append((values, float(total)))
         return seeds
     def _seed_from_history(self):
-        "Fold past evaluations into the algorithm's state."
         if not self._history_seeds:
             return
         try:
@@ -3223,13 +2829,11 @@ class Optimization:
             print("history seed failed: %s" % exc)
 
     def run(self):
-        """Run the iteration loop. Return the stop reason."""
         if self._fresh or not self._try_restore_snapshot():
             self._seed_from_history()
         fails = 0
         for it in range(self.start, self.max_iter):
             self._last_it = it
-            # Ask the host to stop before this iteration starts.
             if self.stop_check is not None and self.stop_check():
                 return "stopped"
             values = self._ask_point()
@@ -3240,8 +2844,6 @@ class Optimization:
                                 wall=result.wall,
                                 timeout=self.cfg.get("sim_timeout"))
                 if kind == "INFRA" and fails + 1 < self.settings.fail_limit:
-                    # Infrastructure trouble: retry the same point once
-                    # without penalty or fail counting (P0 rule).
                     print(f"[{it:03d}] INFRA error, retrying: "
                           f"{result.message}")
                     result = self.runner.run(values,
@@ -3258,7 +2860,6 @@ class Optimization:
                         continue
                 fails += 1
                 self._log_failure(it, values, result)
-                # A stop request wins over the fail limit.
                 if self.stop_check is not None and self.stop_check():
                     return "stopped"
                 if fails >= self.settings.fail_limit:
@@ -3273,15 +2874,10 @@ class Optimization:
             reason = self._stall_action(it)
             if reason:
                 return reason
-        # A resume with no new budget must not rewrite a finished run's
-        # verdict: if the restored best already met the targets, say so.
         met = (isinstance(self.best.errors, dict)
                and bool(self.best.errors.get("met")))
         if met:
             return "targets_met"
-        # All iterations of this session failed (bad netlist/state dir,
-        # missing simulator, ...): max_iterations would read as a normal
-        # completion. Report the failure instead.
         if self.logger.iterations:
             statuses = [str(rec.get("status") or "")
                         for rec in self.logger.iterations]
@@ -3289,13 +2885,6 @@ class Optimization:
                 return "sim_failures"
         return "max_iterations"
     def _reject_empty_curves(self, it, result):
-        """Stop when a green simulation produced nothing to score.
-
-        spectre can exit 0 (and SKILL can write STATUS ok) while the
-        eval serve parses no outputs at all: no usable analysis in the
-        deck, or output names that do not match ADE. Continuing would
-        only burn iterations on BIG_ERROR.
-        """
         if result.status == "ok" and not result.curves:
             raise RuntimeError(
                 "第 %d 轮没有解析到任何输出曲线（%s）。常见原因：网表缺少"
@@ -3303,7 +2892,6 @@ class Optimization:
                 "避免空跑；请检查网表分析与目标输出名后重跑。"
                 % (it, result.message or "无消息"))
     def _emit(self, event):
-        'Send one progress event to the host callback.'
         if self.on_event is None:
             return
         try:
@@ -3311,18 +2899,10 @@ class Optimization:
         except Exception as exc:
             print(f"event callback failed: {exc}")
     def _ask_point(self):
-        """Ask one point. Clamp it to the variable bounds."""
         point = self.algo.ask()
-        values = {}
-        for i, name in enumerate(self.names):
-            lo, hi = self.bounds[i]
-            values[name] = min(hi, max(lo, point[i]))
-        return values
-    def _tell_algo(self, value, f=None, g=None):
-        """Feed one evaluation to the algorithm."""
-        self.algo.tell(value, F=f, G=g)
+        return {name: min(hi, max(lo, point[i]))
+                for i, (name, (lo, hi)) in enumerate(zip(self.names, self.bounds))}
     def _try_restore_snapshot(self):
-        'Resume algorithm state from the last snapshot.'
         try:
             state = self.journal.load_latest()
         except Exception as exc:
@@ -3345,10 +2925,6 @@ class Optimization:
         except Exception as exc:
             print(f"event replay read failed: {exc}")
             return True
-        # Only replay events logged after the snapshot. The snapshot is
-        # taken before the stall action of that iteration, so an
-        # index-based filter cannot tell a kick/restart already folded
-        # into the snapshot from one applied just after it.
         seq = state.get("events")
         if isinstance(seq, int) and seq >= 0:
             events = events[seq:]
@@ -3370,18 +2946,16 @@ class Optimization:
             total = ev.get("total")
             if total is None:
                 continue
-            # Replay the ask/tell pair: ask() consumes RNG and walks
-            # the internal state machine exactly as the live run did.
             self.algo.ask()
-            self._tell_algo(total, ev.get("F"), ev.get("G"))
+            self.algo.tell(total, F=ev.get("F"), G=ev.get("G"))
             replayed += 1
         print(f"restored snapshot: evals="
               f"{getattr(self.algo, 'eval_count', '?')} "
               f"replayed={replayed}")
         return True
     def _write_snapshot(self):
-        """Persist algorithm + run state every N evaluations."""
         try:
+            # events 计数必须与 algo 状态同一时刻；续跑从该下标回放
             self.journal.snapshot({
                 "algo": self.algo.snapshot(),
                 "best_total": self.best.total,
@@ -3389,18 +2963,15 @@ class Optimization:
                 "restarts": self.restarts,
                 "no_improve": self.no_improve,
                 "index_next": getattr(self, "_last_it", -1) + 1,
-                # Everything logged so far is folded into algo/best;
-                # a resume replays only the tail after this point.
                 "events": len(self.journal.read_events()),
             })
         except Exception as exc:
             print(f"snapshot write failed: {exc}")
     def _log_failure(self, it, values, result):
-        """Log one failed simulation. Give the penalty to the optimizer."""
         total = self.penalty_ledger.penalty("DNC", SIM_FAIL_TOTAL)
         objective = {"total": total,
                      "errors": {"simulation": total}}
-        self._tell_algo(total)
+        self.algo.tell(total)
         self.logger.log_iteration(it, _fmt_vars(values), objective,
                                   f"fail:{result.message}")
         self._journal_event(it, values, None, None, total,
@@ -3415,7 +2986,6 @@ class Optimization:
                     "best_vars": (dict(self.best.vars)
                                   if self.best.vars else None)})
     def _journal_event(self, it, values, f_vec, g_vec, total, status):
-        """One line in events.jsonl (audit trail)."""
         try:
             self.journal.log_event({
                 "index": it, "status": status,
@@ -3426,7 +2996,6 @@ class Optimization:
         except Exception as exc:
             print(f"journal write failed: {exc}")
     def _log_success(self, it, values, result):
-        """Log one good simulation. Return (total error, targets met)."""
         res = evaluate_roles(self.targets, result.curves, self.settings.mode)
         objective = {"total": res["total"], "errors": res["errors"],
                      "met": bool(res.get("met", res["total"] <= 0.0))}
@@ -3434,8 +3003,7 @@ class Optimization:
         if self.settings.mode == "scalar":
             f_vec, g_vec = None, None
         total = objective["total"]
-        self._tell_algo(total, f_vec, g_vec)
-        # S3 三值传递：em_actual 进 record.extra（history 列由 _append_history 展开）
+        self.algo.tell(total, F=f_vec, G=g_vec)
         em_actual = getattr(result, "em_actual", None) or {}
         extra = {"em_actual": em_actual} if em_actual else None
         self.logger.log_iteration(it, _fmt_vars(values), objective, "ok",
@@ -3460,12 +3028,6 @@ class Optimization:
                                   if self.best.vars else None)})
         return total, objective["met"]
     def _track_best(self, total, values, objective, met=True, it=None):
-        """Update the best point and the stall counter.
-
-        A feasible point beats an infeasible one even when the scalarized
-        total says otherwise; previously best could be an infeasible point
-        whose objective-only total looked smaller.
-        """
         best = self.best.total
         if best is None:
             self.best.update(total, values, objective)
@@ -3490,11 +3052,8 @@ class Optimization:
         self.best_it = it
         self.no_improve = 0
     def _stall_action(self, it):
-        """Apply the stall policy. Return a stop reason or None."""
         if self.no_improve < self.settings.patience:
             return None
-        # Cheap log-domain kicks first (three-strike), then a full
-        # restart (whitepaper L3/L4).
         if getattr(self, "_kick_tries", 0) < 3:
             self._kick_tries = getattr(self, "_kick_tries", 0) + 1
             self.no_improve = 0
@@ -3536,7 +3095,6 @@ class Optimization:
         return "no_improvement"
 
     def report(self, reason):
-        """Build the run report."""
         rep = {
             "stop_reason": reason,
             "best_total_error": self.best.total,
@@ -3550,16 +3108,10 @@ class Optimization:
             "best_iter": self.best_it,
             "restarts": self.restarts,
         }
-        # 报告摘要：敏感度排序、参数移动表与运行统计。
         try:
             hist_vars, hist_vals = [], []
             for rec in self.logger.iterations:
-                row = {}
-                for n, v in (rec.get("variables") or {}).items():
-                    try:
-                        row[n] = parse_eng(v)
-                    except Exception:
-                        pass
+                row = _values_from_record(rec)
                 hist_vars.append(row)
                 total = (rec.get("objective") or {}).get("total")
                 hist_vals.append(total if total is not None else 0.0)
@@ -3578,7 +3130,6 @@ class Optimization:
             rep["summary_error"] = str(exc)
         return rep
     def _failure_counts(self):
-        """Count non-ok iteration statuses, e.g. {"fail": 3, "timeout": 1}."""
         counts = {}
         for rec in self.logger.iterations:
             status = str(rec.get("status") or "")
@@ -3591,12 +3142,9 @@ def load_config(path):
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
     base = os.path.dirname(os.path.abspath(path))
+    # state_dir 相对路径以配置文件目录为基准
     for key in ("state_dir",):
         value = cfg.get(key)
-        # null / "" / non-string all mean "not set". Keeping None would
-        # crash every consumer at os.path.expanduser(None), and joining
-        # "" to the config folder would make auto_netlist treat that
-        # folder as a real state_dir.
         if not isinstance(value, str) or not value.strip():
             if key in cfg:
                 cfg[key] = ""
@@ -3632,34 +3180,27 @@ def build_variables(cfg):
     return names, x0, bounds
 
 def _iter_order(path):
-    """Numeric sort key of one iteration folder."""
     name = os.path.basename(os.path.dirname(path))
     match = re.search(r"(\d+)", name)
     return int(match.group(1)) if match else 0
 
 def load_previous(out_dir):
-    """Load records of earlier sessions. Return list of records."""
     records = []
     paths = []
     for path in glob.glob(os.path.join(out_dir, "iter_*", "record.json")):
-        # _archive_aside renames old rounds to iter_0000.old-<stamp>;
-        # those are not part of the current history.
         name = os.path.basename(os.path.dirname(path))
         if name.startswith("iter_") and name[5:].isdigit():
             paths.append(path)
-    # Numeric order. Text order puts iter_10000 before iter_9999.
     paths.sort(key=_iter_order)
     for path in paths:
         try:
             with open(path) as f:
                 records.append(json.load(f))
         except Exception as exc:
-            # Skip a broken record. Keep the run alive.
             print(f"skip bad record {path}: {exc}", file=sys.stderr)
     return records
 
 def stop_all_runners():
-    'Stop every simulation child process, including librf_opt ones.'
     RealRunner.stop_all()
     try:
         import librf_opt
@@ -3670,7 +3211,6 @@ def stop_all_runners():
         pass
 
 def _auto_netlist_mode(cfg):
-    """'off', 'always' or 'auto' from cfg['auto_netlist']."""
     raw = (cfg or {}).get("auto_netlist", "auto")
     if raw is False or raw is None:
         return "off"
@@ -3685,11 +3225,6 @@ def _auto_netlist_mode(cfg):
     return "auto"
 
 def prepare_netlist(cfg, mock=False):
-    """Regenerate the deck from the schematic/config before iteration 0.
-
-    Returns the netlist_create report. A failure never kills an existing
-    deck; cfg['netlist_strict'] turns it into an error instead.
-    """
     mode = _auto_netlist_mode(cfg)
     if mock:
         return {"status": "skipped", "reason": "mock runner"}
@@ -3729,7 +3264,6 @@ def prepare_netlist(cfg, mock=False):
     return report
 
 def _resume_flag(value):
-    """cfg['resume'] -> True/False/None; None keeps auto-resume."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -3739,22 +3273,16 @@ def _resume_flag(value):
 
 def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
                      stop_check=None, resume=None):
-    'Run one optimization session.'
-    # The "resume": false advice in the fingerprint error lives in the
-    # config file; honour it unless the caller passed an explicit flag.
     if resume is None:
         resume = _resume_flag((cfg or {}).get("resume"))
     netlist_report = prepare_netlist(cfg, mock=mock)
     if not mock:
-        # A deck without the requested analysis runs green and yields no
-        # curves; catch that before spending iterations on penalties.
         summary = preflight_netlist(cfg)
         if summary:
             print("网表预检: %s" % summary)
     opt = Optimization(cfg, mock=mock, max_iter=max_iter,
                        on_event=on_event, stop_check=stop_check,
                        resume=resume)
-    # 操作审计落盘（CLI 与 GUI 都有）
     try:
         audit_file(os.path.join(opt.out_dir, "audit.jsonl"))
         audit("write", os.path.join(opt.out_dir, "audit.jsonl"),
@@ -3764,10 +3292,7 @@ def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
     try:
         reason = opt.run()
     finally:
-        # Never leave a virtuoso process behind. Also after Ctrl+C.
         stop_all_runners()
-        # save_raw=2: drop the pending ordinary psf unless it is the
-        # last iteration. Never throws.
         try:
             opt.logger.finalize()
         except Exception as exc:
@@ -3783,12 +3308,10 @@ def run_optimization(cfg, mock=False, max_iter=None, on_event=None,
     plot = opt.logger.plot_convergence()
     if plot:
         report["convergence_plot"] = plot
-    # Save after the plot key so file and return value match.
     opt.logger.save_report(report)
     return report
 
 def save_best_curves(opt):
-    """Write the best point's curves next to report.json (EM alignment)."""
     curves = getattr(opt, "best_curves", None)
     if not curves:
         return None
@@ -3818,7 +3341,6 @@ def _load_em_align():
         raise RuntimeError("EM 对齐需要 em_align.py: %s" % exc)
 
 def _simulate_once(cfg, netlist, values, out_dir):
-    """Simulate one netlist at fixed values and return its curves."""
     import copy
     cfg2 = copy.deepcopy(cfg)
     cfg2["netlist"] = netlist
@@ -3852,10 +3374,9 @@ def _ideal_netlist_for_stage2(cfg, stage1_dir):
     path = cfg.get("netlist")
     if path and os.path.isfile(os.path.expanduser(path)):
         return os.path.expanduser(path)
-    for name in ("deck_base.scs",):
-        hit = os.path.join(stage1_dir, name)
-        if os.path.isfile(hit):
-            return hit
+    hit = os.path.join(stage1_dir, "deck_base.scs")
+    if os.path.isfile(hit):
+        return hit
     hit = os.path.join(stage1_dir, "iter_0000", "input.scs")
     if os.path.isfile(hit):
         return hit
@@ -3864,14 +3385,6 @@ def _ideal_netlist_for_stage2(cfg, stage1_dir):
 def run_em_align(cfg, stage1_dir, em_curve=None, em_netlist=None,
                  output_dir=None, max_iter=None, tol=None, mock=False,
                  on_event=None):
-    """Two-stage EM alignment.
-
-    1. Load x_opt / y_opt_ideal from the finished ideal run.
-    2. Get y_em from a curve file, or by simulating the EM (config) netlist
-       once at x_opt.
-    3. Re-optimize the ideal netlist against y_em, then report the variable
-       and curve deltas as EM model correction directions.
-    """
     import copy
     mod = _load_em_align()
     stage1_dir = os.path.abspath(os.path.expanduser(str(stage1_dir)))
@@ -4003,7 +3516,6 @@ def _fmt_vars(values):
     return {k: format_eng(v) for k, v in values.items()}
 
 def _all_at_bounds(values, names, bounds, tol=1e-6):
-    """True when every variable sits at one of its bounds."""
     if not values:
         return False
     for i, name in enumerate(names):
@@ -4025,13 +3537,11 @@ def dump_state(cfg):
     info = summarize(state_dir)
     print(json.dumps(info, indent=2))
     return info
-# ===== Built-in example config (the old example.json, now embedded) =====
 EXAMPLE_CFG = {
     'analyses': 'sp', 'cell': 'test_cs_driver', 'library': 'MyLib',
     'name': 'test_cs_driver S21 flatness optimization',
     'output_dir': 'logs/test_cs_driver', 'save_raw': 1,
     'log_mode': 'compact', 'sim_timeout': 1800, 'state': 'spectre_state1',
-    # state_dir/work_dir/virtuoso_bin 留空或相对：目标机自动探测填入。
     'state_dir': '', 'view': 'schematic', 'virtuoso_bin': '',
     'work_dir': '.', 'use_config': False,
     'auto_netlist': True, 'netlist_view': '',
@@ -4051,10 +3561,7 @@ EXAMPLE_CFG = {
         {'init': '100f', 'max': '200f', 'min': '50f', 'name': 'cin'}],
 }
 
-# ===== Regression tests (--selftest); suite lives in selftest.py =====
-
 def run_selftests():
-    'Run the regression tests.'
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "selftest.py")
     if not os.path.isfile(path):
@@ -4062,10 +3569,7 @@ def run_selftests():
         return 2
     return subprocess.call([sys.executable, path])
 
-# ===== Command line =====
-
 def _warn_ascii_filesystem():
-    """Tell the user when the locale breaks non-ASCII paths."""
     enc = (sys.getfilesystemencoding() or "").lower()
     if enc in ("ascii", "us-ascii",
               "ansi_x3.4-1968"):
@@ -4073,7 +3577,6 @@ def _warn_ascii_filesystem():
         print("建议以 LANG=C.UTF-8 或 zh_CN.UTF-8 启动本程序")
 
 def _force_utf8_stdio():
-    'locale 把 stdio 留成 ASCII 时重包成 UTF-8。'
     import io as _io
     for _name in ("stdout", "stderr"):
         _stream = getattr(sys, _name, None)
@@ -4088,7 +3591,6 @@ def _force_utf8_stdio():
                 pass
 
 def _cli_reconstruct(argv):
-    '--reconstruct RUN_DIR [INDEX [DEST]]: rebuild input.scs files.'
     if not argv:
         print("usage: --reconstruct RUN_DIR [INDEX [DEST]]", file=sys.stderr)
         return 1

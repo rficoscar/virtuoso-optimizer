@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-'netlist_create: 优化开始前从 Virtuoso 原理图/config 重新生成网表（需求 A）。'
-# ===== 设计要点 =====
-# 1) 只依赖标准库，Python 3.6 可运行；所有文本 I/O 显式 UTF-8。
-# 2) 真正的 createNetlist 由 virtuoso -nograph -replay 执行；本模块生成 .il、
-#    解析 OPT_NETLIST_* 文本协议、备份/校验/恢复网表。
-# 3) runner 可注入，自测不依赖 Cadence。
-# 4) 铁律：不删除用户文件；旧网表备份为 <path>.bak-<ts>。
 import argparse
 import os
 import re
@@ -15,28 +7,19 @@ import sys
 import tempfile
 import time
 
-
 class NetlistError(Exception):
-    """设计信息缺失/ADE_state.info 解析失败。"""
     pass
 
-
-# ===== 文本与路径 =====
-
 def _read_text(path):
-    'UTF-8 读取（坏字节替换，绝不因 locale 失败）。'
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
 
-
 def _write_text(path, text):
-    'UTF-8 写入；自动建父目录；固定 LF。'
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
-
 
 def _as_text(value):
     if value is None:
@@ -45,15 +28,12 @@ def _as_text(value):
         return value.decode("utf-8", "replace")
     return str(value)
 
-
 def _clean(value):
     if value is None:
         return ""
     return str(value).strip()
 
-
 def _abs_path(path, base=None):
-    '展开 ~；相对路径拼到 base（默认 cwd）；返回 normpath。'
     text = os.path.expanduser(_clean(path))
     if not text:
         return ""
@@ -61,21 +41,13 @@ def _abs_path(path, base=None):
         text = os.path.join(base or os.getcwd(), text)
     return os.path.normpath(text)
 
-
 def _audit(kind, path=None, detail=""):
-    """把操作并入 optimizer 的审计流；optimizer 不可用时静默跳过。"""
     try:
         import optimizer as _optimizer
         _optimizer.audit(kind, path, detail)
     except Exception:
         pass
 
-
-# ===== ADE_state.info 解析 =====
-# 典型内容：
-#   designInfo = '("LIB" "CELL" "config" "spectre")
-#   projectDir = "/home/user/simulation"
-# 也兼容 OCEAN 风格：design( "LIB" "CELL" "view" ) / projectDir( "/path" )
 _DESIGN_INFO_RE = re.compile(r"designInfo\s*=\s*'?\s*\(([^)]*)\)", re.S)
 _DESIGN_CALL_RE = re.compile(
     r"\bdesign\s*\(\s*\"([^\"]*)\"\s+\"([^\"]*)\"\s+\"([^\"]*)\"", re.S)
@@ -84,9 +56,7 @@ _PROJECT_RE = re.compile(
 _PROJECT_BARE_RE = re.compile(r"\bprojectDir\s*=\s*([^\s;)']+)", re.I)
 _SIMULATOR_RE = re.compile(r"simulator\s*\(\s*'?\"?([A-Za-z0-9_]+)", re.I)
 
-
 def _strip_comment_lines(text):
-    '去掉整行注释（; // #），避免注释掉的历史 designInfo 抢先命中。'
     out = []
     for line in (text or "").splitlines():
         stripped = line.lstrip()
@@ -97,18 +67,14 @@ def _strip_comment_lines(text):
             out.append(line)
     return "\n".join(out)
 
-
 def _tokens(body):
-    '引号里的 token；否则按空白/逗号切分。'
     quoted = re.findall(r'"([^"]*)"' + r"|'([^']*)'", body or "")
     out = [a if a else b for a, b in quoted]
     if not out:
         out = [t for t in re.split(r"[\s,()]+", (body or "").strip()) if t]
     return out
 
-
 def parse_ade_state(state_dir):
-    """解析 <state_dir>/ADE_state.info -> design 字段。解析失败抛 NetlistError。"""
     state_dir = _abs_path(state_dir)
     path = os.path.join(state_dir, "ADE_state.info")
     try:
@@ -146,20 +112,11 @@ def parse_ade_state(state_dir):
                 bare.group(1).strip("\"' "))
     return info
 
-
-# ===== 设计信息 =====
-
 def _cfg_has_design(cfg):
     view = (_clean(cfg.get("netlist_view")) or _clean(cfg.get("view")))
     return bool(_clean(cfg.get("library")) and _clean(cfg.get("cell")) and view)
 
-
 def read_design(cfg):
-    """合并 cfg 与 ADE_state.info -> design dict。
-
-    优先级：cfg["library"/"cell"/"netlist_view"/"view"] 高于 state 文件。
-    缺项且无法从 state_dir 补齐时抛 NetlistError（中文原因）。
-    """
     cfg = cfg or {}
     state_dir = _clean(cfg.get("state_dir"))
     info = {}
@@ -167,7 +124,6 @@ def read_design(cfg):
         try:
             info = parse_ade_state(state_dir)
         except NetlistError:
-            # cfg 自身完整时，state 文件缺失不致命
             if not _cfg_has_design(cfg):
                 raise
             info = {}
@@ -215,9 +171,7 @@ def read_design(cfg):
         "source": source,
     }
 
-
 def expected_netlist_path(design, cfg=None):
-    """预期网表路径：<sim_root|projectDir|~/simulation>/<cell>/<sim>/<view>/netlist/input.scs。"""
     design = design or {}
     cfg = cfg or {}
     cell = _clean(design.get("cell"))
@@ -228,7 +182,6 @@ def expected_netlist_path(design, cfg=None):
         cfg.get("project_dir"))
     root = sim_root or project_dir or "~/simulation"
     root = os.path.expanduser(root)
-    # projectDir 已是 <...>/<cell>/<sim>/<view> 时直接用，避免重复拼层次
     if project_dir and not sim_root:
         pd = os.path.normpath(os.path.expanduser(project_dir))
         parent = os.path.dirname(pd)
@@ -241,18 +194,12 @@ def expected_netlist_path(design, cfg=None):
     return os.path.normpath(os.path.join(root, cell, simulator, view,
                                          "netlist", "input.scs"))
 
-
-# ===== .il 脚本 =====
-
 def _skill_quote(value):
-    'SKILL 字符串字面量（转义反斜杠和双引号）。'
     text = str(value if value is not None else "")
     text = text.replace("\\", "\\\\").replace('"', '\\"')
     return '"' + text + '"'
 
-
 def build_script(design, status_path=None):
-    """生成 createNetlist 的 .il；协议同时写 stdout 与 status_path（可为 None）。"""
     design = design or {}
     lib = _skill_quote(design.get("library", ""))
     cell = _skill_quote(design.get("cell", ""))
@@ -279,8 +226,6 @@ def build_script(design, status_path=None):
         "  if(p then",
         "    q = car(p)",
         "    when(listp(q) q = car(q))",
-        # 以返回路径为准：errset 成功但 createNetlist 返回 nil 时 p=(nil)，
-        # 不能当成功，否则会用旧网表蒙混过关。
         "    if(stringp(q) then",
         "      printf(%s q)" % fmt_ok,
         "      when(port fprintf(port %s q))" % fmt_ok,
@@ -298,13 +243,10 @@ def build_script(design, status_path=None):
     ]
     return "\n".join(lines) + "\n"
 
-
 def _unquote(raw):
     return re.sub(r"\\(.)", r"\1", raw or "")
 
-
 def _extract_path(rest):
-    '从 OK 行剩余部分提取路径；兼容 "p"、("p")、(\'p\')、裸词。'
     rest = (rest or "").strip()
     if not rest:
         return ""
@@ -320,9 +262,7 @@ def _extract_path(rest):
             return token
     return ""
 
-
 def _parse_status(text):
-    '解析 OPT_NETLIST_* 协议；ok/fail 为 None 表示没收到该行。'
     out = {"design": [], "ok": None, "fail": None}
     for raw in _as_text(text).splitlines():
         line = raw.strip()
@@ -335,11 +275,7 @@ def _parse_status(text):
             out["ok"] = _extract_path(line[len("OPT_NETLIST_OK"):])
     return out
 
-
-# ===== 运行环境 =====
-
 def _resolve_virtuoso(cfg):
-    'cfg["virtuoso_bin"] -> VIRTUOSO_BIN -> PATH -> 常见 CDS 根。'
     cand = _clean(cfg.get("virtuoso_bin")) or _clean(
         os.environ.get("VIRTUOSO_BIN"))
     if cand:
@@ -362,9 +298,7 @@ def _resolve_virtuoso(cfg):
                 return path
     return cand or "virtuoso"
 
-
 def _environment(cfg):
-    '子进程环境：继承 + cfg["env"] + path_append；去掉 DISPLAY。'
     env = dict(os.environ)
     env.pop("DISPLAY", None)
     env.pop("WAYLAND_DISPLAY", None)
@@ -377,18 +311,10 @@ def _environment(cfg):
         env["PATH"] = (env.get("PATH") or "") + os.pathsep + extra_path
     return env
 
-
 def _has_cds_lib(path):
     return bool(path) and os.path.isfile(os.path.join(path, "cds.lib"))
 
-
 def _cds_root(start):
-    """Nearest ancestor with cds.lib, else the original directory.
-
-    Virtuoso resolves library names through cds.lib in its cwd.  A state
-    directory such as <sim>/Cell/spectre_state1 has no cds.lib of its own,
-    so use the project root that does.
-    """
     cur = _abs_path(start)
     for _ in range(10):
         if _has_cds_lib(cur):
@@ -399,9 +325,7 @@ def _cds_root(start):
         cur = parent
     return _abs_path(start)
 
-
 def _work_dir(cfg):
-    'cfg["work_dir"]，否则 state_dir 上一级，否则 cwd；尽量落在有 cds.lib 的目录。'
     work = _clean(cfg.get("work_dir"))
     if work:
         return _cds_root(work)
@@ -409,7 +333,6 @@ def _work_dir(cfg):
     if state_dir:
         return _cds_root(os.path.dirname(_abs_path(state_dir)))
     return _cds_root(os.getcwd())
-
 
 def _timeout(cfg, timeout):
     if timeout is not None:
@@ -422,9 +345,7 @@ def _timeout(cfg, timeout):
     except (TypeError, ValueError):
         return 600.0
 
-
 def _default_runner(cmd, cwd, env, timeout):
-    'subprocess 实现；超时杀进程并返回 rc=124。'
     proc = subprocess.Popen(cmd, cwd=cwd, env=env,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
@@ -443,7 +364,6 @@ def _default_runner(cmd, cwd, env, timeout):
             timeout, " ".join(str(x) for x in cmd))
     return rc, _as_text(out), err_text
 
-
 def _unique_stem(directory, prefix):
     ts = time.strftime("%Y%m%d-%H%M%S")
     stem = os.path.join(directory, "%s_%s" % (prefix, ts))
@@ -454,9 +374,7 @@ def _unique_stem(directory, prefix):
         n += 1
     return stem
 
-
 def _backup_path(path):
-    '不覆盖已有备份：<path>.bak-<ts>，冲突再加 .N。'
     ts = time.strftime("%Y%m%d-%H%M%S")
     dst = "%s.bak-%s" % (path, ts)
     n = 1
@@ -465,9 +383,7 @@ def _backup_path(path):
         n += 1
     return dst
 
-
 def _validate_netlist(path):
-    '返回空串表示有效；否则中文原因。'
     if not path:
         return "路径为空"
     if not os.path.isfile(path):
@@ -486,17 +402,12 @@ def _validate_netlist(path):
         return "缺少 'simulator lang=spectre'：%s" % path
     return ""
 
-
 def _scan_lines(text):
-    '抽 OSSHNL/ADE/ERROR 行与 WARNING 行；各最多 20 条，去重保序。'
     errors, warnings = [], []
     for raw in _as_text(text).splitlines():
         line = raw.strip()
         if not line or line.startswith("OPT_NETLIST_"):
             continue
-        # Virtuoso echoes the replay script into its log with a \i prefix.
-        # Those lines contain our own printf("... FAIL ...") literals and
-        # must never be counted as real tool errors.
         if line.startswith("\\i"):
             continue
         body = line[2:].strip() if line.startswith(("\\o", "\\w")) else line
@@ -505,7 +416,6 @@ def _scan_lines(text):
         if re.match(r"INFO\b", body, re.IGNORECASE):
             continue
         low = body.lower()
-        # WARNING first: OSSHNL warnings also match the OSSHNL pattern.
         if "warning" in low:
             if len(warnings) < 20 and body not in warnings:
                 warnings.append(body)
@@ -514,9 +424,7 @@ def _scan_lines(text):
                 errors.append(body)
     return errors, warnings
 
-
 def _brace_opens(text):
-    'Unclosed { } count, ignoring comments and quoted text.'
     depth = 0
     quote = None
     at_line_start = True
@@ -532,8 +440,6 @@ def _brace_opens(text):
         elif at_line_start and ch in " \t":
             pass
         elif at_line_start and ch in "#;*":
-            # Comment lines use the same prefixes the deck parsers skip;
-            # a "{" in prose must not swallow the rest of the deck.
             end = text.find("\n", i + 1)
             if end < 0:
                 break
@@ -548,8 +454,6 @@ def _brace_opens(text):
             elif ch in "\"'":
                 quote = ch
             elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-                # A line comment hides only the rest of its own physical line;
-                # the "}" closing a brace block may be on a later line.
                 end = text.find("\n", i + 2)
                 if end < 0:
                     break
@@ -563,40 +467,26 @@ def _brace_opens(text):
         i += 1
     return depth
 
-
 def _logical_lines(lines):
-    'Yield (start, end, text) for statements joined by \\, + or { } blocks.'
     i = 0
     while i < len(lines):
         start = i
         text = lines[i]
         while i + 1 < len(lines):
             cont = text.rstrip().endswith("\\")
-            # Braces inside comments/quotes are not block syntax; counting
-            # them would swallow the rest of the deck into one statement.
             opens = _brace_opens(text)
             nxt = lines[i + 1].lstrip()
-            # A leading "+" is a continuation marker too (SPICE heritage),
-            # independent of a trailing backslash on the previous line.
             plus = nxt.startswith("+")
             if not cont and opens <= 0 and not plus:
                 break
             i += 1
             if plus:
                 nxt = nxt[1:]
-            # Keep physical line breaks: _brace_opens scans the accumulated
-            # text, and "//" must not hide the rest of later lines.
             text = text.rstrip().rstrip("\\") + "\n" + nxt
         yield start, i, text
         i += 1
 
-
 def _top_parameters(text):
-    """Parse top level `parameters` statements, continuation aware.
-
-    Returns (ordered name -> raw value, list of (start, end) line spans).
-    Bare declarations map to "" (no value).
-    """
     lines = text.splitlines()
     depth = 0
     values = {}
@@ -626,9 +516,7 @@ def _top_parameters(text):
                 values[token] = ""
     return values, blocks
 
-
 def _fill_parameters(text, values):
-    'Rewrite top level parameters statements into one line with values.'
     lines = text.splitlines()
     _, blocks = _top_parameters(text)
     line = "parameters " + " ".join(
@@ -650,15 +538,7 @@ def _fill_parameters(text, values):
     return "\n".join(lines[:insert] + [line] + lines[insert:]) + (
         "\n" if text.endswith("\n") else "")
 
-
 def carry_over_parameters(new_text, old_text):
-    """Keep old top level values for parameters the regenerated deck left bare.
-
-    ADE createNetlist can emit declarations such as `Ls2 Lp2` without
-    values when those variables live in the ADE state rather than in the
-    schematic.  The previous deck has the effective values, so carry them
-    over instead of failing at spectre with SFE-1997.
-    """
     old_values, _ = _top_parameters(old_text)
     new_values, _ = _top_parameters(new_text)
     if not old_values:
@@ -682,9 +562,6 @@ def carry_over_parameters(new_text, old_text):
         return new_text, []
     return _fill_parameters(new_text, new_values), changes
 
-
-# 分析类型集合必须覆盖 optimizer._ANALYSIS_KEYWORDS（预检用同一口径），
-# selftest.py 有子集断言防漂移。
 _ANALYSES = {
     "ac", "acmatch", "acnoise", "dc", "dcOp".lower(), "dcmatch", "disto",
     "envlp", "fourier", "hb", "hbac", "hbnoise", "hbsp", "montecarlo",
@@ -693,9 +570,6 @@ _ANALYSES = {
     "tran", "xf", "tf",
 }
 
-# 语句首 token：这些行永远不是分析（`save sp`、`parameters sp`、
-# `subckt sp` 等），必须先于第二 token 的类型判断排除。`inc` 是 spectre
-# 合法的 include 写法，optimizer 的指令集没有列它，这里有意保留。
 _NON_ANALYSIS_HEADS = frozenset((
     "simulator", "global", "include", "ahdl_include", "hdl_include", "inc",
     "parameters", "subckt", "ends", "inline", "model", "library",
@@ -705,19 +579,10 @@ _NON_ANALYSIS_HEADS = frozenset((
     "end", "info", "fatal", "warning", "error",
 ))
 
-
 def _normalize_stmt(text):
     return " ".join(str(text or "").split())
 
-
 def _analysis_kind(code):
-    """一行逻辑语句的分析类型；不是分析则返回 None。
-
-    spectre/ADE 写成 ``<分析名> <类型> key=val``（``ac1 ac start=...``、
-    ``sp1 sp ports=...``），类型取第二 token；手写的首 token 即类型
-    （``sp sp ports=...``）仍兼容。实例的第二 token 是节点列表
-    （以 ``(`` 开头），所以不会把 ``sp (a b) capacitor`` 当成分析。
-    """
     toks = str(code or "").lower().split()
     if not toks or toks[0] in _NON_ANALYSIS_HEADS:
         return None
@@ -728,9 +593,7 @@ def _analysis_kind(code):
         return toks[0]
     return None
 
-
 def _extract_testbench(text):
-    """Pull model includes, analyses and save statements from a full deck."""
     lines = text.splitlines()
     depth = 0
     includes = []
@@ -761,18 +624,10 @@ def _extract_testbench(text):
                 analyses.append((kind, code))
     return {"includes": includes, "analyses": analyses, "saves": saves}
 
-
 def _insert_before(lines, index, new_lines):
     return lines[:index] + list(new_lines) + lines[index:]
 
-
 def merge_testbench(new_text, old_text):
-    """Keep model includes / analyses / saves that createNetlist drops.
-
-    A config-view createNetlist run yields the design deck only: no model
-    library includes and no ADE analyses.  The previous full deck has both,
-    so merge the pieces the new deck lacks.
-    """
     old = _extract_testbench(old_text)
     new_lines = new_text.splitlines()
     existing = set()
@@ -799,7 +654,6 @@ def merge_testbench(new_text, old_text):
     if not (add_includes or add_analyses or add_saves):
         return new_text, {"includes": 0, "analyses": [], "saves": 0}
 
-    # Includes go right before the first subcircuit / library block.
     if add_includes:
         idx = 0
         for i, raw in enumerate(new_lines):
@@ -808,7 +662,6 @@ def merge_testbench(new_text, old_text):
                 break
         new_lines = _insert_before(new_lines, idx, add_includes)
 
-    # Analyses and saves go before the reporting options, else at the end.
     tail = add_analyses + add_saves
     if tail:
         idx = len(new_lines)
@@ -824,7 +677,6 @@ def merge_testbench(new_text, old_text):
                           if code in add_analyses],
              "saves": len(add_saves)})
 
-
 def _empty_report(status="fail", message=""):
     return {"status": status, "path": "", "expected": "", "previous": "",
             "backup": "", "design": {}, "wall": 0.0, "log": "",
@@ -832,14 +684,7 @@ def _empty_report(status="fail", message=""):
             "restored": False, "carry_over": [],
             "testbench_merge": {"includes": 0, "analyses": [], "saves": 0}}
 
-
-# ===== 主流程 =====
-
 def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
-    """执行一次 createNetlist：备份 -> 运行 -> 校验 -> 失败恢复。
-
-    runner(cmd, cwd, env, timeout) -> (rc, stdout, stderr)；默认 subprocess。
-    """
     cfg = cfg or {}
     started = time.time()
     report = _empty_report("fail", "")
@@ -855,7 +700,6 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
     previous = expected if os.path.isfile(expected) else ""
     report["previous"] = previous
 
-    # 1) 先备份旧网表（存在才备份；备份失败不阻断，只记 warning）
     backup = ""
     if previous:
         try:
@@ -867,7 +711,6 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
             report["warnings"].append("备份旧网表失败：%s" % exc)
     report["backup"] = backup
 
-    # 2) 写脚本 / 准备命令
     work_dir = _work_dir(cfg)
     run_dir = (_abs_path(log_dir) if log_dir
                else os.path.join(work_dir, "netlist_create"))
@@ -892,11 +735,10 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
     report["cmd"] = cmd
     _audit("exec", cmd[0], " ".join(cmd[1:])[:200])
 
-    # 3) 运行
     run = runner or _default_runner
     try:
         rc, out, err = run(cmd, work_dir, env, wait)
-    except Exception as exc:  # 注入 runner / Popen 抛错都按失败处理
+    except Exception as exc:
         rc, out, err = -1, "", "runner 异常：%s" % exc
     stdout = _as_text(out)
     stderr = _as_text(err)
@@ -912,17 +754,11 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
         if warn not in report["warnings"]:
             report["warnings"].append(warn)
 
-    # 4) 判定 + 校验
-    #    OK 行必须带路径：否则可能是 errset 包住了 nil，旧网表还在原地，
-    #    不能把“文件存在”误判为“刚生成成功”。
     if parsed["ok"]:
         got = _abs_path(parsed["ok"], work_dir)
         report["path"] = got
         problem = _validate_netlist(got)
         if not problem and previous and backup and os.path.isfile(backup):
-            # createNetlist on a config view emits the design deck only.
-            # Keep the old model includes / analyses / saves, and carry
-            # over ADE-state parameters it left as bare declarations.
             try:
                 old_text = _read_text(backup)
                 merged, tb = merge_testbench(_read_text(got), old_text)
@@ -951,7 +787,6 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
             message = "virtuoso 返回码 %s，未收到 OPT_NETLIST_OK" % rc
         report["message"] = "createNetlist 失败：%s" % message
 
-    # 5) 失败且原来有网表 -> 用备份恢复
     if report["status"] != "ok" and previous and backup and os.path.isfile(
             backup):
         try:
@@ -965,9 +800,7 @@ def create_netlist(cfg, timeout=None, log_dir=None, runner=None):
     report["wall"] = round(time.time() - started, 3)
     return report
 
-
 def _auto_mode(value):
-    'auto_netlist 取值归一化：off / auto / always。'
     if value is None:
         return "auto"
     if isinstance(value, bool):
@@ -983,7 +816,6 @@ def _auto_mode(value):
         return "always"
     return "auto"
 
-
 def _readable_netlist(path, base=None):
     text = _clean(path)
     if not text:
@@ -996,9 +828,7 @@ def _readable_netlist(path, base=None):
         pass
     return ""
 
-
 def ensure_netlist(cfg):
-    """入口：按 cfg["auto_netlist"] 决定是否生成；失败可回退旧网表，不抛异常。"""
     cfg = cfg or {}
     mode = _auto_mode(cfg.get("auto_netlist", "auto"))
     if mode == "off":
@@ -1033,12 +863,8 @@ def ensure_netlist(cfg):
     report["status"] = "fail"
     return report
 
-
-# ===== 自测（纯 Python，不依赖 Cadence） =====
-
 _FAKE_OLD = "simulator lang=spectre\nparameters L1=1n\n" + "// old\n" * 20
 _FAKE_NEW = "simulator lang=spectre\nparameters L1=2n\n" + "// new\n" * 20
-
 
 def _fake_ade(path, lib="LibA", cell="CellA", view="schematic",
               sim="spectre", project=None):
@@ -1048,7 +874,6 @@ def _fake_ade(path, lib="LibA", cell="CellA", view="schematic",
         lines.append('projectDir = "%s"' % project)
     _write_text(os.path.join(path, "ADE_state.info"), "\n".join(lines) + "\n")
 
-
 def _t_ade_state():
     tmp = tempfile.mkdtemp(prefix="nc_ade_")
     try:
@@ -1056,7 +881,6 @@ def _t_ade_state():
         os.makedirs(state)
         _fake_ade(state, "MyLib", "test_cs_driver", "config",
                   project="/home/user/simulation")
-        # 注释掉的历史 designInfo 不能抢先命中
         info_path = os.path.join(state, "ADE_state.info")
         _write_text(info_path,
                     ";; designInfo = '(\"Wrong\" \"Wrong\" \"wrong\" "
@@ -1097,7 +921,6 @@ def _t_ade_state():
         else:
             raise AssertionError("缺失 state 文件应抛 NetlistError")
 
-        # cfg 完整时 state 文件缺失不致命
         fallback = read_design({"state_dir": os.path.join(tmp, "missing"),
                                 "library": "L", "cell": "C",
                                 "view": "schematic"})
@@ -1111,7 +934,6 @@ def _t_ade_state():
             raise AssertionError("缺 view 应抛 NetlistError")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_expected_path():
     design = {"library": "L", "cell": "C", "view": "config",
@@ -1132,7 +954,6 @@ def _t_expected_path():
     assert path4.replace("\\", "/").endswith(
         "/simulation/C/spectre/schematic/netlist/input.scs"), path4
 
-
 def _t_build_script():
     design = {"library": "MyLib", "cell": "Cell1", "view": "config",
               "simulator": "spectre"}
@@ -1144,13 +965,11 @@ def _t_build_script():
     assert "OPT_NETLIST_FAIL" in text
     assert "createNetlist(?recreateAll t)" in text
     assert 'outfile("/tmp/status.opt")' in text
-    # 绝不输出无路径的 OK：那会把旧网表误判成新生成
     assert '"OPT_NETLIST_OK\\n"' not in text, text
     assert text.rstrip().endswith("exit"), text
     assert _skill_quote('a"b\\c') == '"a\\"b\\\\c"'
     no_status = build_script(design, None)
     assert "port = nil" in no_status, no_status
-
 
 def _t_parse_status():
     parsed = _parse_status(
@@ -1167,7 +986,6 @@ def _t_parse_status():
     parsed = _parse_status("nothing here")
     assert parsed["ok"] is None and parsed["fail"] is None, parsed
 
-
 def _runner_success(expected, old_written=None):
     def runner(cmd, cwd, env, timeout):
         assert "-nograph" in cmd and "-replay" in cmd and "-log" in cmd
@@ -1177,7 +995,6 @@ def _runner_success(expected, old_written=None):
         return 0, ('OPT_NETLIST_DESIGN LibA CellA schematic\n'
                    'OPT_NETLIST_OK "%s"\n' % show), ""
     return runner
-
 
 def _t_runner_success():
     tmp = tempfile.mkdtemp(prefix="nc_ok_")
@@ -1206,7 +1023,6 @@ def _t_runner_success():
         assert report["wall"] >= 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_status_file():
     tmp = tempfile.mkdtemp(prefix="nc_status_")
@@ -1237,7 +1053,6 @@ def _t_status_file():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _t_runner_failure_restore():
     tmp = tempfile.mkdtemp(prefix="nc_fail_")
     try:
@@ -1252,7 +1067,6 @@ def _t_runner_failure_restore():
         cfg = {"state_dir": state, "work_dir": tmp}
 
         def runner(cmd, cwd, env, timeout):
-            # 模拟 createNetlist 写坏网表后失败
             _write_text(expected, "simulator lang=spectre\n// partial\n")
             return 1, "", ("OSSHNL-514: cannot open lib\n"
                            "ADE-1000: createNetlist failed\n")
@@ -1266,7 +1080,6 @@ def _t_runner_failure_restore():
         assert "createNetlist 失败" in report["message"], report
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_runner_failure_no_previous():
     tmp = tempfile.mkdtemp(prefix="nc_fail2_")
@@ -1289,9 +1102,7 @@ def _t_runner_failure_no_previous():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _t_ok_without_path():
-    'errset 包住 nil 时不能拿旧网表冒充新网表。'
     tmp = tempfile.mkdtemp(prefix="nc_nopath_")
     try:
         state = os.path.join(tmp, "ade")
@@ -1314,7 +1125,6 @@ def _t_ok_without_path():
         assert "缺少网表路径" in report["message"], report
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_log_errors_cap():
     tmp = tempfile.mkdtemp(prefix="nc_log_")
@@ -1339,9 +1149,7 @@ def _t_log_errors_cap():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _t_default_runner():
-    '真实 subprocess 分支：正常退出与超时（不涉及 Cadence）。'
     env = dict(os.environ)
     rc, out, err = _default_runner(
         [sys.executable, "-c", "print('hello')"], None, env, 30)
@@ -1351,7 +1159,6 @@ def _t_default_runner():
     assert rc == 124, (rc, out, err)
     assert "Timeout" in err
     assert _resolve_virtuoso({"virtuoso_bin": sys.executable}) == sys.executable
-
 
 def _t_timeout_runner():
     tmp = tempfile.mkdtemp(prefix="nc_timeout_")
@@ -1372,7 +1179,6 @@ def _t_timeout_runner():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _t_ensure_ok_injected():
     tmp = tempfile.mkdtemp(prefix="nc_ensure2_")
     old_runner = globals()["_default_runner"]
@@ -1388,7 +1194,6 @@ def _t_ensure_ok_injected():
             _write_text(expected, _FAKE_NEW)
             return 0, 'OPT_NETLIST_OK "%s"\n' % expected.replace("\\", "/"), ""
 
-        # ensure_netlist 无 runner 参数；替换模块级默认 runner，绝不真起 virtuoso
         globals()["_default_runner"] = fake
         report = ensure_netlist(cfg)
         assert report["status"] == "ok", report
@@ -1399,7 +1204,6 @@ def _t_ensure_ok_injected():
     finally:
         globals()["_default_runner"] = old_runner
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_ensure_fallback():
     tmp = tempfile.mkdtemp(prefix="nc_fb_")
@@ -1416,7 +1220,6 @@ def _t_ensure_fallback():
         assert cfg["netlist"] == old, cfg
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_ensure_fail_and_skip():
     tmp = tempfile.mkdtemp(prefix="nc_skip_")
@@ -1438,7 +1241,6 @@ def _t_ensure_fail_and_skip():
         assert report["status"] == "skipped", report
         assert report.get("reason"), report
 
-        # auto 模式下有 library+cell 就执行（注入失败 runner，绝不真起 virtuoso）
         old_runner = globals()["_default_runner"]
         globals()["_default_runner"] = (
             lambda cmd, cwd, env, timeout: (1, "", "OPT_NETLIST_FAIL no tool"))
@@ -1450,7 +1252,6 @@ def _t_ensure_fail_and_skip():
         assert report["status"] == "fail", report
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
 
 def _t_auto_mode():
     assert _auto_mode(None) == "auto"
@@ -1465,7 +1266,6 @@ def _t_auto_mode():
     assert _auto_mode(1) == "always"
     assert _auto_mode(0) == "off"
     assert _auto_mode("weird") == "auto"
-
 
 def _t_merge_testbench():
     old = (
@@ -1495,16 +1295,13 @@ def _t_merge_testbench():
     assert "sweep1 sweep param=pin" in merged
     assert merged.count('include "/proj/cell.pex.netlist"') == 1, merged
 
-    # 语句关键字和名为 sp 的实例都不能算分析；save sp 仍按 save 合并。
     tb2 = _extract_testbench(
         "save sp\nparameters sp\nsubckt sp (a b)\nends sp\n"
         "sp (a b) capacitor c=1p\n")
     assert tb2["analyses"] == [], tb2
     assert tb2["saves"] == ["save sp"], tb2
-    # 首 token 即类型的手写形式（hb hb ...）仍然可用。
     assert _analysis_kind("hb hb fundfreqs=[(fin)]") == "hb"
 
-    # 新 deck 已含 ac 时按类型去重，旧 ac 不再插入；其它分析照常合并。
     new_ac = new + "ac ac start=2G stop=3G dec=5\n"
     merged2, tb3 = merge_testbench(new_ac, old)
     assert "ac" not in tb3["analyses"], tb3
@@ -1512,9 +1309,7 @@ def _t_merge_testbench():
     assert "sp1 sp ports=[PORT0 PORT1]" in merged2
     assert "save PORT1:p" in merged2
 
-
 def _t_logical_lines_scope():
-    'Leading "+" continues; inline subckt is a scope; commented braces ignored.'
     values, _blocks = _top_parameters(
         "simulator lang=spectre\nparameters a=1\n    + b=2\n")
     assert values == {"a": "1", "b": "2"}, values
@@ -1530,7 +1325,6 @@ def _t_logical_lines_scope():
               "ends foo\n")
     values, _blocks = _top_parameters(inline)
     assert values == {"w": "1u"}, values
-    # 注释里的未配对 "{" 不能把余下全文并成一条注释语句。
     braces = ("simulator lang=spectre\n"
               "// note { unpaired\n"
               "parameters a=1\n"
@@ -1538,7 +1332,6 @@ def _t_logical_lines_scope():
     assert _top_parameters(braces)[0] == {"a": "1"}
     tb = _extract_testbench(braces)
     assert [kind for kind, _code in tb["analyses"]] == ["ac"], tb
-    # 花括号块内的行注释不能吞掉闭合 "}" 以及块之后的 save/分析。
     commented = ("simulator lang=spectre\n"
                  "sweep1 sweep param=pin {\n"
                  "  // bias\n"
@@ -1550,7 +1343,6 @@ def _t_logical_lines_scope():
     tb = _extract_testbench(commented)
     assert [kind for kind, _code in tb["analyses"]] == ["sweep", "ac"], tb
     assert tb["saves"] == ["save V(out)"], tb
-    # 引号与块注释里的花括号同样不算块语法。
     quoted = ("simulator lang=spectre\n"
               'parameters p="a{b"\n'
               "ac1 ac start=1G\n")
@@ -1561,7 +1353,6 @@ def _t_logical_lines_scope():
                 "parameters a=1\n"
                 "ac1 ac start=1G\n")
     assert _top_parameters(blockcmt)[0] == {"a": "1"}
-    # inline subckt 里的分析/save 不是顶层测试台语句。
     inline_tb = ("simulator lang=spectre\n"
                  "inline subckt foo (a b)\n"
                  "sp1 sp ports=[a b]\n"
@@ -1571,7 +1362,6 @@ def _t_logical_lines_scope():
     tb = _extract_testbench(inline_tb)
     assert [kind for kind, _code in tb["analyses"]] == ["ac"], tb
     assert tb["saves"] == [], tb
-    # #/;/* 注释行里的 "{" 同样不能吞掉后续网表（与顶层解析器的注释前缀一致）。
     for prefix in ("#", ";", "*"):
         comment = ("simulator lang=spectre\n"
                    "%s old sweep block { unpaired\n" % prefix +
@@ -1583,9 +1373,7 @@ def _t_logical_lines_scope():
         assert [kind for kind, _code in tb["analyses"]] == ["ac"], (prefix, tb)
         assert tb["saves"] == ["save V(out)"], (prefix, tb)
 
-
 def _t_validate_netlist():
-    'Missing, too small and simulator-less decks are rejected with reasons.'
     tmp = tempfile.mkdtemp(prefix="nc_val_")
     try:
         assert "路径为空" in _validate_netlist("")
@@ -1602,9 +1390,7 @@ def _t_validate_netlist():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _t_merge_named_write_back():
-    'A config-view createNetlist drops analyses; ADE-named ones merge back.'
     tmp = tempfile.mkdtemp(prefix="nc_merge_")
     try:
         state = os.path.join(tmp, "ade")
@@ -1654,9 +1440,7 @@ def _t_merge_named_write_back():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
 def _force_utf8_stdio():
-    'locale 把 stdio 留成 ASCII 时重包成 UTF-8（与 optimizer 一致）。'
     try:
         import io as _io
         for name in ("stdout", "stderr"):
@@ -1669,7 +1453,6 @@ def _force_utf8_stdio():
                     line_buffering=True))
     except Exception:
         pass
-
 
 def _selftest():
     _force_utf8_stdio()
@@ -1707,9 +1490,6 @@ def _selftest():
     print("%d/%d tests passed" % (len(tests) - failed, len(tests)))
     return 0 if failed == 0 else 1
 
-
-# ===== CLI =====
-
 def _load_cfg(path):
     import json
     with open(path, "r", encoding="utf-8") as f:
@@ -1717,7 +1497,6 @@ def _load_cfg(path):
     if not isinstance(data, dict):
         raise NetlistError("配置文件必须是 JSON 对象：%s" % path)
     return data
-
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -1775,7 +1554,6 @@ def main(argv=None):
         for line in report.get("warnings", []):
             print("WARN  %s" % line)
     return 0 if report.get("status") in ("ok", "skipped", "fallback") else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

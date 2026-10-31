@@ -1,9 +1,4 @@
 # -*- coding: utf-8 -*-
-"""Virtuoso Optimizer regression suite for optimizer/algorithm/GUI/lib/EM (stdlib only).
-
-Run via `python optimizer.py --selftest` or `python selftest.py`; the exit
-code is the failure count. Windows failures: none.
-"""
 from __future__ import print_function
 
 import copy
@@ -19,7 +14,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Public engine symbols (the suite uses them unqualified).
 from optimizer import (  # noqa: F401
     EXAMPLE_CFG, LOG_MODE_COMPACT, LOG_MODE_FULL, MANIFEST_NAME,
     NETLIST_BASE_NAME, NETLIST_META_NAME, Optimization, RealRunner,
@@ -36,23 +30,20 @@ from optimizer import (  # noqa: F401
     run_em_align, run_optimization, stop_all_runners,
     suggest_bounds, tool_report, to_jsonable, from_jsonable,
 )
-from optimizer import (  # private helpers referenced by the suite
+from optimizer import (
     _TOOL_CACHE, _archive_aside, _log_mode_of, _native_open, _read_text,
     _sha1_file, _sha1_text,
 )
 from optimizer import open  # noqa: A001 - UTF-8 wrapper, shadowed on purpose
 from optimizer import audit, audit_dump, audit_file, audit_sink
-from algorithm import _latin_hypercube  # LHS moved here after the old engine was dropped
-
+from algorithm import _latin_hypercube
 
 def example_config():
     return copy.deepcopy(EXAMPLE_CFG)
 
-
 def mock_config(out_dir, max_iter):
     cfg = example_config()
     cfg["output_dir"] = out_dir
-    # Goals the mock model can not meet, so the run always uses max_iter.
     cfg["targets"] = [
         {"output": "S21 dB20", "metric": "band_min", "band": ["24G", "44G"],
          "op": ">=", "goal": 6, "tol": 0.5},
@@ -62,13 +53,10 @@ def mock_config(out_dir, max_iter):
     cfg["settings"] = {"max_iter": max_iter, "patience": 100, "seed": 0}
     return cfg
 
-
 def phys_opt(strategy, names, x0, bounds, seed=0):
-    """Build a strategy over physical bounds: the production run-loop path."""
     tr = Transform([{"name": n, "init": x0[i], "min": bounds[i][0],
                      "max": bounds[i][1]} for i, n in enumerate(names)])
     return build_optimizer(strategy, tr, dict(zip(names, x0)), names, seed=seed)
-
 
 class TestEng(unittest.TestCase):
     def test_parse(self):
@@ -89,7 +77,6 @@ class TestEng(unittest.TestCase):
         lo, hi = suggest_bounds("-2")
         self.assertLess(parse_eng(lo), parse_eng(hi))
 
-
 class TestTargets(unittest.TestCase):
     curves = {"S21 dB20": ([1e9, 2e9, 3e9], [1.0, 5.0, 2.0])}
     def error(self, spec):
@@ -108,7 +95,6 @@ class TestTargets(unittest.TestCase):
                 "limit": {"x": [1, 2, 3], "y": [0, 4, 1]}}
         self.assertGreater(self.error(spec), 0.0)
     def test_band_metrics_known_answers(self):
-        """Band metrics on a known curve: min 1, max 5, flatness 4, mean 8/3."""
         base = {"output": "S21 dB20", "op": ">=", "goal": 0,
                 "band": ["1G", "3G"]}
         cases = (("band_min", 1.0), ("band_max", 5.0),
@@ -117,20 +103,13 @@ class TestTargets(unittest.TestCase):
             spec = dict(base, metric=metric)
             self.assertAlmostEqual(Target(spec).metric_value(self.curves),
                                    want, msg=metric)
-        # A band that keeps only the last two points: y = 5, 2.
         narrow = dict(base, metric="band_mean", band=["2G", "3G"])
         self.assertAlmostEqual(Target(narrow).metric_value(self.curves), 3.5)
     def test_value_at_known_answer(self):
-        """Linear interpolation midway between 1e9 (1.0) and 2e9 (5.0)."""
         spec = {"output": "S21 dB20", "metric": "value_at", "op": ">=",
                 "goal": 0, "freq": "1.5G"}
         self.assertAlmostEqual(Target(spec).metric_value(self.curves), 3.0)
     def test_band_order_is_normalized(self):
-        """Reversed band must sample the same points as the ordered one.
-
-        em_align._parse_band already swaps lo/hi; the engine used to keep
-        the reversed order, cut every point and return BIG_ERROR forever.
-        """
         good = {"output": "S21 dB20", "metric": "band_mean", "op": ">=",
                 "goal": 1, "tol": 1, "band": ["1G", "3G"]}
         rev = dict(good, band=["3G", "1G"])
@@ -138,7 +117,6 @@ class TestTargets(unittest.TestCase):
         self.assertAlmostEqual(Target(rev).error(self.curves),
                                Target(good).error(self.curves))
     def test_range_goal_order_is_normalized(self):
-        """Swapped range bounds must not make the target unsatisfiable."""
         spec = {"output": "S21 dB20", "metric": "band_min", "op": "range",
                 "goal": 5, "goal2": 1, "tol": 0.5, "band": ["1G", "3G"]}
         target = Target(spec)
@@ -146,23 +124,19 @@ class TestTargets(unittest.TestCase):
         self.assertLessEqual(target.error(self.curves), 0.0)
 
     def test_bad_band_shape_is_actionable(self):
-        """One-value / string bands raise ValueError, not IndexError."""
         for band in (["1G"], "1G 3G", {"lo": "1G", "hi": "3G"}, []):
             spec = {"output": "S21 dB20", "metric": "band_mean", "band": band}
             with self.assertRaises(ValueError) as ctx:
                 Target(spec)
             self.assertIn("band", str(ctx.exception), band)
     def test_value_at_must_lie_in_band(self):
-        """value_at outside its own band can never resolve; fail early."""
         spec = {"output": "S21 dB20", "metric": "value_at", "op": ">=",
                 "goal": 0, "freq": "4G", "band": ["1G", "3G"]}
         with self.assertRaises(ValueError) as ctx:
             Target(spec)
         self.assertIn("band", str(ctx.exception))
 
-
 class TestAlgorithm(unittest.TestCase):
-    """Old AskTellOptimizer simplex tests, now on build_optimizer + SpaceAdapter."""
     def test_goes_to_the_minimum(self):
         algo = phys_opt("simplex", ["a", "b"], [1.0, 0.0], [(0.0, 10.0), (-5.0, 5.0)], seed=3)
         for _ in range(120):
@@ -181,12 +155,9 @@ class TestAlgorithm(unittest.TestCase):
         algo = phys_opt("simplex", ["a"], [5.0], [(5.0, 5.0)], seed=1)
         self.assertEqual(algo.ask(), [5.0])
         algo.tell(0.0)
-        # A zero-width variable stays pinned at its only value after a tell.
         self.assertEqual(algo.ask(), [5.0])
 
-
 class TestGlobalSearch(unittest.TestCase):
-    """Global search (LHS + DE) and the strategy switch."""
     def test_lhs_is_stratified(self):
         rng = random.Random(7)
         count, n = 12, 3
@@ -216,8 +187,6 @@ class TestGlobalSearch(unittest.TestCase):
             algo.tell(sum((pt[i] - 0.5) ** 2 for i in range(6)))
         self.assertLess(algo.inner.best_y, 1e-3)
     def test_de_escapes_local_trap(self):
-        # A shallow basin at (0.2, 0.2) traps a greedy descent; the global
-        # basin at (0.85, 0.85) must win for most seeds.
         def trap(u):
             g1 = (u[0] - 0.2) ** 2 + (u[1] - 0.2) ** 2 + 0.05
             g2 = (u[0] - 0.85) ** 2 + (u[1] - 0.85) ** 2
@@ -239,8 +208,7 @@ class TestGlobalSearch(unittest.TestCase):
             self.assertLessEqual(pt[0], 10.0)
             self.assertGreaterEqual(pt[1], -5.0)
             self.assertLessEqual(pt[1], 5.0)
-            algo.tell(1e300)  # huge values must not push later points out of the box
-        # A normal evaluation afterwards still becomes the best (no corruption).
+            algo.tell(1e300)
         pt = algo.ask()
         algo.tell(abs(pt[0] - 8.0))
         self.assertLess(algo.inner.best_y, 1e3)
@@ -256,7 +224,7 @@ class TestGlobalSearch(unittest.TestCase):
             algo.restart(spread=0.25)
             self.assertEqual(algo.inner.restarts, 1)
             self.assertAlmostEqual(algo.inner.last_restart_radius, 0.25)
-            self.assertEqual(algo.inner.best_y, best_y)  # best survives the restart
+            self.assertEqual(algo.inner.best_y, best_y)
             for _ in range(6):
                 pt = algo.ask()
                 self.assertGreaterEqual(pt[0], 0.0)
@@ -298,7 +266,6 @@ class TestGlobalSearch(unittest.TestCase):
         self.assertIsInstance(opt2.algo.inner, A.NelderMead)
         self.assertEqual(opt2.algo.name, "simplex")
 
-
 class TestPipeline(unittest.TestCase):
     def test_mock_run_and_resume(self):
         work = tempfile.mkdtemp()
@@ -309,7 +276,6 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(out_dir, "report.json")))
         for name in ("L1", "L2", "k0", "cin"):
             self.assertIn(name, report["best_variables"])
-        # Resume must continue from iteration 20.
         report2 = run_optimization(mock_config(out_dir, 30), mock=True)
         self.assertEqual(report2["iterations"], 10)
         self.assertLessEqual(report2["best_total_error"], report["best_total_error"])
@@ -317,25 +283,14 @@ class TestPipeline(unittest.TestCase):
         work = tempfile.mkdtemp()
         out_dir = os.path.join(work, "out")
         run_optimization(mock_config(out_dir, 5), mock=True)
-        # An explicit resume argument outranks the config key.
         cfg = mock_config(out_dir, 7)
         cfg["resume"] = False
         self.assertEqual(
             run_optimization(cfg, mock=True, resume=True)["iterations"], 2)
-        # Without the explicit flag "resume": false starts over: 7 - 5
-        # means the historical 5 iterations were wrongly reused.
         self.assertEqual(run_optimization(cfg, mock=True)["iterations"], 7)
-        # JSON string form is accepted as well.
         cfg["resume"] = "false"
         self.assertEqual(run_optimization(cfg, mock=True)["iterations"], 7)
     def test_fresh_run_archives_journal_and_ignores_snapshot(self):
-        """`"resume": false` must not inherit algorithm state or events.
-
-        A fresh start archived history/manifest/iter_* but kept
-        snapshot.json and events.jsonl, so run() restored the old
-        algorithm state and a later resume replayed the discarded
-        run's events.
-        """
         work = tempfile.mkdtemp()
         out = os.path.join(work, "out")
         run_optimization(mock_config(out, 12), mock=True, resume=False)
@@ -352,12 +307,6 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(glob.glob(events + ".old-*"), "events not archived")
 
     def test_snapshot_replays_only_events_after_it(self):
-        """Kicks already folded into the snapshot must not run twice.
-
-        The snapshot is written before the stall action of that
-        iteration, so replay must be trimmed by event sequence, not by
-        iteration index (a kick at the snapshot iteration is newer).
-        """
         work = tempfile.mkdtemp()
         out = os.path.join(work, "out")
         opt = Optimization(mock_config(out, 20), mock=True, resume=False)
@@ -382,11 +331,6 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(report["stop_reason"], "sim_failures")
         self.assertEqual(report["iterations"], 3)
     def test_all_failed_iterations_report_sim_failures(self):
-        # A bad netlist fails every iteration. With fail_limit above
-        # max_iter the loop simply runs out of budget; that must not be
-        # reported as a normal max_iterations completion.
-        # The deck itself must pass preflight (exists, has an analysis);
-        # it then fails at simulation time on every iteration.
         work = tempfile.mkdtemp()
         cfg = mock_config(os.path.join(work, "out"), 2)
         deck = os.path.join(work, "input.scs")
@@ -402,7 +346,6 @@ class TestPipeline(unittest.TestCase):
         self.assertIsNone(report["best_total_error"])
         self.assertEqual(report["summary"]["failures"], {"fail": 2})
     def test_stall_stops_the_run(self):
-        # A goal the mock model can not meet forces a stall stop.
         work = tempfile.mkdtemp()
         cfg = mock_config(os.path.join(work, "out"), 200)
         cfg["settings"] = {"max_iter": 200, "patience": 3, "seed": 0,
@@ -413,10 +356,7 @@ class TestPipeline(unittest.TestCase):
         self.assertIn(report["stop_reason"], ("no_feasible_solution", "no_improvement"))
         self.assertLess(report["iterations"], 200)
 
-
 class TestStopSemantics(unittest.TestCase):
-    """targets_met must cover every target, not only the scalarized total."""
-
     def _cfg(self, out, mode, objective):
         cfg = mock_config(out, 3)
         cfg["settings"]["mode"] = mode
@@ -447,8 +387,6 @@ class TestStopSemantics(unittest.TestCase):
         self.assertEqual(report["iterations"], 3)
 
     def test_pareto_without_objective_does_not_auto_pass(self):
-        # total is 0.0 when pareto has no objective; that used to make
-        # every first iteration look like a success.
         work = tempfile.mkdtemp()
         report = run_optimization(
             self._cfg(os.path.join(work, "out"), "pareto", False), mock=True)
@@ -464,10 +402,7 @@ class TestStopSemantics(unittest.TestCase):
         self.assertEqual(report["stop_reason"], "targets_met")
         self.assertEqual(report["iterations"], 1)
 
-
 class TestResumeIdentity(unittest.TestCase):
-    """A resume must not adopt another config's history."""
-
     def test_settings_change_still_resumes(self):
         work = tempfile.mkdtemp()
         out = os.path.join(work, "out")
@@ -499,9 +434,7 @@ class TestResumeIdentity(unittest.TestCase):
                   os.path.join(out, "iter_0000.old-20260101"))
         self.assertEqual(load_previous(out), [])
 
-
 class TestFixes(unittest.TestCase):
-    """Regression tests for the 2026-10-14 hardening."""
     def test_ticks_never_hang(self):
         ticks = PlotCanvas._nice_ticks(2.4e9, 2.4e9 + 1e-6)
         self.assertTrue(ticks)
@@ -521,7 +454,6 @@ class TestFixes(unittest.TestCase):
         good["curve_op"] = "below"
         good["limit"] = {"x": ["1G", "2G"], "y": ["35", "35"]}
         Target(good)
-        # A range target needs goal2.
         self.assertRaises(ValueError, Target,
                           {"output": "o", "metric": "scalar", "op": "range",
                            "goal": 1, "tol": 0.1})
@@ -536,8 +468,6 @@ class TestFixes(unittest.TestCase):
         self.assertIsNone(Settings({"seed": None}).seed)
         self.assertEqual(Settings({}).seed, 0)
     def test_netlist_parameter_rewrite(self):
-        # A PCell subckt keeps its own parameters line (_par0 style names);
-        # only the top level line may be rewritten.
         deck = (
             "simulator lang=spectre\n"
             "global 0\n"
@@ -557,7 +487,6 @@ class TestFixes(unittest.TestCase):
         self.assertIn(line, new_text)
         self.assertIn("parameters _par0=k _par1=L1 _par2=250p", new_text)
         self.assertIn("coupling=_par0", new_text)
-        # Multiple top-level parameters merge into one line.
         deck = ("parameters a=1\nparameters b=2\nsubckt s (p n)\n"
                 "parameters a=9\nends s\n")
         self.assertEqual(parse_netlist_parameters(deck), {"a": "1", "b": "2"})
@@ -567,41 +496,33 @@ class TestFixes(unittest.TestCase):
         self.assertEqual(new_text.count(line), 1)
         self.assertIn("parameters a=9", new_text)
         self.assertNotIn("parameters b=2\nparameters", new_text)
-        # Continuation lines fold into the rewriting.
         deck = "parameters a=1 \\\n+ b=2\nsubckt s (p n)\nends s\n"
         self.assertEqual(parse_netlist_parameters(deck), {"a": "1", "b": "2"})
         new_text, n = rewrite_netlist_parameters(deck, "parameters a=3 b=4")
         self.assertEqual(n, 1)
         self.assertIn("parameters a=3 b=4", new_text)
         self.assertNotIn("+ b=2", new_text)
-        # No top-level parameters: report 0 and leave the deck untouched.
         deck = "subckt s (p n)\nparameters a=1\nends s\n"
         self.assertEqual(parse_netlist_parameters(deck), {})
         new_text, n = rewrite_netlist_parameters(deck, "parameters a=2")
         self.assertEqual(n, 0)
         self.assertEqual(new_text, deck)
 
-
 class TestCurvesTabRemoved(unittest.TestCase):
-    """The removed curves tab stays gone; the live-plot helpers remain."""
     def test_live_plot_helpers_kept(self):
         for name in ("_record_curves", "_draw_live_curves", "_output_name_list",
                      "_var_bounds_from_table", "_load_history_data"):
             self.assertTrue(hasattr(OptimizerGui, name), name)
 
-
 class TestRunDirs(unittest.TestCase):
-    """Run folder layout and fresh numbering (logs structure)."""
     def test_circuit_id(self):
         self.assertEqual(circuit_id({"library": "lib", "cell": "cell"}), "lib_cell")
         self.assertEqual(circuit_id({"library_cell": "lib_cell"}), "lib_cell")
         self.assertEqual(circuit_id({"cell": "onlycell"}), "onlycell")
         self.assertEqual(circuit_id({"name": "mytask"}), "mytask")
         self.assertEqual(circuit_id({}), "circuit")
-        # Two circuits of one task must not share a logs folder.
         self.assertNotEqual(circuit_id({"name": "t", "library": "a", "cell": "b"}),
                             circuit_id({"name": "t", "library": "a", "cell": "c"}))
-        # The id is always a single path element (no separators or wildcards).
         cid = circuit_id({"library": "a/b", "cell": 'c:d*e?f'})
         self.assertNotIn(os.sep, cid)
         for bad in (":", "*", "?", '"'):
@@ -615,18 +536,13 @@ class TestRunDirs(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
             return load_config(path)
-        # "" / null / non-string mean "not set": they must not become the
-        # config folder, and must not reach expanduser() as None either.
         self.assertEqual(load({"state_dir": ""})["state_dir"], "")
         self.assertEqual(load({"state_dir": None})["state_dir"], "")
         self.assertEqual(load({"state_dir": 123})["state_dir"], "")
         self.assertNotIn("state_dir", load({}))
-        # Relative stays anchored to the config file; absolute is untouched.
         self.assertEqual(load({"state_dir": "ade"})["state_dir"],
                          os.path.join(work, "ade"))
         self.assertEqual(load({"state_dir": work})["state_dir"], work)
-        # The consumers of a "not set" value must fail cleanly, not with
-        # TypeError/KeyError deep inside expanduser().
         from optimizer import dump_state
         for cfg in (load({"state_dir": None}), load({})):
             with self.assertRaises(SystemExit) as ctx:
@@ -645,8 +561,6 @@ class TestRunDirs(unittest.TestCase):
         self.assertTrue(os.path.isdir(path))
         self.assertTrue(os.path.isdir(path2))
     def test_resolve_run_dir_rules(self):
-        # 1) Default: logs/<circuit>/run_*. The typed field keeps our run
-        # folder, so the next start builds a sibling, never a child.
         work = tempfile.mkdtemp()
         old = os.getcwd()
         os.chdir(work)
@@ -660,8 +574,6 @@ class TestRunDirs(unittest.TestCase):
             self.assertEqual(os.path.dirname(path2), os.path.dirname(path))
         finally:
             os.chdir(old)
-        # 2) A typed empty folder is used as-is; once it holds data the next
-        # start gets a circuit folder with a run folder inside it.
         base = os.path.join(tempfile.mkdtemp(), "myout")
         cfg = {"output_dir": base, "library": "L", "cell": "C"}
         path, state = resolve_run_dir(cfg)
@@ -673,7 +585,6 @@ class TestRunDirs(unittest.TestCase):
         self.assertNotEqual(path2, path)
         self.assertEqual(os.path.dirname(path2), os.path.join(path, "L_C"))
         self.assertTrue(os.path.basename(path2).startswith("run_"))
-        # 3) Resume reuses the folder; a later fresh start is a sibling.
         work = tempfile.mkdtemp()
         cfg = {"output_dir": os.path.join(work, "task"), "name": "n"}
         path, state = resolve_run_dir(cfg)
@@ -684,7 +595,6 @@ class TestRunDirs(unittest.TestCase):
         fresh, _state3 = resolve_run_dir(dict(cfg, output_dir=again), prev=state)
         self.assertNotEqual(fresh, path)
         self.assertTrue(fresh.startswith(path + os.sep))
-        # 4) A fresh start gets a sibling run folder, never a deeper nest.
         work = tempfile.mkdtemp()
         cfg = {"output_dir": os.path.join(work, "logs"), "name": "a"}
         d1, s1 = resolve_run_dir(cfg)
@@ -704,7 +614,6 @@ class TestRunDirs(unittest.TestCase):
         out = os.path.join(work, "out")
         report = run_optimization(mock_config(out, 4), mock=True, resume=False)
         self.assertEqual(report["iterations"], 4)
-        # A fresh start labels its folder (circuit, start time) and starts at 0.
         with open(os.path.join(out, "run_meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
         self.assertEqual(meta["circuit"], circuit_id(mock_config(out, 1)))
@@ -713,23 +622,19 @@ class TestRunDirs(unittest.TestCase):
             self.assertEqual(json.load(f)["index"], 0)
         with open(os.path.join(out, "history.csv"), encoding="utf-8") as f:
             rows = [ln for ln in f.read().splitlines() if ln.strip()]
-        self.assertEqual(len(rows), 5)  # header + 4 iterations
+        self.assertEqual(len(rows), 5)
         self.assertTrue(rows[1].startswith("0,"))
-        # Resume continues the index.
         report = run_optimization(mock_config(out, 7), mock=True, resume=True)
         self.assertEqual(report["iterations"], 3)
-        # A new fresh start never continues an older run's numbering.
         out2 = os.path.join(work, "out2")
         run_optimization(mock_config(out2, 5), mock=True, resume=False)
         report = run_optimization(mock_config(out2, 2), mock=True, resume=False)
         self.assertEqual(report["iterations"], 2)
         with open(os.path.join(out2, "history.csv"), encoding="utf-8") as f:
             rows = [ln for ln in f.read().splitlines() if ln.strip()]
-        self.assertEqual(len(rows), 3)  # header + 2, old rows dropped
-
+        self.assertEqual(len(rows), 3)
 
 class TestHistorySeedV05(unittest.TestCase):
-    """History warm-start feeds algorithm internals."""
     def test_seed_history_fills_models(self):
         import algorithm as A
         algo = A.create("tpe", ["a", "b"], [(0.0, 10.0)] * 2, seed=1)
@@ -742,8 +647,6 @@ class TestHistorySeedV05(unittest.TestCase):
         filled = sum(1 for v in algo.pop_values if v is not None)
         self.assertGreaterEqual(filled, 4)
     def test_snapshot_restore_beats_seeding(self):
-        # 12 mock iterations write a snapshot at iteration 9 (seed 7 never
-        # hits the total=0 early stop).
         work = tempfile.mkdtemp()
         out = os.path.join(work, "run")
         cfg = example_config()
@@ -772,9 +675,7 @@ class TestHistorySeedV05(unittest.TestCase):
         opt._seed_from_history()
         self.assertGreaterEqual(opt.algo.inner.eval_count, len(opt._history_seeds))
 
-
 class TestResumeEquivalenceV05(unittest.TestCase):
-    """Interrupted + resumed run equals the uninterrupted run."""
     def test_resume_matches_uninterrupted(self):
         work = tempfile.mkdtemp()
         cfg = example_config()
@@ -789,11 +690,9 @@ class TestResumeEquivalenceV05(unittest.TestCase):
         rep_b = run_optimization(cfg_b, mock=True, max_iter=24)
         self.assertAlmostEqual(rep_a["best_total_error"], rep_b["best_total_error"], places=9)
 
-
 class TestV06Hooks(unittest.TestCase):
-    """librf_opt hook present/absent: behaviour and runner selection."""
     def test_runners_without_layout_em(self):
-        stop_all_runners()  # must not raise with or without librf_opt
+        stop_all_runners()
         cfg = example_config()
         cfg["settings"]["seed"] = 1
         opt = Optimization(cfg, mock=True, max_iter=1)
@@ -828,12 +727,8 @@ class TestV06Hooks(unittest.TestCase):
         self.assertEqual(rec.get("status"), "ok")
         self.assertIn("L0", json.dumps(rec))
 
-
 class TestToolDiscovery(unittest.TestCase):
-    """Tool paths probed at run time; no absolute paths in the config."""
     def test_find_prog_env_override(self):
-        # Cross-platform: /bin/sh does not exist on Windows. The env
-        # override contract is what is under test, not that shell path.
         exe = sys.executable
         name = os.path.basename(exe)
         os.environ["OPT_TEST_PROG"] = exe
@@ -868,22 +763,17 @@ class TestToolDiscovery(unittest.TestCase):
         self.assertEqual(src, "none")
     def test_resolve_prog_rules(self):
         self.assertEqual(resolve_prog("spectre", "/bin/sh"), "/bin/sh")
-        # Explicit junk but a probe hit -> probe wins (cache injected so this
-        # runs without Cadence).
         saved = dict(_TOOL_CACHE)
         _TOOL_CACHE.clear()
         try:
             _TOOL_CACHE["spectre"] = {"path": "/bin/sh", "src": "which"}
             self.assertEqual(resolve_prog("spectre", "/no/such/spectre-xyz"), "/bin/sh")
-            # Nothing found -> explicit value or the command name.
             _TOOL_CACHE.clear()
             self.assertEqual(resolve_prog("xyz_tool", "/no/such/xyz"), "/no/such/xyz")
             self.assertEqual(resolve_prog("xyz_tool", None), "xyz_tool")
         finally:
             _TOOL_CACHE.clear()
             _TOOL_CACHE.update(saved)
-        # Restored cache: a name with no probe entry still returns the
-        # explicit value instead of the discovered path of another tool.
         saved = dict(_TOOL_CACHE)
         try:
             self.assertEqual(
@@ -903,13 +793,7 @@ class TestToolDiscovery(unittest.TestCase):
         self.assertIn("spectre", rep)
         self.assertIn("virtuoso", rep)
 
-
 class TestTextEncoding(unittest.TestCase):
-    """Chinese text I/O must never raise UnicodeDecodeError in any locale.
-
-    Target machine: Python 3.6 + C locale (ANSI_X3.4-1968); a bare open()
-    reading Chinese crashes (the layout-log failure root cause).
-    """
     def test_utf8_text_roundtrip(self):
         work = tempfile.mkdtemp()
         p = os.path.join(work, "cjk.txt")
@@ -926,7 +810,6 @@ class TestTextEncoding(unittest.TestCase):
         with _native_open(p, "wb") as f:
             f.write("北京".encode("utf-8"))
         self.assertIn("北京", _read_text(p))
-        # run folders keep Chinese names in record.json
         p = os.path.join(work, "record.json")
         with open(p, "w") as f:
             json.dump({"index": 0, "name": "电感优化"}, f, ensure_ascii=False)
@@ -940,10 +823,7 @@ class TestTextEncoding(unittest.TestCase):
         with open(p, "rb") as f:
             self.assertEqual(f.read(), data)
 
-
 class TestAuditTrail(unittest.TestCase):
-    """Operation audit: file I/O and external calls carry time and abs path."""
-
     def test_audit_records_absolute_path(self):
         rec = audit("write", os.path.join("relative", "f.txt"), "test")
         self.assertTrue(os.path.isabs(rec["path"]),
@@ -981,7 +861,6 @@ class TestAuditTrail(unittest.TestCase):
             lines = [json.loads(x) for x in f if x.strip()]
         self.assertEqual(lines[-1], rec)
 
-
 class _CompactBase(unittest.TestCase):
     DECK = (
         "// sim deck header\n"
@@ -1001,22 +880,18 @@ class _CompactBase(unittest.TestCase):
         os.makedirs(run_dir)
         return run_dir
     def _write_iter(self, run_dir, index, params_line, full_text=None):
-        """Write one iteration folder: netlist, big spectre log, psf, result."""
         iter_dir = os.path.join(run_dir, "iter_%04d" % index)
         os.makedirs(iter_dir, exist_ok=True)
         text = (full_text if full_text is not None
                 else rewrite_netlist_parameters(self.DECK, params_line)[0])
         with open(os.path.join(iter_dir, "input.scs"), "w", encoding="utf-8") as f:
             f.write(text)
-        # A spectre log with a big repeated header (typical).
         header = "Sun Spectre 23.1\nLicensed by cadence\n" + ("x" * 200)
         with open(os.path.join(iter_dir, "spectre.log"), "w", encoding="utf-8") as f:
             f.write(header * 80 + "\nError: none really\nTAIL-%d\n" % index)
         return iter_dir, text
 
-
 class TestCompactLog(_CompactBase):
-    """Q4: compact iteration storage + lossless reconstruct."""
     def test_netlist_dedup_and_reconstruct(self):
         run_dir = self._run_dir()
         texts = []
@@ -1027,7 +902,6 @@ class TestCompactLog(_CompactBase):
             meta = compact_netlist_file(iter_dir, text, params_line)
             self.assertEqual(meta["base"], NETLIST_BASE_NAME)
             self.assertFalse(os.path.isfile(os.path.join(iter_dir, "input.scs")))
-            # Iron rule: the full copy is archived under a new name, never deleted.
             self.assertTrue(any(n.startswith("input.scs.old-") for n in os.listdir(iter_dir)))
             self.assertTrue(os.path.isfile(os.path.join(iter_dir, NETLIST_META_NAME)))
         self.assertTrue(os.path.isfile(os.path.join(run_dir, NETLIST_BASE_NAME)))
@@ -1035,7 +909,6 @@ class TestCompactLog(_CompactBase):
             got, _path = reconstruct_input_scs(run_dir, i)
             self.assertEqual(got, want)
             self.assertEqual(_sha1_text(got), _sha1_text(want))
-        # Corrupt the recorded hash: reconstruct must refuse.
         meta_path = os.path.join(iter_dir, NETLIST_META_NAME)
         with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
@@ -1059,7 +932,6 @@ class TestCompactLog(_CompactBase):
         self.assertIn("spectre.log.gz", kept)
         self.assertIn("Error: fatal thing", kept)
         self.assertIn("end", kept)
-        # The kept log must shrink: tail is capped below the original.
         self.assertLess(len(kept), len(body))
         total = os.path.getsize(log) + os.path.getsize(log + ".gz")
         self.assertLess(total, len(body) + 512)
@@ -1069,7 +941,6 @@ class TestCompactLog(_CompactBase):
         p0 = lg0.iter_dir(0)
         os.makedirs(os.path.join(p0, "psf"), exist_ok=True)
         lg0.log_iteration(0, {"x": "1"}, {"total": 1.0, "errors": {}}, "ok")
-        # save_raw=0 is applied by the runner, not the logger.
         self.assertTrue(os.path.isdir(os.path.join(p0, "psf")))
         lg1 = RunLogger(os.path.join(work, "b"), save_raw=1, log_mode=LOG_MODE_FULL)
         p1 = lg1.iter_dir(0)
@@ -1097,11 +968,8 @@ class TestCompactLog(_CompactBase):
         _iter_dir, text = self._write_iter(run_dir, 0, params_line)
         cfg = {"log_mode": "full"}
         self.assertEqual(_log_mode_of(cfg), LOG_MODE_FULL)
-        # full mode: the compaction policy is a no-op, so the per-iteration
-        # netlist stays in place and no shared base netlist is written.
         self.assertTrue(os.path.isfile(os.path.join(_iter_dir, "input.scs")))
         self.assertFalse(os.path.isfile(os.path.join(run_dir, NETLIST_BASE_NAME)))
-        # A full-mode iteration reconstructs straight from the on-disk netlist.
         self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], text)
     def test_compact_mock_run_writes_manifest_and_zips(self):
         out_dir = os.path.join(tempfile.mkdtemp(), "out")
@@ -1110,20 +978,12 @@ class TestCompactLog(_CompactBase):
         report = run_optimization(cfg, mock=True)
         self.assertEqual(report["iterations"], 6)
         self.assertTrue(os.path.isfile(os.path.join(out_dir, MANIFEST_NAME)))
-        # mock_s21.txt.gz exists; result.txt stays for the GUI.
         self.assertTrue(glob.glob(os.path.join(out_dir, "iter_*", "mock_s21.txt.gz")))
         self.assertTrue(glob.glob(os.path.join(out_dir, "iter_*", "result.txt")))
-        # history + resume untouched by compact mode.
         self.assertTrue(os.path.isfile(os.path.join(out_dir, "history.csv")))
         report2 = run_optimization(mock_config(out_dir, 8), mock=True)
         self.assertEqual(report2["iterations"], 2)
     def test_e2e_size_compact_beats_full(self):
-        """Synthetic RealRunner-sized artifacts: compact saves >=50%.
-
-        Sizes follow the user report (tens to 100KB of repeated netlist+log
-        per iter). live = working set (excludes .old-* archives, which the
-        iron rule never deletes).
-        """
         def walk_size(root, live_only=True):
             total = 0
             for dirpath, dirnames, files in os.walk(root):
@@ -1136,7 +996,6 @@ class TestCompactLog(_CompactBase):
         def build(mode, save_raw):
             run_dir = self._run_dir()
             logger = RunLogger(run_dir, save_raw=save_raw, log_mode=mode)
-            # ~80KB deck and ~80KB spectre.log: the repetitive per-iter bulk.
             deck = self.DECK + ("// pad line for realistic size\n" * 2600)
             for i in range(20):
                 params_line = ("parameters L1=%dp L2=%dp k0=0.%d cin=100f"
@@ -1170,18 +1029,13 @@ class TestCompactLog(_CompactBase):
         run_cmp, cmp_live, cmp_all = build(LOG_MODE_COMPACT, 2)
         self.assertLess(cmp_live, full_live)
         self.assertLessEqual(cmp_live, full_live * 0.5)
-        # compact+save_raw=2 live size is the working set; .old-* archives
-        # stay on disk (iron rule) and are reported.
         self.assertLess(cmp_all, full_all)
-        # Reconstruct every iter of the compact dir.
         for i in range(20):
             text, _p = reconstruct_input_scs(run_cmp, i)
             self.assertIn("parameters", text)
             self.assertGreater(len(text), 1000)
 
-
 class TestCompactRobust(_CompactBase):
-    """Q4 crash injection + state-machine hardening (P0/P1 regressions)."""
     def _psf_ok(self, run_dir, index):
         return os.path.isdir(os.path.join(run_dir, "iter_%04d" % index, "psf"))
     def _archived(self, run_dir, index, prefix):
@@ -1204,19 +1058,15 @@ class TestCompactRobust(_CompactBase):
         with open(path, "wb") as f:
             f.write(b"A" * 20000)
         gz1 = gzip_file_in_place(path, keep_stub=False)
-        self.assertEqual(gz1, path + ".gz")  # stable name
-        # A same-name smaller file replaces the old gzip content (the old gz
-        # is bigger than the new raw: the P0 bug skipped the rewrite).
+        self.assertEqual(gz1, path + ".gz")
         small = b"B" * 40
         with open(path, "wb") as f:
             f.write(small)
         self.assertEqual(gzip_file_in_place(path, keep_stub=False), gz1)
         with gzip.open(gz1, "rb") as gz:
             self.assertEqual(gz.read(), small)
-        # Iron rule: raw archived under .old-, never deleted.
         self.assertFalse(os.path.isfile(path))
         self.assertTrue(any(n.startswith("dump.txt.old-") for n in os.listdir(work)))
-        # A corrupt .gz is rewritten from the raw bytes.
         with open(path, "wb") as f:
             f.write(b"C" * 100)
         with open(gz1, "wb") as f:
@@ -1226,29 +1076,28 @@ class TestCompactRobust(_CompactBase):
             self.assertEqual(gz.read(), b"C" * 100)
     def test_p1_resume_seeds_best(self):
         work, logger = self._logger()
-        logger.seed_best(1.0)  # historical best 1.0
-        self._log_one(logger, 5, 5.0)  # worse -> ordinary, not best
+        logger.seed_best(1.0)
+        self._log_one(logger, 5, 5.0)
         entries = read_manifest(os.path.join(work, MANIFEST_NAME))
         self.assertEqual(entries[5]["psf_kept"], "ordinary",
                          "the first ok after resume must not be mistaken for best")
-        self._log_one(logger, 6, 0.5)  # a real new best
+        self._log_one(logger, 6, 0.5)
         self.assertTrue(self._psf_ok(work, 6))
-        self._log_one(logger, 7, 0.7)  # ordinary -> expire 5
+        self._log_one(logger, 7, 0.7)
         self.assertFalse(self._psf_ok(work, 5), "ordinary 5 is archived when replaced")
         self.assertTrue(self._archived(work, 5, "psf.old-"))
         logger.finalize()
         self.assertTrue(self._psf_ok(work, 7), "last ordinary kept")
         self.assertTrue(self._psf_ok(work, 6), "best kept")
-        # Without a seed the first ok is treated as best (keep more, never lose).
         work, logger = self._logger()
         self._log_one(logger, 3, 9.0)
         self.assertTrue(self._psf_ok(work, 3))
     def test_p1_manifest_sync_after_expire(self):
         work, logger = self._logger()
-        self._log_one(logger, 0, 1.0)  # first
-        self._log_one(logger, 1, 2.0)  # ordinary pending
-        self._log_one(logger, 2, 3.0)  # ordinary -> expire 1
-        logger.finalize()              # keep 2 as last
+        self._log_one(logger, 0, 1.0)
+        self._log_one(logger, 1, 2.0)
+        self._log_one(logger, 2, 3.0)
+        logger.finalize()
         entries = read_manifest(os.path.join(work, MANIFEST_NAME))
         self.assertIn(1, entries)
         e1 = entries[1]
@@ -1260,7 +1109,6 @@ class TestCompactRobust(_CompactBase):
             fp = os.path.join(work, "iter_0001", name)
             self.assertTrue(os.path.isfile(fp), "manifest files must exist on disk")
             self.assertEqual(info["sha1"], _sha1_file(fp))
-        # At least one retention refresh; read_manifest keeps the newest per index.
         raw_lines = open(os.path.join(work, MANIFEST_NAME), encoding="utf-8").read()
         self.assertIn('"type": "retention"', raw_lines)
         self.assertEqual(entries[1].get("type"), "retention")
@@ -1280,7 +1128,6 @@ class TestCompactRobust(_CompactBase):
                                  "iter %d %s sha1 mismatch" % (index, name))
                 self.assertEqual(info["bytes"], os.path.getsize(fp))
     def _run_order(self, plan):
-        """plan = [(index, total, status), ...]; return the kept set."""
         work, logger = self._logger()
         for index, total, status in plan:
             self._log_one(logger, index, total, status)
@@ -1290,22 +1137,21 @@ class TestCompactRobust(_CompactBase):
             if self._psf_ok(work, index):
                 kept.add(index)
             else:
-                # A replaced psf must be archived, not deleted.
                 self.assertTrue(self._archived(work, index, "psf.old-"),
                                 "iter %d psf must be archived, not deleted" % index)
         return kept
     def test_save_raw2_retention_matrix(self):
         cases = [
             ([(0, 5.0, "ok"), (1, 9.0, "fail: e"), (2, 3.0, "ok"), (3, 4.0, "ok")],
-             {0, 1, 2, 3}),  # 3 = last ordinary
-            ([(0, 5.0, "ok"), (1, 4.0, "ok"), (2, 1.0, "ok")], {0, 1, 2}),  # best is last
+             {0, 1, 2, 3}),
+            ([(0, 5.0, "ok"), (1, 4.0, "ok"), (2, 1.0, "ok")], {0, 1, 2}),
             ([(0, 9.0, "ok"), (1, 8.0, "ok"), (2, 7.0, "ok"), (3, 6.0, "ok"),
-              (4, 5.0, "ok")], {0, 1, 2, 3, 4}),  # every iter improves
+              (4, 5.0, "ok")], {0, 1, 2, 3, 4}),
             ([(0, 1.0, "ok"), (1, 2.0, "ok"), (2, 2.1, "ok"), (3, 2.2, "ok"),
-              (4, 2.3, "ok")], {0, 4}),  # plateau keeps first and last
+              (4, 2.3, "ok")], {0, 4}),
             ([(0, 1.0, "ok"), (1, 2.0, "ok"), (2, 3.0, "fail: z")], {0, 2}),
             ([(0, 1.0, "ok"), (1, 1e6, "fail: a"), (2, 1e6, "fail: b"),
-              (3, 2.0, "ok")], {0, 1, 2, 3}),  # consecutive fails all kept
+              (3, 2.0, "ok")], {0, 1, 2, 3}),
         ]
         for plan, want in cases:
             self.assertEqual(self._run_order(plan), want, "plan=%s" % (plan,))
@@ -1313,16 +1159,13 @@ class TestCompactRobust(_CompactBase):
         work, logger = self._logger()
         for i, total in enumerate([1.0, 2.0, 3.0, 4.0]):
             self._log_one(logger, i, total)
-        # Crash: no finalize. pending=3 stays; it must not be archived.
         self.assertTrue(self._psf_ok(work, 0))
         self.assertFalse(self._psf_ok(work, 1))
         self.assertTrue(self._psf_ok(work, 3))
-        # Every iteration is recoverable from its own record.
         for i in range(4):
             rec = json.load(open(os.path.join(work, "iter_%04d" % i, "record.json"),
                                  encoding="utf-8"))
             self.assertEqual(rec["index"], i)
-        # Resume: a new logger continues; the old pending 3 stays (keep more).
         logger2 = RunLogger(work, save_raw=2, log_mode=LOG_MODE_COMPACT)
         logger2.seed_best(1.0)
         self._log_one(logger2, 4, 5.0)
@@ -1333,16 +1176,15 @@ class TestCompactRobust(_CompactBase):
     def test_crash_mid_finalize_leaves_key_iters(self):
         work, logger = self._logger()
         self._log_one(logger, 0, 1.0)
-        self._log_one(logger, 1, 2.0)             # pending=1
-        self._log_one(logger, 2, 3.0)             # expire 1, pending=2
-        self._log_one(logger, 3, 9.0, "fail: x")  # last=3 != pending 2
-        # Inject: finalize raises while expiring 2.
+        self._log_one(logger, 1, 2.0)
+        self._log_one(logger, 2, 3.0)
+        self._log_one(logger, 3, 9.0, "fail: x")
         boom = []
         def _bad_expire(path, index=None):
             boom.append(path)
             raise RuntimeError("injected")
         logger._expire_ordinary = _bad_expire
-        logger.finalize()  # must not propagate
+        logger.finalize()
         self.assertEqual(len(boom), 1)
         self.assertTrue(self._psf_ok(work, 0), "first must not be lost")
         self.assertTrue(self._psf_ok(work, 3), "fail must not be lost")
@@ -1352,16 +1194,14 @@ class TestCompactRobust(_CompactBase):
         work, logger = self._logger()
         self._log_one(logger, 0, 1.0)
         self._log_one(logger, 1, 2.0)
-        self._log_one(logger, 2, 3.0)  # expire 1
-        # Kill-window half line, then another one on an existing index.
+        self._log_one(logger, 2, 3.0)
         with open(os.path.join(work, MANIFEST_NAME), "a", encoding="utf-8") as f:
             f.write('{"index": 99, "broken')
         with open(os.path.join(work, MANIFEST_NAME), "a", encoding="utf-8") as f:
             f.write('{"index": 0, "half')
         entries = read_manifest(os.path.join(work, MANIFEST_NAME))
         self.assertNotIn(99, entries, "half lines must be recognised as invalid/stale")
-        self.assertEqual(entries[0]["index"], 0)  # intact line still readable
-        # Every valid entry's files must exist on disk.
+        self.assertEqual(entries[0]["index"], 0)
         for index, entry in entries.items():
             for name, info in (entry.get("files") or {}).items():
                 fp = os.path.join(work, "iter_%04d" % index, name)
@@ -1371,14 +1211,12 @@ class TestCompactRobust(_CompactBase):
         run_dir = self._run_dir()
         deck_a = "// deck A\nparameters L1=1 L2=2\nR1 (a 0) r=1\n"
         deck_b = "// deck B CHANGED\nparameters L1=1 L2=2\nR1 (a 0) r=2\n"
-        # iter0 uses deck A.
         p0 = "parameters L1=10 L2=2"
         t0 = rewrite_netlist_parameters(deck_a, p0)[0]
         it0 = os.path.join(run_dir, "iter_0000")
         os.makedirs(it0)
         open(os.path.join(it0, "input.scs"), "w", encoding="utf-8").write(t0)
         self.assertIsNone(compact_netlist_file(it0, t0, p0).get("fallback"))
-        # iter1: the template drifts (the user re-netlists in ADE mid-run).
         p1 = "parameters L1=11 L2=2"
         t1 = rewrite_netlist_parameters(deck_b, p1)[0]
         it1 = os.path.join(run_dir, "iter_0001")
@@ -1388,13 +1226,10 @@ class TestCompactRobust(_CompactBase):
         self.assertEqual(meta1.get("fallback"), "full_input_kept")
         self.assertTrue(os.path.isfile(os.path.join(it1, "input.scs")),
                         "a drifted iter must keep the full text")
-        # Reconstruct: iter0 from base; iter1 from the kept full text.
         self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], t0)
         g1, _ = reconstruct_input_scs(run_dir, 1)
         self.assertEqual(g1, t1)
         self.assertEqual(_sha1_text(g1), meta1["sha1"])
-        # Tampered params but the full text still exists -> still refuses
-        # (never silently uses base).
         meta_path = os.path.join(it1, NETLIST_META_NAME)
         meta = json.load(open(meta_path, encoding="utf-8"))
         meta["params_line"] = "parameters L1=99 L2=99"
@@ -1411,9 +1246,7 @@ class TestCompactRobust(_CompactBase):
         open(os.path.join(it, "input.scs"), "w", encoding="utf-8").write(body)
         self.assertEqual(reconstruct_input_scs(run_dir, 0)[0], body)
 
-
 class TestTechProfile(unittest.TestCase):
-    """tech_profile.json is explicit and functionally equal to the built-in default."""
     HERE = os.path.dirname(os.path.abspath(__file__))
     TP_PATH = os.path.join(HERE, "tech_profile.json")
     def _load(self, **kw):
@@ -1429,14 +1262,10 @@ class TestTechProfile(unittest.TestCase):
             self.assertEqual(t[key], d[key], "tech_profile.%s must equal DEFAULT_TECH" % key)
         self.assertEqual([k for k in t if str(k).startswith("_doc")], [],
                          "_doc* keys must be stripped by the loader")
-        # The source file does carry _doc* -> stripping happens on load.
         with open(self.TP_PATH, encoding="utf-8") as f:
             raw = json.load(f)
         self.assertTrue([k for k in raw if str(k).startswith("_doc")])
     def test_profile_values_are_applied(self):
-        # The shipped template equals the built-in default, so comparing it
-        # with DEFAULT_TECH alone would also pass if the loader ignored the
-        # file. Load a deliberately different profile instead.
         import librf_opt
         work = tempfile.mkdtemp()
         path = os.path.join(work, "tech_profile.json")
@@ -1452,15 +1281,12 @@ class TestTechProfile(unittest.TestCase):
         self.assertEqual(t["text"]["M7"], "M7LABEL")
         self.assertEqual(t["drc"]["min_w"], 0.2)
         self.assertEqual(t["drc"]["min_area"]["M7"], 0.5)
-        # Missing keys fall back to the built-in default.
         self.assertEqual(t["layers"]["route"], librf_opt.DEFAULT_TECH["layers"]["route"])
         self.assertEqual(t["drc"]["max_w"], librf_opt.DEFAULT_TECH["drc"]["max_w"])
         self.assertEqual(t["drc"]["min_area"]["M3"],
                          librf_opt.DEFAULT_TECH["drc"]["min_area"]["M3"])
         self.assertTrue(t["_src"].endswith("tech_profile.json"))
     def test_env_profile_is_loaded(self):
-        # tech_profile.json suggests LIBRF_TECH_PROFILE for a custom PDK;
-        # that documented path must work and outrank the shipped template.
         import librf_opt
         work = tempfile.mkdtemp()
         path = os.path.join(work, "custom.json")
@@ -1480,10 +1306,7 @@ class TestTechProfile(unittest.TestCase):
         self.assertEqual(t["layers"]["route"], librf_opt.DEFAULT_TECH["layers"]["route"])
         self.assertTrue(t["_src"].endswith("custom.json"))
     def test_auto_load_no_self_disturb(self):
-        """Auto-load order hits the local profile but still equals the default."""
         cwd = os.getcwd()
-        # The documented env override would otherwise make this depend on
-        # the machine running the suite (test_env_profile_is_loaded covers it).
         old = os.environ.pop("LIBRF_TECH_PROFILE", None)
         try:
             os.chdir(self.HERE)
@@ -1501,13 +1324,7 @@ class TestTechProfile(unittest.TestCase):
         self.assertEqual(t["layers"], d["layers"])
         self.assertEqual(t["drc"], d["drc"])
 
-
 class TestS3EmBridge(unittest.TestCase):
-    """S3 circuit integration: em_bridge parse + isolation rules.
-
-    S3-ISO-01/02/03/05/06/07 + parse validation. S3-ISO-04 bit-exact
-    comparison lives in s3_iso_baseline.json (maintained by mock e2e step 1.4).
-    """
     def _base_cfg(self, **extra):
         cfg = {
             "name": "s3", "library": "MyLib", "cell": "c",
@@ -1532,25 +1349,20 @@ class TestS3EmBridge(unittest.TestCase):
         em.update(kw)
         return em
     def test_s3_iso_01_no_section_is_none(self):
-        """S3-ISO-01/02: no em_bridge section, or enabled=false -> None."""
         self.assertIsNone(parse_em_bridge_cfg(self._base_cfg()))
         self.assertIsNone(parse_em_bridge_cfg(self._base_cfg(em_bridge={"enabled": False})))
     def test_s3_iso_03_mutual_exclusion(self):
-        """S3-ISO-03 em_bridge + layout_em both on -> mutual-exclusion assert."""
         opt = self._opt(self._base_cfg(em_bridge=self._em(), layout_em={"enabled": True}))
         with self.assertRaises(ValueError):
             opt._build_runner(mock=True)
     def test_s3_iso_05_lazy_import_ok_when_off(self):
-        """S3-ISO-05 lazy import: em_bridge.py missing + enabled=false still builds."""
-        opt = self._opt(self._base_cfg(), parsed=False)  # no em_bridge section
+        opt = self._opt(self._base_cfg(), parsed=False)
         runner = opt._build_runner(mock=True)
         self.assertEqual(type(runner).__name__, "MockRunner")
     def test_s3_iso_06_enabled_without_module_raises(self):
-        """S3-ISO-06 enabled=true but import fails -> Chinese ImportError, no silence."""
         import sys
         opt = self._opt(self._base_cfg(em_bridge=self._em()))
         saved = sys.modules.pop("em_bridge", None)
-        # None makes import raise ImportError.
         sys.modules["em_bridge"] = None
         try:
             with self.assertRaises(ImportError) as cm:
@@ -1562,7 +1374,6 @@ class TestS3EmBridge(unittest.TestCase):
             else:
                 sys.modules.pop("em_bridge", None)
     def test_s3_iso_07_layout_em_still_works(self):
-        """S3-ISO-07 em_bridge absent + layout_em on -> GeomRunner (v07 behaviour)."""
         try:
             import librf_opt  # noqa: F401 - layout_em needs the optional module
         except ImportError as exc:
@@ -1573,7 +1384,6 @@ class TestS3EmBridge(unittest.TestCase):
         runner = opt._build_runner(mock=True)
         self.assertEqual(type(runner).__name__, "GeomRunner")
     def test_parse_rejects_invalid(self):
-        """Bad mode / missing f_op / sparse grid all raise ValueError."""
         cases = (
             self._em(mode="nope"),
             self._em(devices=[{"device_type": "ind", "target_var": "L1", "tech": "T"}]),
@@ -1596,7 +1406,6 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertAlmostEqual(eb["em_opt"]["budget"]["max_em"], 20)
 
     def test_solve_registers_snp_before_put(self):
-        """em_opt 用 "snp" 带回路径：入库前先内容寻址登记，行里有 sha1。"""
         import shutil
         import em_bridge
         tmp = tempfile.mkdtemp(prefix="em_snp_")
@@ -1626,7 +1435,6 @@ class TestS3EmBridge(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_run_payload_has_gui_query_fields(self):
-        """EmBridge.run 的 em_actual 必须带 GUI 读取的 target/status/snp_path/record。"""
         import em_bridge
         class _Result(object):
             pass
@@ -1657,7 +1465,6 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertEqual(res.values["L1"], 2e-9)
 
     def test_solve_injects_dev_f0_and_skips_hard_failures(self):
-        """_solve 必须把解析后的 dev/f0 补进请求；error/miss 不得入库。"""
         import shutil
         import em_bridge
         tmp = tempfile.mkdtemp(prefix="em_solve_")
@@ -1689,7 +1496,6 @@ class TestS3EmBridge(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_sqlite_records_keep_usable_key(self):
-        """_row_to_rec 不能删掉 _F.USABLE（SQLite 与 JSONL 记录字段一致）。"""
         import shutil
         import em_bridge
         tmp = tempfile.mkdtemp(prefix="em_usable_")
@@ -1713,7 +1519,6 @@ class TestS3EmBridge(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_run_bad_f_op_does_not_abort(self):
-        """坏 f_op 只标记该器件 error，不得让整次电路优化抛异常。"""
         import em_bridge
         class _Result(object):
             pass
@@ -1735,10 +1540,7 @@ class TestS3EmBridge(unittest.TestCase):
         self.assertTrue(any("f_op" in w for w in ea["warns"]))
         self.assertEqual(res.values["L1"], 1e-9)
 
-
 class TestV12Modules(unittest.TestCase):
-    """V12: auto netlist, scoped parameter patching, EM two-stage alignment."""
-
     DECK = (
         "simulator lang=spectre\n"
         "parameters L1=250p L2=280p \\\n"
@@ -1751,14 +1553,12 @@ class TestV12Modules(unittest.TestCase):
     )
 
     def test_max_iter_must_be_positive(self):
-        """settings.max_iter <= 0 is a config error, not 'run nothing quietly'."""
         with self.assertRaises(ValueError):
             Settings({"max_iter": 0})
         with self.assertRaises(ValueError):
             Settings({"max_iter": -3})
 
     def test_fixed_and_optimized_variable_conflict(self):
-        """A name in both variables and fixed_variables is rejected."""
         from optimizer import build_variables
         cfg = example_config()
         cfg["fixed_variables"] = [{"name": "L1", "value": "250p"}]
@@ -1767,11 +1567,9 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("L1", str(ctx.exception))
 
     def test_resume_finished_run_keeps_targets_met(self):
-        """Re-running a finished run with no new budget keeps its verdict."""
         tmp = tempfile.mkdtemp(prefix="v12_resume_")
         cfg = example_config()
         cfg["output_dir"] = os.path.join(tmp, "run")
-        # Goals the mock model always meets on the first evaluation.
         cfg["targets"] = [
             {"output": "S21 dB20", "metric": "band_min", "band": ["24G", "44G"],
              "op": ">=", "goal": -100, "tol": 0.5},
@@ -1781,7 +1579,6 @@ class TestV12Modules(unittest.TestCase):
         cfg["settings"] = {"max_iter": 3, "patience": 100, "seed": 0}
         first = run_optimization(cfg, mock=True)
         self.assertEqual(first["stop_reason"], "targets_met")
-        # Budget is already spent: start == max_iter, no new simulation.
         cfg["settings"]["max_iter"] = 1
         again = run_optimization(cfg, mock=True)
         self.assertEqual(again["stop_reason"], "targets_met")
@@ -1790,7 +1587,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(again["iterations_total"], 1)
 
     def test_coordinate_search_converges(self):
-        """Coordinate strategy walks down each axis from x0."""
         import algorithm
         alg = algorithm.create("coordinate", ["x"], [(0.0, 1.0)],
                                x0=[0.7], seed=0)
@@ -1800,7 +1596,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertAlmostEqual(alg.best()[0][0], 0.4, places=2)
 
     def test_netlist_params_continuation_and_scopes(self):
-        """Continuation lines, subckt defaults and instance overrides patched."""
         import netlist_params
         text, rep = netlist_params.patch_netlist(
             self.DECK, {"L1": "260p", "L2": "290p", "k0": "0.7",
@@ -1815,7 +1610,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertNotIn("L1=210p", text)
 
     def test_netlist_params_missing_is_loud(self):
-        """A variable absent everywhere must fail, not be silently skipped."""
         import netlist_params
         text, rep = netlist_params.patch_netlist(self.DECK, {"nope": "1"})
         self.assertFalse(rep["ok"])
@@ -1823,7 +1617,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(text, self.DECK)
 
     def test_netlist_params_rewrite_compat(self):
-        """The old top-level rewrite entry stays usable by other callers."""
         line = parse_netlist_parameters(self.DECK)
         self.assertIn("L1", line)
         out, n = rewrite_netlist_parameters(self.DECK, "L1=2n")
@@ -1831,12 +1624,10 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("L1=2n", out)
 
     def test_netlist_analyses_detected(self):
-        """ADE writes `<name> <type>`; comments and instances never count."""
         self.assertEqual(list(netlist_analyses(self.DECK)), [])
         deck = self.DECK + ("ac1 ac start=1G stop=2G dec=10\n"
                             "sp1 sp ports=[P0 P1] start=1G stop=2G\n")
         self.assertEqual(list(netlist_analyses(deck)), ["ac", "sp"])
-        # Hand-written type-first decks still count.
         self.assertEqual(
             list(netlist_analyses("sp sp ports=[a b] start=1 stop=2\n")),
             ["sp"])
@@ -1845,9 +1636,6 @@ class TestV12Modules(unittest.TestCase):
         for line in ("save sp\n", "sp (a 0) capacitor c=1p\n",
                      "// ac1 ac start=1\n"):
             self.assertEqual(list(netlist_analyses(line)), [], line)
-        # 三个分析类型集必须完全一致：少一个会让合法网表被预检判无分析、
-        # 或让分析行的参数被当成设计变量改写；多一个也会让预检口径漂移。
-        # 语句关键字集只需覆盖 optimizer 的指令集（merger 还认 `inc`）。
         import netlist_create
         import netlist_params
         from optimizer import _ANALYSIS_KEYWORDS, _NETLIST_DIRECTIVES
@@ -1860,7 +1648,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(missing, [], missing)
 
     def test_preflight_rejects_unusable_deck(self):
-        """A deck that cannot produce curves fails at start, not after 50 rounds."""
         tmp = tempfile.mkdtemp(prefix="v12_pf_")
         missing = os.path.join(tmp, "missing.scs")
         with self.assertRaises(RuntimeError) as ctx:
@@ -1879,7 +1666,6 @@ class TestV12Modules(unittest.TestCase):
             f.write(self.DECK + "sp sp ports=[P0 P1] start=1G stop=2G\n")
         self.assertIn("sp", preflight_netlist({"netlist": good}))
 
-        # ADE names analyses (`ac1 ac ...`); a valid deck must not be rejected.
         named = os.path.join(tmp, "named.scs")
         with open(named, "w") as f:
             f.write(self.DECK + "ac1 ac start=1G stop=2G dec=10\n")
@@ -1892,7 +1678,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(preflight_netlist({}), "")
 
     def test_netlist_create_read_design_and_path(self):
-        """ADE state + explicit view -> mixed source, expected config path."""
         import netlist_create
         tmp = tempfile.mkdtemp(prefix="v12_nc_")
         state = os.path.join(tmp, "spectre_state1")
@@ -1912,7 +1697,6 @@ class TestV12Modules(unittest.TestCase):
             "/spectre/config/netlist/input.scs"), path)
 
     def test_netlist_create_merge_testbench(self):
-        """Model includes and ADE analyses survive a config createNetlist."""
         import netlist_create
         old = (
             "simulator lang=spectre\n"
@@ -1948,7 +1732,6 @@ class TestV12Modules(unittest.TestCase):
                          1)
 
     def test_netlist_create_carry_over_bare_params(self):
-        """ADE bare declarations keep the previous deck's effective values."""
         import netlist_create
         old = ("simulator lang=spectre\n"
                "parameters Ls2=140p Lp2=400p k2=475m \\\n"
@@ -1965,7 +1748,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("_par0=Ls2", merged)
 
     def test_netlist_create_log_classification(self):
-        """Echoed IL source is not an error; warnings stay warnings."""
         import netlist_create
         text = ("\\i printf(\"OPT_NETLIST_FAIL createNetlist returned nil\")\n"
                 "\\o WARNING (OSSHNL-379): unable to descend\n"
@@ -1978,7 +1760,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertIn("OSSHNL-379", warnings[0])
 
     def test_netlist_create_work_dir_finds_cds_lib(self):
-        """Virtuoso cwd walks up to the project root that owns cds.lib."""
         import netlist_create
         tmp = tempfile.mkdtemp(prefix="v12_cds_")
         root = os.path.join(tmp, "proj")
@@ -1991,7 +1772,6 @@ class TestV12Modules(unittest.TestCase):
                          os.path.normcase(os.path.abspath(root)))
 
     def test_em_align_csv_and_match_targets(self):
-        """Generic CSV headers survive; targets carry x/y limits."""
         import em_align
         tmp = tempfile.mkdtemp(prefix="v12_em_")
         path = os.path.join(tmp, "em.csv")
@@ -2011,7 +1791,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(len(t["limit"]["x"]), len(t["limit"]["y"]))
 
     def test_em_align_correction_serializable(self):
-        """correction_report is JSON-safe and flags a close alignment."""
         import em_align
         xs = [24e9 + i * 1e9 for i in range(11)]
         ys = [-3.0 + 0.1 * i for i in range(11)]
@@ -2027,7 +1806,6 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(rep["summary"]["n_vars_changed"], 1)
 
     def test_run_em_align_mock_known_answer(self):
-        """Stage1 -> y_em -> stage2 produces x_em_ideal and both reports."""
         tmp = tempfile.mkdtemp(prefix="v12_e2e_")
         netlist = os.path.join(tmp, "dummy.scs")
         with open(netlist, "w") as f:
@@ -2059,10 +1837,7 @@ class TestV12Modules(unittest.TestCase):
         self.assertEqual(set(payload["correction"]["curves"]), set(outs))
         self.assertIn("correction", payload)
 
-
 class _ScriptRunner:
-    """Sim runner stub that returns scripted results in order."""
-
     def __init__(self, results):
         self.results = list(results)
         self.calls = 0
@@ -2073,10 +1848,7 @@ class _ScriptRunner:
             return self.results.pop(0)
         return SimResult(status="fail", message="script exhausted")
 
-
 class TestPreflightAndCurveGuard(unittest.TestCase):
-    """1.4.1: analysis preflight and the zero-curve abort guard."""
-
     def _opt(self):
         out = os.path.join(tempfile.mkdtemp(prefix="v141_opt_"), "out")
         return Optimization(mock_config(out, 3), mock=True, max_iter=3)
@@ -2093,8 +1865,6 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         self.assertNotIn("首轮", msg)
 
     def test_zero_curve_abort_after_infra_retry(self):
-        # A first INFRA failure triggers one retry; that retry must obey
-        # the same "ok but no curves" guard as the first attempt.
         opt = self._opt()
         opt.runner = _ScriptRunner([
             SimResult(status="fail", message="cannot start eval serve"),
@@ -2106,8 +1876,6 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         self.assertEqual(opt.runner.calls, 2)
 
     def test_preflight_checks_discovered_deck(self):
-        # No explicit netlist: the runner finds input.scs under the cell's
-        # simulation tree, so preflight must check that same file.
         tmp = tempfile.mkdtemp(prefix="v141_disc_")
         deck_dir = os.path.join(tmp, "Lib", "Cell", "spectre",
                                 "schematic", "netlist")
@@ -2128,12 +1896,6 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         self.assertIn("没有任何分析语句", str(ctx.exception))
 
     def test_dcop_analysis_consistent_across_modules(self):
-        """The deck merger accepts dcop; preflight/patcher must agree.
-
-        A deck whose only analysis is ``dcop1 dcop ...`` was accepted by
-        netlist_create but rejected by preflight as "no analysis", and
-        netlist_params would patch its options as design parameters.
-        """
         tmp = tempfile.mkdtemp(prefix="v141_dcop_")
         deck = os.path.join(tmp, "input.scs")
         with open(deck, "w") as f:
@@ -2147,8 +1909,6 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
         self.assertIn("dcop", netlist_params._ANALYSIS)
 
     def test_run_optimization_preflight_rejects_bad_deck(self):
-        # The rejection must fire through the real entry point, not only
-        # when preflight_netlist() is called directly.
         tmp = tempfile.mkdtemp(prefix="v141_pf_")
         deck = os.path.join(tmp, "input.scs")
         with open(deck, "w") as f:
@@ -2161,14 +1921,8 @@ class TestPreflightAndCurveGuard(unittest.TestCase):
             run_optimization(cfg, mock=False)
         self.assertIn("分析语句", str(ctx.exception))
 
-
 class TestSearchStrategyFixes(unittest.TestCase):
-    """1.4.2: grid resume, scalariser wiring and CMA h_sigma scale."""
-
     def test_grid_resume_rebuilds_grid(self):
-        # A snapshot taken with levels=8 used to be restored next to a
-        # grid rebuilt from the new (smaller) budget: the restored order
-        # indices then ran off the end and ask() raised IndexError.
         import algorithm as A
         old = A.create("grid", ["a", "b"], [(0.0, 1.0)] * 2, seed=1,
                        budget=100)
@@ -2197,7 +1951,6 @@ class TestSearchStrategyFixes(unittest.TestCase):
         self.assertEqual(algo.inner.n_obj, 2)
         algo.ask()
         algo.tell(1.0, F=[0.2, 0.9], G=[])
-        # worstspec = max of the objectives, not their sum (1.1).
         self.assertAlmostEqual(algo.inner.inner.best_y, 0.9)
 
     def test_weighted_uses_target_weights(self):
@@ -2221,8 +1974,6 @@ class TestSearchStrategyFixes(unittest.TestCase):
         opt.algo.tell(1.0, F=[0.2, 0.9], G=[])
         self.assertAlmostEqual(opt.algo.inner.inner.best_y,
                                (0.2 + 3.0 * 0.9) / 4.0)
-        # All-zero weights keep the equal-weight fallback instead of
-        # raising "weights sum to zero" in the middle of a run.
         cfg["output_dir"] = os.path.join(work, "out_zero")
         for target in cfg["targets"]:
             target["weight"] = 0.0
@@ -2244,12 +1995,9 @@ class TestSearchStrategyFixes(unittest.TestCase):
             algo.restart(spread=0.25)
             self.assertEqual(algo.inner.restarts, 1)
             self.assertAlmostEqual(algo.inner.last_restart_radius, 0.25)
-            self.assertEqual(algo.best()[1], best)  # inner best survives
+            self.assertEqual(algo.best()[1], best)
 
     def test_constraint_vector_reaches_inner_as_one_point(self):
-        # SpaceAdapter handed the flat per-point G straight to engines
-        # that index G[i], so G[0] was a float: spec/pareto runs with a
-        # constraint or error-role target raised TypeError at tell.
         tr = Transform([
             {"name": "a", "init": 0.5, "min": 0.0, "max": 1.0},
             {"name": "b", "init": 0.5, "min": 0.0, "max": 1.0}])
@@ -2259,7 +2007,6 @@ class TestSearchStrategyFixes(unittest.TestCase):
                                    n_constr=1)
             algo.ask()
             algo.tell(0.3, F=[0.3], G=[0.25])
-        # Deb feasibility still applies: infeasible points never win.
         algo = build_optimizer("lshade", tr, {"a": 0.5, "b": 0.5},
                                ["a", "b"], seed=1, n_obj=1, n_constr=1)
         algo.ask()
@@ -2274,16 +2021,10 @@ class TestSearchStrategyFixes(unittest.TestCase):
         algo = A.create("cmaes", ["x%d" % i for i in range(5)],
                         [(0.0, 1.0)] * 5, x0=[0.5] * 5, seed=1)
         algo._gen_count = 2
-        # A path length modestly above the random-selection expectation
-        # is a normal step: the canonical 2*(g+1) denominator gives
-        # hsig=1, while the old 2*g/lambda scale forced hsig=0 here.
         self.assertEqual(algo._hsig(1.4 * algo.chiN), 1.0)
         self.assertEqual(algo._hsig(10.0 * algo.chiN), 0.0)
 
-
 class _GVar(object):
-    """Minimal StringVar stand-in for headless GUI tests."""
-
     def __init__(self, text=""):
         self.text = text
 
@@ -2293,10 +2034,7 @@ class _GVar(object):
     def set(self, value):
         self.text = str(value)
 
-
 class _GTree(object):
-    """Minimal Treeview stand-in (rows are tuples of strings)."""
-
     def __init__(self, rows=()):
         self.rows = [tuple(r) for r in rows]
 
@@ -2318,9 +2056,7 @@ class _GTree(object):
     def selection(self):
         return []
 
-
 def _fake_gui(**attrs):
-    """OptimizerGui methods without creating a Tk root."""
     import gui
 
     class _Fake(gui.OptimizerGui):
@@ -2331,7 +2067,6 @@ def _fake_gui(**attrs):
     fake._dialog = lambda *a, **k: None
     fake._set_status = lambda *a, **k: None
     return fake
-
 
 def _gui_fields(**overrides):
     keys = ("name", "library", "cell", "view", "state", "state_dir",
@@ -2344,9 +2079,7 @@ def _gui_fields(**overrides):
         fields[key] = _GVar(value)
     return fields
 
-
 def _collect_cfg_stub(**overrides):
-    """A GUI whose _collect_cfg() can run without widgets."""
     attrs = {
         "fields": _gui_fields(),
         "spectre_bin_var": _GVar("spectre"),
@@ -2369,10 +2102,7 @@ def _collect_cfg_stub(**overrides):
     attrs.update(overrides)
     return _fake_gui(**attrs)
 
-
 class TestGuiConfigRoundTrip(unittest.TestCase):
-    """GUI form round-trips: the run must see what the page shows."""
-
     def test_simset_netlist_uses_runtime_view_preference(self):
         import gui
         root = tempfile.mkdtemp()
@@ -2392,7 +2122,6 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         want = resolve_netlist_path({
             "sim_root": root, "library": "lib", "cell": "cell",
             "view": "schematic", "netlist_view": "config"})
-        # The newest deck is schematic, but the run prefers netlist_view.
         self.assertEqual(os.path.normcase(got), os.path.normcase(want))
         self.assertEqual(os.path.normcase(got), os.path.normcase(picks["config"]))
         g.fields["netlist_view"].set("schematic")
@@ -2409,7 +2138,6 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         g.target_specs = {"iid1": dict(spec, band=["40G", "60G"])}
         sig2 = g._simset_signature()
         self.assertNotEqual(sig1, sig2)
-        # Same definitions keep the 2 s refresh quiet.
         g.target_specs = {"iid1": dict(spec, band=["40G", "60G"])}
         self.assertEqual(sig2, g._simset_signature())
 
@@ -2426,7 +2154,6 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         cfg = g._collect_cfg(validate=False)
         self.assertEqual(cfg["variables"][0]["scale"], "log")
         self.assertIs(cfg["variables"][0]["integer"], True)
-        # Undo must restore the metadata together with the row.
         g._vars_push_undo()
         g.var_extra = {}
         g._vars_restore(g._vars_undo_stack.pop())
@@ -2443,7 +2170,6 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         self.assertEqual(tab.vars["layermap"].get(), "")
         self.assertEqual(tab.vars["proc"].get(), "")
         self.assertEqual(tab.vars["techlib"].get(), "RFCMOS")
-        # A cleared tech field must not be resurrected from the old config.
         class _Tech(object):
             def tech_cfg_keys(self):
                 return {}
@@ -2459,7 +2185,6 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         self.assertIsNone(bad._collect_cfg())
 
     def test_param_help_names_only_live_settings(self):
-        """Help may not advertise a settings key the engine never reads."""
         import inspect
         import gui
         text = inspect.getsource(gui.OptimizerGui._show_param_help)
@@ -2471,29 +2196,18 @@ class TestGuiConfigRoundTrip(unittest.TestCase):
         self.assertEqual("noise_sigma" in engine, "noise_sigma" in text,
                          "help must not name a setting the engine lacks")
 
-
 def _optional_tests_module(name):
-    """Import an optional sibling test module; None only when it is absent.
-
-    A SyntaxError or an import-time failure must fail the gate instead of
-    silently shrinking the suite the way ``except Exception`` would.
-    """
     try:
         return __import__(name)
     except ImportError:
         return None
 
-
 def _test_classes_in(module):
-    """Every unittest.TestCase subclass defined in one test module."""
     return [obj for _name, obj in sorted(vars(module).items())
             if isinstance(obj, type) and issubclass(obj, unittest.TestCase)
             and obj is not unittest.TestCase]
 
-
 class TestOptionalTestImport(unittest.TestCase):
-    """Optional test modules are skipped only when genuinely absent."""
-
     def test_missing_module_is_none(self):
         self.assertIsNone(_optional_tests_module("_opt_missing_xyz"))
 
@@ -2526,10 +2240,7 @@ class TestOptionalTestImport(unittest.TestCase):
         names = [cls.__name__ for cls in _test_classes_in(proc_tests)]
         self.assertIn("ProcCrossSectionTest", names)
 
-
 class TestSuiteRegistry(unittest.TestCase):
-    """A new Test* class that is not listed below silently never runs."""
-
     def test_all_test_classes_are_registered(self):
         module = sys.modules[__name__]
         defined = set(name for name, obj in vars(module).items()
@@ -2537,7 +2248,6 @@ class TestSuiteRegistry(unittest.TestCase):
                       and issubclass(obj, unittest.TestCase))
         registered = set(cls.__name__ for cls in _TEST_CLASSES)
         self.assertEqual(sorted(defined - registered), [])
-
 
 _TEST_CLASSES = (
     TestEng, TestTargets, TestAlgorithm, TestGlobalSearch, TestPipeline,
@@ -2550,14 +2260,9 @@ _TEST_CLASSES = (
     TestGuiConfigRoundTrip, TestSuiteRegistry, TestOptionalTestImport,
 )
 
-
 def run_selftests():
-    """Run the regression tests. Return the number of failures."""
-    # GUI classes stay here so a headless CLI run never imports tkinter.
     global OptimizerGui, PlotCanvas
     from gui import OptimizerGui, PlotCanvas
-    # The proc cross-section suite lives in its own module; run every
-    # Test* class it defines when the optional module is deployed.
     proc_tests = _optional_tests_module("test_proc_cross_section")
     loader = unittest.TestLoader()
     suite = unittest.TestSuite([loader.loadTestsFromTestCase(cls) for cls in _TEST_CLASSES])
@@ -2566,7 +2271,6 @@ def run_selftests():
             suite.addTests(loader.loadTestsFromTestCase(cls))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return len(result.failures) + len(result.errors)
-
 
 if __name__ == "__main__":
     sys.exit(1 if run_selftests() else 0)

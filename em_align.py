@@ -1,28 +1,4 @@
 # -*- coding: utf-8 -*-
-"""em_align.py — EM 两阶段对齐：曲线读取 / 匹配目标 / 偏差指标 / 修正建议 / 报告。
-
-只依赖标准库，不 import optimizer（避免循环依赖）。曲线统一为
-``{name: (xs, ys)}``，xs/ys 为 float 列表。
-
-支持的曲线来源
---------------
-* ``result.txt`` / ``result.txt.gz``：STATUS / MSG / TIMING / SCALAR /
-  CURVE_BEGIN..CURVE_END（optimizer 的 SKILL eval serve 格式）。
-* 目录：直接含 result.txt；或 run 目录（report.json + iter_*/result.txt +
-  best_curves.json）；或只含 ``psf/``。
-* ``.csv`` / ``.tsv`` / 文本：逗号、空白或制表符分隔，首行可为表头；
-  数值支持 ``1e9`` / ``6G`` / ``1.5n`` 等工程写法。
-* ``.json``：``{name: {"x": [...], "y": [...]}}`` 或
-  ``{name: [[x, y], ...]}``；也接受 best_curves.json 的 ``{"curves": ...}``。
-* ``.sNp``：Touchstone v1，端口数由扩展名给出；格式 RI / MA / DB，
-  频率单位 Hz..THz；输出 ``"<Sij> dB20"`` 与 ``"<Sij> ang"``。
-
-psf 目录需要注入 runner
-----------------------
-``runner(psf_dir, result_path, outputs_state)`` 负责调用 eval serve 并把
-result.txt 写到 ``result_path``。返回值可为：None（只写文件）、曲线 dict、
-result 文本、或 ``(rc, stdout, stderr)``。未给 runner 时 psf 目录报清晰错误。
-"""
 
 from __future__ import print_function
 
@@ -42,7 +18,6 @@ __all__ = [
     "infer_family",
 ]
 
-# ===== 工程数 =====
 _ENG_SUFFIX = {
     "t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3, "m": 1e-3,
     "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15, "a": 1e-18,
@@ -50,9 +25,7 @@ _ENG_SUFFIX = {
 _ENG_RE = re.compile(
     r"^\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([A-Za-z]*)\s*$")
 
-
 def parse_eng(text):
-    """Parse one engineering number to float."""
     if isinstance(text, bool):
         raise ValueError("bad number: %r" % (text,))
     if isinstance(text, (int, float)):
@@ -73,9 +46,7 @@ def parse_eng(text):
         raise ValueError("bad number: %s" % text)
     return value
 
-
 def format_eng(value):
-    """Format a float with the compact engineering suffixes."""
     if value is None:
         return ""
     value = float(value)
@@ -92,40 +63,31 @@ def format_eng(value):
             return "%s%g%s" % (sign, value / scale, suffix)
     return "%s%g" % (sign, value)
 
-
 def _try_num(text):
     try:
         return parse_eng(text)
     except (TypeError, ValueError):
         return None
 
-
-# ===== 文件读取 =====
 def _open_text(path):
     low = str(path).lower()
     if low.endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     return open(path, "r", encoding="utf-8", errors="replace")
 
-
 def _read_text(path):
     with _open_text(path) as f:
         return f.read()
-
 
 def _write_text(path, text):
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
-
 def _load_json(path):
     with _open_text(path) as f:
         return json.load(f)
 
-
-# ===== 曲线规整 =====
 def _sorted_curve(xs, ys):
-    """Sort by x, drop duplicate x (last wins), return float lists."""
     pairs = []
     for xi, yi in zip(xs, ys):
         xv = _try_num(xi)
@@ -144,9 +106,7 @@ def _sorted_curve(xs, ys):
             out.append(p)
     return [p[0] for p in out], [p[1] for p in out]
 
-
 def _normalize_curve(data, name="curve"):
-    """Accept (xs, ys), {"x","y"}, [[x,y],...] and return float lists."""
     xs = ys = None
     if isinstance(data, dict):
         if "x" in data and "y" in data:
@@ -154,8 +114,6 @@ def _normalize_curve(data, name="curve"):
         elif "freq" in data and "value" in data:
             xs, ys = data.get("freq"), data.get("value")
     elif isinstance(data, (list, tuple)):
-        # 元组 (xs, ys) 是内部约定；JSON 列表按点列 [[x, y], ...] 解析。
-        # 列表中恰好两项且各自不是"点"时，也按 (xs, ys) 处理。
         if isinstance(data, tuple) and len(data) == 2 \
                 and isinstance(data[0], (list, tuple)) \
                 and isinstance(data[1], (list, tuple)):
@@ -188,10 +146,7 @@ def _normalize_curve(data, name="curve"):
         raise ValueError("曲线 %s 没有有效数值点" % name)
     return ox, oy
 
-
-# ===== result.txt =====
 def parse_result_text(text):
-    """Parse optimizer result.txt content into {name: (xs, ys)}."""
     curves = {}
     name = None
     xs = []
@@ -228,7 +183,6 @@ def parse_result_text(text):
         raise ValueError("result 文本里没有 SCALAR/CURVE 数据")
     return curves
 
-
 def _result_status(text):
     status = ""
     for line in text.splitlines():
@@ -237,8 +191,6 @@ def _result_status(text):
             status = parts[1]
     return status
 
-
-# ===== CSV =====
 def _split_line(line):
     if "\t" in line:
         parts = line.split("\t")
@@ -250,15 +202,12 @@ def _split_line(line):
         parts = line.split()
     return [p.strip().strip('"').strip("'") for p in parts if p.strip() != ""]
 
-
 _CSV_GENERIC_HEADERS = {
     "value", "values", "val", "y", "v", "mag", "magnitude", "db", "db20",
     "amplitude", "data",
 }
 
-
 def parse_csv_text(text, default_name="curve"):
-    """Parse comma / whitespace / tab separated two-or-more column data."""
     header = None
     rows = []
     for raw in text.splitlines():
@@ -273,7 +222,6 @@ def parse_csv_text(text, default_name="curve"):
             rows.append(nums)
         elif header is None and not rows:
             header = parts
-        # 其它行（表头后的说明、坏行）忽略
     if not rows:
         raise ValueError("CSV 文本里没有数值数据行")
     ncols = min(len(r) for r in rows)
@@ -302,8 +250,6 @@ def parse_csv_text(text, default_name="curve"):
         raise ValueError("CSV 文本里没有可用曲线")
     return curves
 
-
-# ===== JSON =====
 def _curves_from_json(data, default_name="curve"):
     if isinstance(data, dict) and isinstance(data.get("curves"), dict):
         data = data["curves"]
@@ -329,12 +275,9 @@ def _curves_from_json(data, default_name="curve"):
         return {default_name: _normalize_curve(data, default_name)}
     raise ValueError("JSON 顶层必须是对象或数组")
 
-
-# ===== Touchstone =====
 _TS_UNITS = {
     "hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9, "thz": 1e12,
 }
-
 
 def _ts_ports(path):
     m = re.search(r"\.s(\d+)p$", str(path).lower())
@@ -344,7 +287,6 @@ def _ts_ports(path):
         except ValueError:
             return None
     return None
-
 
 def _ts_option(line):
     unit = 1e9
@@ -365,7 +307,6 @@ def _ts_option(line):
         i += 1
     return unit, param, fmt
 
-
 def _ts_complex(re_v, im_v, fmt):
     if fmt == "ri":
         return complex(re_v, im_v)
@@ -375,9 +316,7 @@ def _ts_complex(re_v, im_v, fmt):
     mag = 10.0 ** (re_v / 20.0)
     return complex(mag * math.cos(ph), mag * math.sin(ph))
 
-
 def parse_touchstone_text(text, ports=None):
-    """Touchstone v1 -> {"Sij dB20": (...), "Sij ang": (...)}."""
     unit = 1e9
     fmt = "ma"
     param = "s"
@@ -449,8 +388,6 @@ def parse_touchstone_text(text, ports=None):
             curves[nm + " ang"] = (list(freqs), ang)
     return curves
 
-
-# ===== 文件级 load_curves =====
 def _looks_like_result(text):
     for line in text.splitlines()[:400]:
         s = line.strip()
@@ -458,7 +395,6 @@ def _looks_like_result(text):
                 or s.startswith("STATUS "):
             return True
     return False
-
 
 def _looks_like_touchstone(text):
     for raw in text.splitlines()[:80]:
@@ -473,14 +409,12 @@ def _looks_like_touchstone(text):
         return False
     return False
 
-
 def _default_curve_name(path):
     base = os.path.basename(str(path))
     if base.lower().endswith(".gz"):
         base = base[:-3]
     root, _ext = os.path.splitext(base)
     return root or "curve"
-
 
 def _load_curve_file(path):
     low = path.lower()
@@ -513,8 +447,6 @@ def _load_curve_file(path):
             pass
     return parse_csv_text(text, stem)
 
-
-# ===== psf 目录 via eval serve =====
 def _curves_from_runner(ret, result_path, psf_dir):
     if ret is None:
         if os.path.isfile(result_path):
@@ -557,7 +489,6 @@ def _curves_from_runner(ret, result_path, psf_dir):
                         for k, v in curves.items())
     raise ValueError("runner 返回值无法识别（psf=%s）" % psf_dir)
 
-
 def _load_psf_dir(psf_dir, outputs_state, runner):
     if runner is None:
         raise ValueError(
@@ -575,8 +506,6 @@ def _load_psf_dir(psf_dir, outputs_state, runner):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# ===== 目录 =====
 def _iter_dirs(run_dir):
     out = []
     for name in os.listdir(run_dir):
@@ -589,7 +518,6 @@ def _iter_dirs(run_dir):
     out.sort(key=lambda p: p[0])
     return out
 
-
 def _iter_result_path(iter_path):
     for name in ("result.txt", "result.txt.gz"):
         hit = os.path.join(iter_path, name)
@@ -597,14 +525,12 @@ def _iter_result_path(iter_path):
             return hit
     return None
 
-
 def _is_curve_file(name):
     low = name.lower()
     if low.endswith(".gz"):
         low = low[:-3]
     return (low.endswith((".txt", ".csv", ".tsv", ".dat", ".json"))
             or re.search(r"\.s\d+p$", low) is not None)
-
 
 def _load_curve_dir(path, outputs_state=None, runner=None):
     result = _iter_result_path(path)
@@ -638,13 +564,7 @@ def _load_curve_dir(path, outputs_state=None, runner=None):
                      % (path, ", ".join(sorted(os.path.basename(f)
                                                for f in files))))
 
-
 def load_curves(path, outputs_state=None, runner=None):
-    """Load curves from result.txt / dir / CSV / JSON / Touchstone.
-
-    Returns {curve_name: (xs, ys)}. Raises ValueError with a Chinese reason
-    when nothing can be parsed.
-    """
     if path is None:
         raise ValueError("曲线路径为空")
     path = os.path.abspath(os.path.expanduser(str(path)))
@@ -659,8 +579,6 @@ def load_curves(path, outputs_state=None, runner=None):
     except Exception as exc:
         raise ValueError("曲线读取失败 %s: %s" % (path, exc))
 
-
-# ===== run 目录 best =====
 def _load_best_payload(run_dir, report):
     path = None
     if isinstance(report.get("best_curves"), str):
@@ -701,7 +619,6 @@ def _load_best_payload(run_dir, report):
                 pass
     return out
 
-
 def _vars_to_float(values):
     out = {}
     raw = {}
@@ -717,7 +634,6 @@ def _vars_to_float(values):
         out[str(name)] = num
         raw[str(name)] = val if isinstance(val, str) else format_eng(num)
     return out, raw
-
 
 def _vars_match(target, candidate, rel=2e-3):
     if not target or not candidate:
@@ -735,7 +651,6 @@ def _vars_match(target, candidate, rel=2e-3):
             return float("inf")
         worst = max(worst, diff)
     return worst
-
 
 def _load_jsonl_map(path):
     out = {}
@@ -758,7 +673,6 @@ def _load_jsonl_map(path):
         pass
     return out
 
-
 def _iter_status(index, iter_path, records, manifest):
     rec = records.get(index)
     if rec and rec.get("status"):
@@ -774,7 +688,6 @@ def _iter_status(index, iter_path, records, manifest):
             pass
     return ""
 
-
 def _load_iter_curves(iter_path):
     result = _iter_result_path(iter_path)
     if not result:
@@ -784,14 +697,7 @@ def _load_iter_curves(iter_path):
     except (OSError, ValueError):
         return {}
 
-
 def load_run_best(run_dir):
-    """Load x_opt / y_opt of one finished run directory.
-
-    Returns {"variables", "variables_raw", "curves", "iter", "report", "path"}.
-    Best selection: report["best_iter"] -> report["best_variables"] matched
-    against iter_*/record.json -> best_curves.json iter -> last status=ok iter.
-    """
     if run_dir is None:
         raise ValueError("run 目录为空")
     run_dir = os.path.abspath(os.path.expanduser(str(run_dir)))
@@ -821,7 +727,6 @@ def load_run_best(run_dir):
                 pass
     manifest = _load_jsonl_map(os.path.join(run_dir, "manifest.jsonl"))
 
-    # --- best iteration ---
     chosen = None
     best_iter = report.get("best_iter")
     if isinstance(best_iter, dict):
@@ -833,7 +738,6 @@ def load_run_best(run_dir):
         best_iter = int(m.group(0)) if m else None
     if isinstance(best_iter, int) and best_iter in iter_map:
         chosen = best_iter
-    # report best variables -> record.json match
     target_vars = None
     for key in ("best_variables_raw", "best_variables"):
         raw = report.get(key)
@@ -869,7 +773,6 @@ def load_run_best(run_dir):
     if chosen is None and iters:
         chosen = iters[-1][0]
 
-    # --- variables ---
     variables, variables_raw = {}, {}
     for key in ("best_variables_raw", "best_variables"):
         raw = report.get(key)
@@ -887,7 +790,6 @@ def load_run_best(run_dir):
         line = ((man.get("netlist") or {}).get("params_line") or "")
         variables, variables_raw = _params_line_vars(line)
 
-    # --- curves ---
     curves = dict(best_payload.get("curves") or {})
     if not curves and chosen is not None and chosen in iter_map:
         curves = _load_iter_curves(iter_map[chosen])
@@ -915,7 +817,6 @@ def load_run_best(run_dir):
         "path": run_dir,
     }
 
-
 def _params_line_vars(line):
     text = str(line or "").strip()
     if not text:
@@ -932,8 +833,6 @@ def _params_line_vars(line):
                 raw[name] = value
     return out, raw
 
-
-# ===== 匹配目标 =====
 def _parse_band(band):
     if band is None:
         return None
@@ -946,7 +845,6 @@ def _parse_band(band):
             lo, hi = hi, lo
         return lo, hi
     raise ValueError("band 必须是 [lo, hi]: %r" % (band,))
-
 
 def _decimate(pts, max_points):
     n = len(pts)
@@ -963,10 +861,8 @@ def _decimate(pts, max_points):
             last = k
     return [pts[k] for k in idx]
 
-
 def build_match_targets(curves, names=None, max_points=81, tol=0.1,
                         band=None, weight=1.0):
-    """Build curve_op=match targets from curves: keep endpoints, decimate."""
     max_points = int(max_points)
     if max_points < 2:
         raise ValueError("max_points 必须 >= 2")
@@ -1004,7 +900,6 @@ def build_match_targets(curves, names=None, max_points=81, tol=0.1,
         })
     return targets
 
-
 def _resolve_curve_name(curves, name):
     if name in curves:
         return name
@@ -1013,8 +908,6 @@ def _resolve_curve_name(curves, name):
         return hits[0]
     return None
 
-
-# ===== 偏差指标 =====
 def _interp(xs, ys, x):
     if not xs:
         return None
@@ -1035,20 +928,12 @@ def _interp(xs, ys, x):
     t = (x - x0) / (x1 - x0)
     return y0 + t * (y1 - y0)
 
-
 def _empty_metrics():
     return {"rms": float("inf"), "max_abs": float("inf"),
             "mean_signed": 0.0, "p95_abs": float("inf"),
             "n": 0, "worst_freq": None}
 
-
 def curve_metrics(ref, got, band=None):
-    """Compare got against ref on common frequencies (linear interp).
-
-    Returns rms / max_abs / mean_signed / p95_abs / n / worst_freq, where
-    mean_signed = mean(got - ref) and worst_freq is the frequency of the
-    largest |got - ref|. No common frequency gives n=0 and inf indicators.
-    """
     if ref is None or got is None:
         return _empty_metrics()
     try:
@@ -1111,8 +996,6 @@ def curve_metrics(ref, got, band=None):
         "worst_freq": worst,
     }
 
-
-# ===== 变量族与建议 =====
 _FAMILY_ALIASES = {
     "l": "L", "ind": "L", "inductor": "L", "inductance": "L",
     "c": "C", "cap": "C", "capacitor": "C", "capacitance": "C",
@@ -1128,7 +1011,6 @@ _FAMILY_LABEL = {
     "W": "MOS 宽度 W", "Lg": "MOS 栅长 L", "other": "其他",
 }
 
-
 def _map_family(value):
     if value is None:
         return None
@@ -1142,9 +1024,7 @@ def _map_family(value):
             return fam
     return None
 
-
 def infer_family(name):
-    """Infer L/C/R/k/W/Lg/other from a variable name (heuristic)."""
     raw = str(name or "").strip()
     low = raw.lower()
     if not low:
@@ -1174,7 +1054,6 @@ def infer_family(name):
         return "W"
     return "other"
 
-
 def _family_of(name, spec):
     if isinstance(spec, dict):
         for key in ("family", "kind", "type", "device", "device_type"):
@@ -1183,12 +1062,10 @@ def _family_of(name, spec):
                 return fam
     return infer_family(name)
 
-
 def _pct_text(rel):
     if rel is None:
         return ""
     return "%.1f%%" % (abs(rel) * 100.0)
-
 
 def _advice(name, family, x0, x1, rel, direction):
     if x0 is None:
@@ -1255,7 +1132,6 @@ def _advice(name, family, x0, x1, rel, direction):
         tail = "；族信息缺失，建议先确认变量语义再改版图。"
     return head + geo + tail + "随后复跑第二阶段，确认 RMS/最大偏差落到阈值内。"
 
-
 def _float_vars(values):
     out = {}
     if not isinstance(values, dict):
@@ -1269,7 +1145,6 @@ def _float_vars(values):
             continue
     return out
 
-
 def _var_specs_map(var_specs):
     out = {}
     if isinstance(var_specs, dict):
@@ -1281,10 +1156,8 @@ def _var_specs_map(var_specs):
                 out[str(item["name"])] = item
     return out
 
-
 def correction_report(stage1_vars, stage2_vars, y_opt, y_em, y_em_ideal,
                       var_specs=None, rms_tol=0.1, max_tol=0.5):
-    """Build the EM alignment correction report."""
     x_opt = _float_vars(stage1_vars)
     x_new = _float_vars(stage2_vars)
     specs = _var_specs_map(var_specs)
@@ -1414,8 +1287,6 @@ def correction_report(stage1_vars, stage2_vars, y_opt, y_em, y_em_ideal,
         "summary": summary,
     }
 
-
-# ===== Markdown / 文件 =====
 def _fmt_num(value, digits=4):
     if value is None:
         return "—"
@@ -1427,7 +1298,6 @@ def _fmt_num(value, digits=4):
         return ("%%.%dg" % digits) % value
     return str(value)
 
-
 def _fmt_hz(value):
     if value is None:
         return "—"
@@ -1437,10 +1307,8 @@ def _fmt_hz(value):
             return "%.4g%sHz" % (value / scale, suffix)
     return "%.4gHz" % value
 
-
 def _md_cell(text):
     return str(text).replace("|", "\\|").replace("\n", " ").strip()
-
 
 def _metrics_row(name, m):
     if m.get("n", 0) <= 0:
@@ -1450,9 +1318,7 @@ def _metrics_row(name, m):
         _fmt_num(m["mean_signed"]), _fmt_num(m["p95_abs"]),
         _fmt_hz(m["worst_freq"]))
 
-
 def format_markdown(report):
-    """Render one correction report (or the full em_align payload)."""
     if not isinstance(report, dict):
         raise ValueError("report 必须是 dict")
     outer = None
@@ -1551,9 +1417,7 @@ def format_markdown(report):
     lines.append("")
     return "\n".join(lines)
 
-
 def write_report(report, out_dir):
-    """Write em_align_report.json / .md into out_dir; return both paths."""
     if not isinstance(report, dict):
         raise ValueError("report 必须是 dict")
     out_dir = os.path.abspath(os.path.expanduser(str(out_dir)))
@@ -1566,8 +1430,6 @@ def write_report(report, out_dir):
     _write_text(md_path, format_markdown(report))
     return json_path, md_path
 
-
-# ===== 自测 =====
 class _ST(object):
     def __init__(self):
         self.passed = 0
@@ -1592,7 +1454,6 @@ class _ST(object):
             self.failed += 1
             print("  FAIL %s 异常: %r" % (label, exc))
             self.msgs.append("%s: %r" % (label, exc))
-
 
 def _st_result(st, tmp):
     text = ("STATUS ok\nMSG mock\nTIMING sim 0.5\nSCALAR Gain 12.5\n"
@@ -1623,7 +1484,6 @@ def _st_result(st, tmp):
     st.check(_raises(lambda: load_curves(os.path.join(tmp, "bad.txt")),
                      ValueError), "目录无曲线报错")
 
-
 def _st_csv(st, tmp):
     p1 = os.path.join(tmp, "s21.csv")
     _write_text(p1, "freq,S21 dB20\n1e9,-1.0\n2e9,-1.5\n3e9,-2.0\n")
@@ -1647,7 +1507,6 @@ def _st_csv(st, tmp):
     _write_text(p5, "hello,world\nfoo,bar\n")
     st.check(_raises(lambda: load_curves(p5), ValueError), "CSV 无数据报错")
 
-
 def _st_json(st, tmp):
     p1 = os.path.join(tmp, "c.json")
     _write_text(p1, json.dumps({"S21 dB20": {"x": [1e9, 2e9],
@@ -1667,7 +1526,6 @@ def _st_json(st, tmp):
     p4 = os.path.join(tmp, "bad.json")
     _write_text(p4, json.dumps({"X": "nope"}))
     st.check(_raises(lambda: load_curves(p4), ValueError), "JSON 坏数据报错")
-
 
 def _st_touchstone(st, tmp):
     p1 = os.path.join(tmp, "one.s1p")
@@ -1690,7 +1548,6 @@ def _st_touchstone(st, tmp):
     p4 = os.path.join(tmp, "bad.s1p")
     _write_text(p4, "# Hz S MA R 50\n")
     st.check(_raises(lambda: load_curves(p4), ValueError), "sNp 无数据报错")
-
 
 def _st_run_dir(st, tmp):
     run = os.path.join(tmp, "run1")
@@ -1746,7 +1603,6 @@ def _st_run_dir(st, tmp):
     st.check(_raises(lambda: load_run_best(os.path.join(tmp, "no_run")),
                      ValueError), "run 目录缺失报错")
 
-
 def _st_psf(st, tmp):
     base = os.path.join(tmp, "psf_run")
     psf = os.path.join(base, "psf")
@@ -1783,7 +1639,6 @@ def _st_psf(st, tmp):
     st.check(_raises(lambda: load_curves(base, runner=runner_none), ValueError),
              "psf runner 空返回报错")
 
-
 def _st_targets(st, tmp):
     xs = [1e9 + i * 1e8 for i in range(1000)]
     ys = [-1.0 + 0.001 * i for i in range(1000)]
@@ -1811,7 +1666,6 @@ def _st_targets(st, tmp):
              "缺失曲线名跳过")
     st.check(_raises(lambda: build_match_targets(curves, max_points=1),
                      ValueError), "max_points<2 报错")
-
 
 def _st_metrics(st, tmp):
     xs = [float(i) for i in range(11)]
@@ -1843,7 +1697,6 @@ def _st_metrics(st, tmp):
     m7 = curve_metrics((xs, [0.0] * 11), [xs, [2.0] * 11])
     st.check(abs(m7["mean_signed"] - 2.0) < 1e-12, "列表 (xs, ys) 输入")
 
-
 def _st_families(st, tmp):
     cases = [("L1", "L"), ("Lp", "L"), ("Ls", "L"), ("Lm", "L"),
              ("C1", "C"), ("Cout", "C"), ("R1", "R"), ("k0", "k"),
@@ -1852,7 +1705,6 @@ def _st_families(st, tmp):
     for name, fam in cases:
         st.check(infer_family(name) == fam,
                  "族推断 %s -> %s" % (name, fam), infer_family(name))
-
 
 def _corr_fixture():
     xs = [1e9 + i * 2.5e8 for i in range(41)]
@@ -1863,7 +1715,6 @@ def _corr_fixture():
     s2 = {"L1": 1.05e-9, "C1": 0.95e-12, "R1": 10.0, "k0": 0.6,
           "W1": 12e-6, "Lg1": 0.09e-6, "tail": 2.0}
     return xs, y, y_opt, s1, s2
-
 
 def _st_correction(st, tmp):
     xs, y, y_opt, s1, s2 = _corr_fixture()
@@ -1937,7 +1788,6 @@ def _st_correction(st, tmp):
              and rep8["variables"]["L1"]["direction"] == "unknown",
              "缺第二阶段变量")
 
-
 def _st_markdown(st, tmp):
     xs, y, y_opt, s1, s2 = _corr_fixture()
     rep = correction_report(s1, s2, {"S21 dB20": (xs, y_opt)},
@@ -1969,9 +1819,7 @@ def _st_markdown(st, tmp):
     st.check(_raises(lambda: format_markdown("x"), ValueError),
              "format_markdown 非 dict 报错")
 
-
 def run_selftest():
-    """Run all self tests; return process exit code."""
     tmp = tempfile.mkdtemp(prefix="em_align_selftest_")
     st = _ST()
     cases = [
@@ -1998,7 +1846,6 @@ def run_selftest():
         print("failed cases: %s" % ", ".join(st.msgs))
     return 0 if st.failed == 0 else 1
 
-
 def _raises(fn, exc_type):
     try:
         fn()
@@ -2008,8 +1855,6 @@ def _raises(fn, exc_type):
         return False
     return False
 
-
-# ===== CLI =====
 def _curve_summary(curves):
     out = {}
     for name, (xs, ys) in curves.items():
@@ -2022,14 +1867,12 @@ def _curve_summary(curves):
         }
     return out
 
-
 def _cli_curve(path):
     curves = load_curves(path)
     print(json.dumps({"path": os.path.abspath(path),
                       "curves": _curve_summary(curves)},
                      ensure_ascii=False, indent=2))
     return 0
-
 
 def _cli_align(args):
     stage1 = load_run_best(args.stage1)
@@ -2054,9 +1897,7 @@ def _cli_align(args):
     print("report: %s" % md_path)
     return 0
 
-
 def _force_utf8_stdio():
-    """locale 把 stdio 留成 ASCII/GBK 时重包成 UTF-8（Python 3.6 无 reconfigure）。"""
     import io
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
@@ -2069,7 +1910,6 @@ def _force_utf8_stdio():
                     line_buffering=True))
             except Exception:
                 pass
-
 
 def main(argv=None):
     _force_utf8_stdio()
@@ -2092,7 +1932,6 @@ def main(argv=None):
         return _cli_align(args)
     ap.print_help()
     return 2
-
 
 if __name__ == "__main__":
     sys.exit(main())

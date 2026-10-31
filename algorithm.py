@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-'Search algorithms for the Virtuoso parameter optimizer.'
 import math
 import random
 
-# ---- Shared base contract and comparison helpers ----
-
 class AlgorithmBase(object):
-    'One black-box optimizer driven by ask/tell batches.'
     name = "base"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -61,15 +56,12 @@ class AlgorithmBase(object):
             self.best_y = value
             self.best_x = self._clip(list(pt))
     def ask(self, n=1):
-        """Return a batch of up to n candidate points (list of lists)."""
         raise NotImplementedError
     def tell(self, X, F, G=None):
-        'Report objectives for the points just asked, in order.'
         raise NotImplementedError
     def best(self):
         return (list(self.best_x), self.best_y)
     def snapshot(self):
-        """State dict including RNG state (needed for strict resume)."""
         return {
             "name": self.name,
             "eval_count": self.eval_count,
@@ -80,7 +72,6 @@ class AlgorithmBase(object):
             "last_restart_radius": self.last_restart_radius,
         }
     def restore(self, state):
-        """Restore from snapshot(). Subclasses extend then call this."""
         self.eval_count = state.get("eval_count", 0)
         self.restarts = state.get("restarts", 0)
         self.best_x = list(state.get("best_x", self.best_x))
@@ -89,13 +80,25 @@ class AlgorithmBase(object):
         if rng is not None:
             self.rng.setstate(rng)
         self.last_restart_radius = float(state.get("last_restart_radius", 0.0))
+    def _snap(self, **kw):
+        state = AlgorithmBase.snapshot(self)
+        state.update(kw)
+        return state
+    def _restore_common(self, state):  # RNG 先解包，再交给基类
+        st = dict(state)
+        if st.get("rng") is not None:
+            st["rng"] = _rng_unpack(st["rng"])
+        AlgorithmBase.restore(self, st)
+        return st
+    def _decay_radius(self, spread):  # 重启半径按 0.6^k 衰减
+        self.last_restart_radius = spread * (0.6 ** (self.restarts - 1))
+        return self.last_restart_radius
     def restart(self, spread=0.15):
         self.restarts += 1
         self.last_restart_radius = spread
     def simplex_size(self):
         return 0.0
     def seed_history(self, points):
-        'Warm-start from earlier evaluations without re-simulating them.'
         for item in points:
             if item is None:
                 continue
@@ -120,16 +123,12 @@ class AlgorithmBase(object):
             return (v, y)
         return sorted((p for p in points if p is not None), key=key)
 
-# ---- Shared comparison helpers (Deb feasibility rules + batch utilities) ----
-
 def constraint_violation(g):
-    """Total violation of a constraint vector (<=0 means feasible)."""
     if not g:
         return 0.0
     return sum(v for v in g if v > 0.0)
 
 def deb_better(fa, ga, fb, gb):
-    'True when a is better than b under Deb constraint domination.'
     va = constraint_violation(ga)
     vb = constraint_violation(gb)
     fa_ok = va <= 0.0
@@ -145,25 +144,20 @@ def deb_better(fa, ga, fb, gb):
     return sa < sb
 
 def scalar_of(f):
-    """Collapse F[i] to one float (weighted-ready single score)."""
     if isinstance(f, (list, tuple)):
         return sum(f)
     return f
-# ---- Registry: name -> algorithm class ----
 _REGISTRY = {}
 
 def register(name, cls):
-    """Register one algorithm class under a strategy name."""
     _REGISTRY[name] = cls
     return cls
 
 def available():
-    """Sorted list of registered strategy names."""
     return sorted(_REGISTRY)
 
 def create(name, names, bounds, x0=None, n_obj=1, n_constr=0,
            seed=0, budget=None, **opts):
-    """Build one algorithm instance by strategy name."""
     if name not in _REGISTRY:
         raise ValueError(
             "unknown strategy %r (have: %s)" % (name, ", ".join(available())))
@@ -171,10 +165,7 @@ def create(name, names, bounds, x0=None, n_obj=1, n_constr=0,
                            n_constr=n_constr, seed=seed, budget=budget,
                            **opts)
 
-# ---- Random and grid baselines ----
-
 def _latin_hypercube(count, n, rng):
-    """LHS sample of `count` points in the unit cube."""
     pts = [[0.0] * n for _ in range(count)]
     for j in range(n):
         perm = list(range(count))
@@ -184,17 +175,14 @@ def _latin_hypercube(count, n, rng):
     return pts
 
 def _rng_unpack(state):
-    """JSON-safe RNG state (list or tuple shape) -> setstate() tuple."""
     if state is None:
         return None
     return (int(state[0]), tuple(int(v) for v in state[1]), state[2])
 
 def _rng_pack(state):
-    """random.Random.getstate() -> JSON-safe list shape."""
     return [state[0], list(state[1]), state[2]]
 
 def _fix_snap_rng(snap):
-    """Copy a snapshot whose top-level "rng" entry is list-shaped."""
     if snap is None:
         return None
     out = dict(snap)
@@ -202,7 +190,6 @@ def _fix_snap_rng(snap):
     return out
 
 class _LhsFallback(object):
-    """LHS first batch, then uniform random (shared by random/grid)."""
     _lhs_done = False
     def _fallback_batch(self, count):
         if not self._lhs_done:
@@ -216,7 +203,6 @@ class _LhsFallback(object):
             self._record_best(pt, scalar_of(val))
 
 class RandomSearch(_LhsFallback, AlgorithmBase):
-    """Uniform random search with an LHS first batch (baseline fuse)."""
     name = "random"
     def ask(self, n=1):
         count = int(n)
@@ -224,17 +210,12 @@ class RandomSearch(_LhsFallback, AlgorithmBase):
             return []
         return self._fallback_batch(count)
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["lhs_done"] = self._lhs_done
-        return state
+        return self._snap(lhs_done=self._lhs_done)
     def restore(self, state):
-        state = dict(state)
-        state["rng"] = _rng_unpack(state.get("rng"))
-        AlgorithmBase.restore(self, state)
+        state = self._restore_common(state)
         self._lhs_done = bool(state.get("lhs_done", False))
 
 class GridSearch(_LhsFallback, AlgorithmBase):
-    """Lexicographic grid walk, random wrap-around; n>5 degrades to RandomSearch."""
     name = "grid"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -268,7 +249,6 @@ class GridSearch(_LhsFallback, AlgorithmBase):
             pts = nxt
         return pts
     def _rebuild_grid(self):
-        """Recompute the grid from `levels` (also after a resume)."""
         if self._fallback:
             self._grid = []
             return
@@ -296,24 +276,16 @@ class GridSearch(_LhsFallback, AlgorithmBase):
         self._pos += 1
         return idx
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["fallback"] = self._fallback
-        state["lhs_done"] = self._lhs_done
-        state["levels"] = self.levels
-        state["order"] = list(self._order)
-        state["pos"] = self._pos
-        return state
+        return self._snap(fallback=self._fallback, lhs_done=self._lhs_done,
+                          levels=self.levels, order=list(self._order),
+                          pos=self._pos)
     def restore(self, state):
-        state = dict(state)
-        state["rng"] = _rng_unpack(state.get("rng"))
-        AlgorithmBase.restore(self, state)
+        state = self._restore_common(state)
         self._fallback = bool(state.get("fallback", self.n > 5))
         self._lhs_done = bool(state.get("lhs_done", False))
         self.levels = int(state.get("levels", self.levels))
         self._order = list(state.get("order", self._order))
         self._pos = int(state.get("pos", 0))
-        # The grid is derived state: rebuild it from the snapshot's levels
-        # so restored order indices stay in range after a config change.
         self._rebuild_grid()
         if self._order and max(self._order) >= len(self._grid):
             self._order = list(range(len(self._grid)))
@@ -321,10 +293,7 @@ class GridSearch(_LhsFallback, AlgorithmBase):
 register("random", RandomSearch)
 register("grid", GridSearch)
 
-# ---- Bounded Nelder-Mead simplex ----
-
 class _UnitSpace(object):
-    """Shared unit-cube best tracker for the simplex/DE engines."""
     def _record_best(self, pt, value):
         if self.best_y is None or value < self.best_y:
             self.best_y = value
@@ -332,7 +301,6 @@ class _UnitSpace(object):
             self.best_x = self._to_real(pt)
 
 class NelderMead(_UnitSpace, AlgorithmBase):
-    """Bounded Nelder-Mead simplex (single point ask/tell)."""
     name = "simplex"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -376,10 +344,8 @@ class NelderMead(_UnitSpace, AlgorithmBase):
             return
         self._accept_candidate(value)
     def restart(self, spread=0.15):
-        'Restart the simplex around the best point.'
         self.restarts += 1
-        radius = spread * (0.6 ** (self.restarts - 1))
-        self.last_restart_radius = radius
+        radius = self._decay_radius(spread)
         self.simplex = [list(self._best_u)]
         for i in range(self.n):
             pt = list(self._best_u)
@@ -401,7 +367,6 @@ class NelderMead(_UnitSpace, AlgorithmBase):
         best = self.simplex[0]
         return sum((a - b) ** 2 for a, b in zip(worst, best)) ** 0.5
     def seed_history(self, points):
-        'Warm-start: rebuild the simplex from the best past points.'
         seeds = self._sort_seeds(points)
         if not seeds:
             return
@@ -420,24 +385,18 @@ class NelderMead(_UnitSpace, AlgorithmBase):
         self._shrink_pts = []
         self._shrink_idx = 0
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["best_u"] = list(self._best_u)
-        state["simplex"] = [list(p) for p in self.simplex]
-        state["values"] = list(self.values)
-        state["queue"] = [list(p) for p in self._queue]
-        state["phase"] = self._phase
-        state["shrink_pts"] = [list(p) for p in self._shrink_pts]
-        state["shrink_idx"] = self._shrink_idx
-        state["center"] = list(self._center)
-        state["xr"] = list(self._xr)
-        state["fr"] = self._fr
-        state["xe"] = list(self._xe)
-        state["xc"] = list(self._xc)
-        return state
+        return self._snap(
+            best_u=list(self._best_u),
+            simplex=[list(p) for p in self.simplex],
+            values=list(self.values),
+            queue=[list(p) for p in self._queue],
+            phase=self._phase,
+            shrink_pts=[list(p) for p in self._shrink_pts],
+            shrink_idx=self._shrink_idx,
+            center=list(self._center), xr=list(self._xr), fr=self._fr,
+            xe=list(self._xe), xc=list(self._xc))
     def restore(self, state):
-        state = dict(state)
-        state["rng"] = _rng_unpack(state.get("rng"))
-        AlgorithmBase.restore(self, state)
+        state = self._restore_common(state)
         self._best_u = list(state.get("best_u", self._to_unit(self.best_x)))
         self.simplex = [list(p) for p in state["simplex"]]
         self.values = list(state["values"])
@@ -523,7 +482,6 @@ class NelderMead(_UnitSpace, AlgorithmBase):
             self._replace_worst(self._xc, value)
             self._phase = "init"
             return
-        # Shrink all points toward the best point.
         pts = []
         for i in range(1, self.n + 1):
             pts.append(self._clip_u([
@@ -549,15 +507,7 @@ class NelderMead(_UnitSpace, AlgorithmBase):
         self._record_best(pt, value)
 register("simplex", NelderMead)
 
-
 class CoordinateSearch(_UnitSpace, AlgorithmBase):
-    """Compass/coordinate pattern search around x0.
-
-    One simulation per step, each axis tried +step then -step; a failed
-    pair halves that axis step.  Meant for EM alignment, where the new
-    target usually sits near x_opt and a global search would waste
-    expensive simulations.
-    """
     name = "coordinate"
 
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
@@ -604,7 +554,6 @@ class CoordinateSearch(_UnitSpace, AlgorithmBase):
             return [self._to_real(self.pending_pt)]
         pt = self._candidate()
         if pt == self.cur:
-            # At a bound: treat this direction as failed and try next.
             self._advance(False)
             pt = self._candidate()
         self.pending_pt = pt
@@ -621,7 +570,6 @@ class CoordinateSearch(_UnitSpace, AlgorithmBase):
             self._record_best(cand, value)
             self.cur = list(cand)
         if not self.started:
-            # First ask is x0 itself: record the baseline, then step.
             self.started = True
             self._record_best(self.cur, value)
         else:
@@ -658,11 +606,7 @@ class CoordinateSearch(_UnitSpace, AlgorithmBase):
         if rng is not None:
             self.rng.setstate(rng)
 
-
 register("coordinate", CoordinateSearch)
-
-
-# ---- Differential evolution (adaptive F/CR) ----
 
 def _trial_tuple(state):
     if state is None:
@@ -671,7 +615,6 @@ def _trial_tuple(state):
     return (items[0], items[1], list(items[2]))
 
 class DifferentialEvolution(_UnitSpace, AlgorithmBase):
-    'Global search: LHS + mixed DE/rand/1 and current-to-pbest/1.'
     name = "global"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -682,8 +625,6 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
         self.CR = 0.9
         self.popsize = max(8, 4 * self.n)
         self._best_u = self._to_unit(self.x0)
-        # LHS start, then pin the resume point into slot 0 so the
-        # driver evaluates it first.
         self.population = _latin_hypercube(self.popsize, self.n, self.rng)
         self.population[0] = list(self._best_u)
         self.pop_values = [None] * self.popsize
@@ -717,10 +658,8 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
             self.population[idx] = list(pt)
 
     def restart(self, spread=0.15):
-        'Re-seed the population around the best point.'
         self.restarts += 1
-        radius = spread * (0.6 ** (self.restarts - 1))
-        self.last_restart_radius = radius
+        radius = self._decay_radius(spread)
         if self.best_y is None:
             self.population = _latin_hypercube(self.popsize, self.n,
                                                self.rng)
@@ -752,7 +691,6 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
         return sum((a - b) ** 2
                    for a, b in zip(worst, self._best_u)) ** 0.5
     def seed_history(self, points):
-        'Warm-start: fill population slots with past evaluations.'
         seeds = self._sort_seeds(points)
         if not seeds:
             return
@@ -767,21 +705,16 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
             self.population[i] = list(pt)
             self.pop_values[i] = float(scalar_of(item[1]))
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["best_u"] = list(self._best_u)
-        state["F"] = self.F
-        state["CR"] = self.CR
-        state["popsize"] = self.popsize
-        state["population"] = [list(p) for p in self.population]
-        state["pop_values"] = list(self.pop_values)
-        state["current"] = _trial_tuple(self._current)
-        state["queue"] = [_trial_tuple(t) for t in self._queue]
-        state["next_trial"] = self._next_trial
-        return state
+        return self._snap(
+            best_u=list(self._best_u), F=self.F, CR=self.CR,
+            popsize=self.popsize,
+            population=[list(p) for p in self.population],
+            pop_values=list(self.pop_values),
+            current=_trial_tuple(self._current),
+            queue=[_trial_tuple(t) for t in self._queue],
+            next_trial=self._next_trial)
     def restore(self, state):
-        state = dict(state)
-        state["rng"] = _rng_unpack(state.get("rng"))
-        AlgorithmBase.restore(self, state)
+        state = self._restore_common(state)
         self._best_u = list(state.get("best_u", self._to_unit(self.best_x)))
         self.F = float(state.get("F", self.F))
         self.CR = float(state.get("CR", self.CR))
@@ -818,13 +751,10 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
         b = self.population[pool[1]]
         cur = self.population[i]
         if self.rng.random() < 0.5:
-            # DE/rand/1: explore the whole population.
             c = self.population[pool[2]]
             mutant = self._repair([a[d] + self.F * (b[d] - c[d])
                                    for d in range(n)])
         else:
-            # DE/current-to-pbest/1: exploit without collapsing
-            # onto the single best member.
             top = max(1, self.popsize // 4)
             order = sorted(range(self.popsize),
                            key=lambda t: self.pop_values[t])
@@ -842,7 +772,6 @@ class DifferentialEvolution(_UnitSpace, AlgorithmBase):
         return trial
 
 class AdaptiveDe(DifferentialEvolution):
-    'DE plus simplified SHADE: adaptive F/CR memory and parent archive.'
     name = "de"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -894,14 +823,11 @@ class AdaptiveDe(DifferentialEvolution):
         a = self.population[pool[0]]
         cur = self.population[i]
         if self.rng.random() < 0.5:
-            # DE/rand/1: explore the whole population.
             b = self.population[pool[1]]
             c = self.population[pool[2]]
             mutant = self._repair([a[d] + f * (b[d] - c[d])
                                    for d in range(n)])
         else:
-            # DE/current-to-pbest/1/archive/1: exploit with archived
-            # parents as extra difference sources.
             top = max(1, self.popsize // 4)
             order = sorted(range(self.popsize),
                            key=lambda t: self.pop_values[t])
@@ -957,7 +883,6 @@ class AdaptiveDe(DifferentialEvolution):
             return
         old = self.pop_values[idx]
         if value < old:
-            # Archive the replaced parent (SHADE) and remember F/CR.
             self._archive.append(list(self.population[idx]))
             while len(self._archive) > self._archive_max:
                 self._archive.pop(self.rng.randrange(len(self._archive)))
@@ -1004,10 +929,7 @@ class AdaptiveDe(DifferentialEvolution):
 register("global", DifferentialEvolution)
 register("de", AdaptiveDe)
 
-# ---- L-SHADE success-history DE ----
-
 class Lshade(AlgorithmBase):
-    """Success-history DE with linear population size reduction."""
     name = "lshade"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -1076,7 +998,6 @@ class Lshade(AlgorithmBase):
         idxs.sort(key=key)
         return idxs
     def seed_history(self, points):
-        """Warm-start: paste past evaluations into empty pop slots."""
         seeds = self._sort_seeds(points)
         if not seeds:
             return
@@ -1236,7 +1157,6 @@ class Lshade(AlgorithmBase):
                                      "F": f, "CR": cr, "x": list(x)})
                 out.append(list(x))
         while len(out) < n and not self.pop:
-            # fallback: nothing searchable left, feed random points
             pt = self._random_point()
             self.pending.append({"kind": "random", "idx": -1, "x": list(pt)})
             out.append(list(pt))
@@ -1347,32 +1267,22 @@ class Lshade(AlgorithmBase):
         return math.sqrt(total / len(self.pop))
 
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["population"] = [list(p) for p in self.pop]
-        state["pop_values"] = list(self.pop_f)
-        state["pop_g"] = [list(g) if g is not None else None
-                          for g in self.pop_g]
-        state["memory"] = {"f": list(self.mem_f), "cr": list(self.mem_cr),
-                           "k": self.mem_k}
-        state["archive"] = [list(p) for p in self.archive]
-        state["generation"] = self.generation
-        state["N_init"] = self.N_init
-        state["N_min"] = self.N_min
-        state["next_parent"] = self._next_parent
-        state["pending"] = [
-            {"kind": r["kind"], "idx": r["idx"], "x": list(r["x"]),
-             "F": r.get("F"), "CR": r.get("CR")}
-            for r in self.pending]
-        state["succ_buf"] = [[f, cr, w] for f, cr, w in self._succ_buf]
-        state["trials_since_mem"] = self._trials_since_mem
-        return state
-
+        return self._snap(
+            population=[list(p) for p in self.pop],
+            pop_values=list(self.pop_f),
+            pop_g=[list(g) if g is not None else None for g in self.pop_g],
+            memory={"f": list(self.mem_f), "cr": list(self.mem_cr),
+                    "k": self.mem_k},
+            archive=[list(p) for p in self.archive],
+            generation=self.generation, N_init=self.N_init,
+            N_min=self.N_min, next_parent=self._next_parent,
+            pending=[{"kind": r["kind"], "idx": r["idx"],
+                      "x": list(r["x"]), "F": r.get("F"),
+                      "CR": r.get("CR")} for r in self.pending],
+            succ_buf=[[f, cr, w] for f, cr, w in self._succ_buf],
+            trials_since_mem=self._trials_since_mem)
     def restore(self, state):
-        st = dict(state)
-        rng = st.get("rng")
-        if rng is not None:
-            st["rng"] = _rng_unpack(rng)
-        AlgorithmBase.restore(self, st)
+        st = self._restore_common(state)
         if "population" in st:
             self.pop = [list(p) for p in st["population"]]
         if "pop_values" in st:
@@ -1398,10 +1308,7 @@ class Lshade(AlgorithmBase):
         self._trials_since_mem = int(st.get("trials_since_mem", 0))
 register("lshade", Lshade)
 
-# ---- CMA-ES with IPOP-lite restarts ----
-
 def jacobi_eig(a):
-    'Cyclic Jacobi eigen-decomposition of a symmetric matrix.'
     n = len(a)
     m = [list(row) for row in a]
     b = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
@@ -1447,7 +1354,6 @@ def jacobi_eig(a):
     return evals, bo
 
 class CmaEs(AlgorithmBase):
-    """Standard CMA-ES driven by generational ask/tell batches."""
     name = "cmaes"
     ipop = False
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
@@ -1464,7 +1370,7 @@ class CmaEs(AlgorithmBase):
         if lam <= 0:
             lam = int(max(4.0 + 3.0 * math.log(max(self.n, 2)), 20.0))
             if budget is not None and budget < 200:
-                lam = 12  # small-budget mode (lambda in 10..15)
+                lam = 12
         self._set_lambda(int(lam))
         sigma0 = opts.get("sigma0", 0.15 * self._domain_scale)
         self.m = self._clip(list(self.x0))
@@ -1486,7 +1392,6 @@ class CmaEs(AlgorithmBase):
         self._gen_xs = []
 
     def seed_history(self, points):
-        'Warm-start: centre the search on the historical best.'
         seeds = self._sort_seeds(points)
         if not seeds:
             return
@@ -1561,7 +1466,6 @@ class CmaEs(AlgorithmBase):
                         acc += row[i] * self.D[i] * z[i]
                     x[j] = self.m[j] + self.sigma * acc
             x = self._repair(x)
-            # Use the repaired point so the update sees the true step y.
             y = [(x[j] - self.m[j]) / self.sigma for j in range(n)]
             self._pending.append([x, y])
             self._gen_xs.append(list(x))
@@ -1622,7 +1526,6 @@ class CmaEs(AlgorithmBase):
         ranked = [done[i] for i in order]
         m_old = list(self.m)
         sigma = self.sigma
-        # Recombination of the mu best points.
         new_m = [0.0] * n
         for i in range(self.mu):
             w = self.weights[i]
@@ -1631,7 +1534,6 @@ class CmaEs(AlgorithmBase):
                 new_m[j] += w * xi[j]
         dm = [(new_m[j] - m_old[j]) / sigma for j in range(n)]
         self.m = self._clip(new_m)
-        # Evolution path of sigma.
         cs = self.csigma
         if self.sep:
             cinv = [dm[j] / math.sqrt(max(self.Cdiag[j], 1e-20))
@@ -1643,7 +1545,6 @@ class CmaEs(AlgorithmBase):
         self.p_sigma = [(1.0 - cs) * ps[j] + pscale * cinv[j]
                         for j in range(n)]
         ps_norm = math.sqrt(sum(v * v for v in self.p_sigma))
-        # h_sigma indicator (pc update only along a successful path).
         self._gen_count += 1
         hsig = self._hsig(ps_norm)
         cc = self.cc
@@ -1652,7 +1553,6 @@ class CmaEs(AlgorithmBase):
         self.p_c = [(1.0 - cc) * pc[j] + hsig * cscale * dm[j]
                     for j in range(n)]
         delta_h = (1.0 - hsig) * cc * (2.0 - cc)
-        # Rank-mu covariance update on the scaled steps y.
         ys = [ranked[i][1] for i in range(self.mu)]
         if self.sep:
             for j in range(n):
@@ -1679,25 +1579,14 @@ class CmaEs(AlgorithmBase):
                     newC[j][k] = val
                     newC[k][j] = val
             self.C = newC
-        # Step-size update with a floor against underflow.
         self.sigma = self.sigma * math.exp(
             (cs / self.damps) * (ps_norm / self.chiN - 1.0))
         if self.sigma < self._sigma_floor:
             self.sigma = self._sigma_floor
         if not self.sep:
-            # One decomposition per generation keeps sampling aligned with
-            # the updated C; Jacobi on n<=50 is cheap enough in pure python.
             self._decompose()
         self._track_stagnation(ranked[0], ps_norm)
     def _hsig(self, ps_norm):
-        """h_sigma indicator (1 = normal step, 0 = outlier).
-
-        The denominator is the expected ||p_sigma|| scale with the
-        canonical 2*(g+1) exponent.  `_gen_count` is the 1-based
-        generation index at this point, so the exponent is 2*g; using
-        g/lambda (the old code) shrank the scale by sqrt(lambda) and
-        disabled the rank-one covariance path for the first generations.
-        """
         cs = self.csigma
         denom = math.sqrt(max(0.0, 1.0 - (1.0 - cs)
                               ** (2.0 * self._gen_count)))
@@ -1706,7 +1595,6 @@ class CmaEs(AlgorithmBase):
         return 1.0 if (ps_norm / denom / self.chiN
                        < (1.4 + 2.0 / (self.n + 1.0))) else 0.0
     def _track_stagnation(self, top, ps_norm):
-        """Update tolfunhist / ps-stagnation bookkeeping (IPOP trigger)."""
         self._hist.append(self.best_y if self.best_y is not None
                           else scalar_of(top[2]))
         if len(self._hist) > self.hist_window:
@@ -1734,14 +1622,12 @@ class CmaEs(AlgorithmBase):
         new_lam = min(2 * self.lam, 20 + 2 * self.n)
         if self.budget is not None:
             if self.eval_count + 2 * new_lam > self.budget:
-                return  # too little budget left to pay the restart back
+                return
         self.restart(spread=0.15)
 
     def restart(self, spread=0.15):
-        'Restart around best_x with decayed spread (unit-cube fraction).'
         self.restarts += 1
-        radius = spread * (0.6 ** (self.restarts - 1))
-        self.last_restart_radius = radius
+        radius = self._decay_radius(spread)
         self.sigma = max(radius * self._domain_scale, self._sigma_floor)
         if self.best_y is not None:
             self.m = self._clip(list(self.best_x))
@@ -1773,35 +1659,20 @@ class CmaEs(AlgorithmBase):
             acc += sum((p[j] - cen[j]) ** 2 for j in range(self.n))
         return math.sqrt(acc / k)
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state.update({
-            "m": list(self.m),
-            "sigma": self.sigma,
-            "C": [list(row) for row in self.C],
-            "B": [list(row) for row in self.B],
-            "D": list(self.D),
-            "Cdiag": list(self.Cdiag),
-            "sep": self.sep,
-            "p_sigma": list(self.p_sigma),
-            "p_c": list(self.p_c),
-            "lam": self.lam,
-            "mu": self.mu,
-            "weights": list(self.weights),
-            "gen_count": self._gen_count,
-            "hist": list(self._hist),
-            "ps_stall": self._ps_stall,
-            "stagnated": self.stagnated,
-            "pending": [[list(x), list(y)] for x, y in self._pending],
-            "done": [[list(x), list(y), f, g] for x, y, f, g in self._done],
-            "gen_xs": [list(p) for p in self._gen_xs],
-        })
-        return state
-
+        return self._snap(
+            m=list(self.m), sigma=self.sigma,
+            C=[list(row) for row in self.C],
+            B=[list(row) for row in self.B],
+            D=list(self.D), Cdiag=list(self.Cdiag), sep=self.sep,
+            p_sigma=list(self.p_sigma), p_c=list(self.p_c),
+            lam=self.lam, mu=self.mu, weights=list(self.weights),
+            gen_count=self._gen_count, hist=list(self._hist),
+            ps_stall=self._ps_stall, stagnated=self.stagnated,
+            pending=[[list(x), list(y)] for x, y in self._pending],
+            done=[[list(x), list(y), f, g] for x, y, f, g in self._done],
+            gen_xs=[list(p) for p in self._gen_xs])
     def restore(self, state):
-        st = dict(state)
-        if st.get("rng") is not None:
-            st["rng"] = _rng_unpack(st["rng"])
-        AlgorithmBase.restore(self, st)
+        st = self._restore_common(state)
         self.m = [float(v) for v in st["m"]]
         self.sigma = float(st["sigma"])
         self.C = [[float(v) for v in row] for row in st["C"]]
@@ -1824,13 +1695,10 @@ class CmaEs(AlgorithmBase):
         self._gen_xs = [[float(v) for v in p] for p in st["gen_xs"]]
 
 class CmaEsIpop(CmaEs):
-    """CMA-ES with IPOP-lite restarts on stagnation."""
     name = "cmaes_ipop"
     ipop = True
 register("cmaes", CmaEs)
 register("cmaes_ipop", CmaEsIpop)
-# ---- Tree-structured Parzen estimator ----
-# Candidate-pool and split constants (Bergstra et al. style TPE).
 _GAMMA = 0.25
 _MAX_CANDIDATES = 64
 _DIVERSITY_RADIUS = 0.05
@@ -1845,16 +1713,15 @@ def _logsumexp(values):
     return top + math.log(total)
 
 class TpeOptimizer(AlgorithmBase):
-    """Parzen-tree estimator: sample good-kernel candidates, take max l/g."""
     name = "tpe"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
         super(TpeOptimizer, self).__init__(
             names, bounds, x0=x0, n_obj=n_obj, n_constr=n_constr,
             seed=seed, budget=budget, **opts)
-        self._X = []   # evaluated points, real coordinates
-        self._Y = []   # scalar objective per point
-        self._G = []   # constraint vector per point, or None
+        self._X = []
+        self._Y = []
+        self._G = []
         mask = self.opts.get("integer_mask")
         if mask is not None and len(mask) != self.n:
             raise ValueError("integer_mask length mismatch")
@@ -1876,7 +1743,6 @@ class TpeOptimizer(AlgorithmBase):
             if g is None or constraint_violation(g) <= 0.0:
                 self._record_best(self._X[-1], y)
     def seed_history(self, points):
-        'Warm-start: every past evaluation joins the Parzen history.'
         for item in points:
             if item is None:
                 continue
@@ -1925,7 +1791,6 @@ class TpeOptimizer(AlgorithmBase):
             pts.append(self._to_real([cols[j][i] for j in range(self.n)]))
         return pts
     def _snap_integers(self, pt):
-        """Force integer-mask dimensions onto integral values in bounds."""
         mask = self.opts.get("integer_mask")
         if not mask:
             return pt
@@ -1946,7 +1811,6 @@ class TpeOptimizer(AlgorithmBase):
                     out[j] = float(v)
         return out
     def _bandwidths(self, unit_pts):
-        'Per-dim Scott bandwidth, floored by the TPE magic-clip rule.'
         m = len(unit_pts)
         floor = 1.0 / min(100.0, 1.0 + m)
         if floor < 1e-3:
@@ -2086,16 +1950,12 @@ class TpeOptimizer(AlgorithmBase):
             self._Y.append(float(self.best_y))
             self._G.append(None)
     def snapshot(self):
-        state = super(TpeOptimizer, self).snapshot()
-        state["rng"] = _rng_pack(self.rng.getstate())
-        state["samples"] = [list(p) for p in self._X]
-        state["values"] = list(self._Y)
-        state["constr"] = [None if g is None else list(g) for g in self._G]
-        return state
+        return self._snap(
+            rng=_rng_pack(self.rng.getstate()),
+            samples=[list(p) for p in self._X], values=list(self._Y),
+            constr=[None if g is None else list(g) for g in self._G])
     def restore(self, state):
-        st = dict(state)
-        st["rng"] = _rng_unpack(st.get("rng"))
-        super(TpeOptimizer, self).restore(st)
+        st = self._restore_common(state)
         self._X = [list(p) for p in st.get("samples", [])]
         self._Y = [float(v) for v in st.get("values", [])]
         raw = st.get("constr")
@@ -2107,7 +1967,6 @@ class TpeOptimizer(AlgorithmBase):
         if len(self._G) != len(self._X):
             self._G = (self._G + [None] * len(self._X))[:len(self._X)]
 register("tpe", TpeOptimizer)
-# ---- NSGA-II multi-objective GA ----
 INF = float("inf")
 
 def _jsonify(obj):
@@ -2120,7 +1979,6 @@ def _jsonify(obj):
     return obj
 
 class Nsga2(AlgorithmBase):
-    'NSGA-II for multi-objective problems (n_obj >= 2).'
     name = "nsga2"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -2141,15 +1999,14 @@ class Nsga2(AlgorithmBase):
             self.popsize = 24
         else:
             self.popsize = 40
-        self.pop = []          # evaluated parents, each {"x","f","g"}
-        self._gen = []         # evaluated offspring of current generation
-        self.archive = []      # feasible non-dominated records across runs
-        self._queue = []       # [(x, tag)] ready for ask(), tag init/gen
-        self._inflight = []    # tags of asked-but-not-told points
-        self._init_made = 0    # LHS points allocated so far
-        self._off_made = 0     # offspring allocated in current generation
+        self.pop = []
+        self._gen = []
+        self.archive = []
+        self._queue = []
+        self._inflight = []
+        self._init_made = 0
+        self._off_made = 0
     def seed_history(self, points):
-        'Warm-start: past evaluations join the initial parent pool.'
         seeds = self._sort_seeds(points)
         if not seeds:
             return
@@ -2203,7 +2060,6 @@ class Nsga2(AlgorithmBase):
             if len(self._gen) >= self.popsize:
                 self._select()
     def best(self):
-        """Return (archive_X, archive_F) of the Pareto archive."""
         xs = [list(r["x"]) for r in self.archive]
         fs = [list(r["f"]) for r in self.archive]
         return xs, fs
@@ -2242,7 +2098,6 @@ class Nsga2(AlgorithmBase):
                 self._off_made += 1
                 made += 1
     def _dominates(self, fa, ga, fb, gb):
-        """True when a constraint-dominates b (Deb 2000 rules)."""
         va = constraint_violation(ga)
         vb = constraint_violation(gb)
         a_ok = va <= 0.0
@@ -2441,22 +2296,14 @@ class Nsga2(AlgorithmBase):
         out["g"] = [] if not g else [float(v) for v in g]
         return out
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["rng"] = _rng_pack(state["rng"])
-        state["pop"] = _jsonify(self.pop)
-        state["gen"] = _jsonify(self._gen)
-        state["archive"] = _jsonify(self.archive)
-        state["queue"] = _jsonify(self._queue)
-        state["inflight"] = list(self._inflight)
-        state["init_made"] = self._init_made
-        state["off_made"] = self._off_made
-        state["popsize"] = self.popsize
-        return state
+        return self._snap(
+            rng=_rng_pack(self.rng.getstate()), pop=_jsonify(self.pop),
+            gen=_jsonify(self._gen), archive=_jsonify(self.archive),
+            queue=_jsonify(self._queue), inflight=list(self._inflight),
+            init_made=self._init_made, off_made=self._off_made,
+            popsize=self.popsize)
     def restore(self, state):
-        st = dict(state)
-        if st.get("rng") is not None:
-            st["rng"] = _rng_unpack(st["rng"])
-        AlgorithmBase.restore(self, st)
+        st = self._restore_common(state)
         self.popsize = int(state.get("popsize", self.popsize))
         self.pop = [self._norm_record(r) for r in state.get("pop", [])]
         self._gen = [self._norm_record(r) for r in state.get("gen", [])]
@@ -2468,10 +2315,7 @@ class Nsga2(AlgorithmBase):
         self._off_made = int(state.get("off_made", 0))
 register("nsga2", Nsga2)
 
-# ---- Scalarisation wrappers (weighted / worstspec) ----
-
 def weighted(f_list, weights=None):
-    """Weighted average of objective values (minimisation score)."""
     vals = [float(v) for v in f_list]
     if not vals:
         return 0.0
@@ -2487,16 +2331,12 @@ def weighted(f_list, weights=None):
     return sum(wi * vi for wi, vi in zip(w, vals)) / total
 
 def worstspec(errors):
-    """Worst-spec score: largest error/violation (minimise the max)."""
     vals = [float(v) for v in errors]
     if not vals:
         return 0.0
     return max(vals)
 
-# ---- Wrappers: scalarise multi-objective F, delegate search to one engine ----
-
 class _ScalarWrapper(AlgorithmBase):
-    """Single-objective engine fed with scalarised multi-objective F."""
     name = "scalar_wrapper"
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
@@ -2547,53 +2387,43 @@ class _ScalarWrapper(AlgorithmBase):
     def best(self):
         return self.inner.best()
     def restart(self, spread=0.15):
-        'Restart the inner engine, not only the wrapper counters.'
         self.restarts += 1
         self.last_restart_radius = spread
         self.inner.restart(spread)
     def simplex_size(self):
         return self.inner.simplex_size()
     def snapshot(self):
-        state = AlgorithmBase.snapshot(self)
-        state["rng"] = _rng_pack(state["rng"])
-        state["weights"] = None if self.weights is None else list(self.weights)
-        state["inner"] = _jsonify(self.inner.snapshot())
-        return state
+        return self._snap(
+            rng=_rng_pack(self.rng.getstate()),
+            weights=None if self.weights is None else list(self.weights),
+            inner=_jsonify(self.inner.snapshot()))
     def restore(self, state):
-        st = dict(state)
-        if st.get("rng") is not None:
-            st["rng"] = _rng_unpack(st["rng"])
+        st = self._restore_common(state)
         w = st.get("weights", None)
         self.weights = None if w is None else [float(v) for v in w]
-        AlgorithmBase.restore(self, st)
         inner_state = state.get("inner")
         if inner_state is not None:
             self.inner.restore(_fix_snap_rng(inner_state))
 
 class WeightedScalar(_ScalarWrapper):
-    """Weighted-sum wrapper: multi-objective F -> one weighted score."""
     name = "weighted"
     def _scalar(self, f_vals):
         return weighted(f_vals, self.weights)
 
 class WorstspecScalar(_ScalarWrapper):
-    """Worst-spec wrapper: multi-objective F -> max objective error."""
     name = "worstspec"
     def _scalar(self, f_vals):
         return worstspec(f_vals)
 register("weighted", WeightedScalar)
 register("worstspec", WorstspecScalar)
 
-# ---- Multi-line racing portfolio ----
-
 class Portfolio(AlgorithmBase):
-    """Races member optimisers under a UCB budget scheduler."""
     name = "portfolio"
-    WINDOW = 30       # W: improvement look-back per line
-    RESCHED = 10      # evaluations between UCB recomputes
-    BATCH_CAP = 4     # max points dispatched per ask
-    GUARANTEE = 0.15  # share of B each line gets up front
-    ZERO_LIMIT = 2    # stagnant windows before a line is paused
+    WINDOW = 30
+    RESCHED = 10
+    BATCH_CAP = 4
+    GUARANTEE = 0.15
+    ZERO_LIMIT = 2
     def __init__(self, names, bounds, x0=None, n_obj=1, n_constr=0,
                  seed=0, budget=None, **opts):
         AlgorithmBase.__init__(self, names, bounds, x0=x0, n_obj=n_obj,
@@ -2614,7 +2444,7 @@ class Portfolio(AlgorithmBase):
         self.zero_windows = [0] * k
         self.paused = [False] * k
         self.line_best = [None] * k
-        self.hist = [[] for _ in range(k)]  # (cum_evals, line_best) per line
+        self.hist = [[] for _ in range(k)]
         self._win_best = [None] * k
         self._win_cons = [0] * k
         self.ucb_scores = [0.0] * k
@@ -2623,10 +2453,9 @@ class Portfolio(AlgorithmBase):
         self.wake_count = 0
         self._m_restarts = [0] * k
         self._last_sched = 0
-        self._batches = []  # (member_index, [points]) awaiting tell
-        self._archive = []  # (x, f_vec) running Pareto archive (n_obj>1)
+        self._batches = []
+        self._archive = []
     def seed_history(self, points):
-        'Warm-start: every member line learns from the whole history.'
         seeds = [p for p in points if p is not None]
         if not seeds:
             return
@@ -2764,7 +2593,6 @@ class Portfolio(AlgorithmBase):
         return best_i
 
     def ask(self, n=1):
-        """Route a small batch to one active line (deficit then UCB)."""
         n = int(n)
         if n <= 0 or self.n_members == 0:
             return []
@@ -2792,7 +2620,6 @@ class Portfolio(AlgorithmBase):
         return [list(p) for p in pts]
 
     def tell(self, X, F, G=None):
-        'Feed objectives back to the owning member lines, in order.'
         if not self._batches:
             return
         total = sum(len(pts) for _, pts in self._batches)
@@ -2833,7 +2660,6 @@ class Portfolio(AlgorithmBase):
         if self.eval_count - self._last_sched >= self.RESCHED:
             self._schedule()
     def best(self):
-        """Single objective: best (x, y) across lines; multi: merged front."""
         if self.n_obj > 1:
             return self._merged_front()
         bx, by = None, None
@@ -2947,9 +2773,7 @@ class Portfolio(AlgorithmBase):
         return state
 
     def restore(self, state):
-        st = dict(state)
-        st["rng"] = _rng_unpack(st.get("rng"))
-        AlgorithmBase.restore(self, st)
+        st = self._restore_common(state)
         snaps = st.get("members") or []
         for i, snap in enumerate(snaps):
             if i < len(self.members):
@@ -2980,9 +2804,6 @@ class Portfolio(AlgorithmBase):
         self._archive = [(list(x), list(f))
                          for x, f in (st.get("archive") or [])]
 register("portfolio", Portfolio)
-# ---- Human-readable descriptions (GUI 算法说明) ----
-# keys: short=one-liner, how=working principle, when=use cases,
-#       pro=strengths, con=limits, hist=how past evaluations are used.
 DESCRIPTIONS = {
     "simplex": {
         "title": "单纯形 / Nelder-Mead (simplex)", "short": "有界单纯形局部搜索，默认策略",
@@ -3099,7 +2920,6 @@ DESCRIPTIONS = {
 }
 
 def help_text():
-    """Full Chinese help text covering every registered strategy."""
     lines = [
         "算法说明 (v05)",
         "",

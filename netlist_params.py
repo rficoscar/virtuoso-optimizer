@@ -1,38 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Hierarchy-aware parameter patcher for Spectre/SPICE netlists.
-
-Two layers:
-
-* ``parse_netlist_parameters`` / ``rewrite_netlist_parameters`` keep the
-  legacy meaning used by the compact deck log (top level parameters only).
-* ``inspect_netlist`` / ``patch_netlist`` understand subckt scopes and
-  instance parameters, so a config view netlist can really be retuned.
-
-Rules implemented by :func:`patch_netlist`:
-
-1. Top level ``parameters`` statements: every occurrence of a target is
-   rewritten in place.  Targets absent from the top level are merged into
-   the first top ``parameters`` statement (or a new statement is inserted
-   after ``simulator`` / ``global``).
-2. Subckt ``parameters`` with an explicit default (``name=value``) are
-   rewritten unless ``options["patch_subckts"]`` is false or ``scope_map``
-   excludes the scope.  A bare declaration (``parameters Ls Rs``) is left
-   alone: the top value passes through.
-3. Instance parameters (``X1 (a b) cell w=4u``) are rewritten when the
-   value is a numeric/engineering literal.  Expressions and ``w=w`` self
-   references are skipped (they inherit from the enclosing scope).
-   Controlled by ``options["patch_instances"]``.
-4. A name found nowhere is reported in ``missing`` and makes ``ok`` false.
-5. ``include`` targets are never opened or modified.
-6. Backslash and ``+`` continuations, comments and indentation survive
-   because patches are token-span edits, not line rebuilds.
-
-Python 3.6, standard library only, UTF-8 explicitly.
-"""
 
 import json
 import math
-import os
 import re
 import sys
 
@@ -46,10 +15,6 @@ __all__ = [
     "format_eng",
 ]
 
-# ---------------------------------------------------------------------------
-# numbers
-# ---------------------------------------------------------------------------
-
 _ENG_SUFFIX = {
     "t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3,
     "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12,
@@ -60,9 +25,7 @@ _NUM_RE = re.compile(
     r"^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
     r"([A-Za-z]*)$")
 
-
 def parse_value(text):
-    """Parse an engineering literal ('4u', '1e-3', '2.5meg') to float."""
     match = _NUM_RE.match(str(text).strip())
     if not match:
         raise ValueError("bad number: %s" % text)
@@ -74,21 +37,12 @@ def parse_value(text):
         scale = _ENG_SUFFIX[suffix]
     return float(match.group(1)) * scale
 
-
 _NON_FINITE_TEXT = frozenset((
     "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
     "nan", "+nan", "-nan",
 ))
 
-
 def _is_finite(value):
-    """False for inf/nan/overflowing numbers; expressions stay allowed.
-
-    ``1e999`` parses to inf and a huge JSON integer overflows ``float``;
-    writing ``infT`` into a deck would be reported as a successful patch
-    while spectre cannot parse it.  Non-numeric strings (``2*pi``) are
-    expressions, not numbers, so they pass through.
-    """
     if isinstance(value, bool):
         return True
     if isinstance(value, (int, float)):
@@ -106,9 +60,7 @@ def _is_finite(value):
     except (ValueError, OverflowError):
         return True
 
-
 def format_eng(value):
-    """Format a float as an engineering string (same shape as optimizer)."""
     try:
         value = float(value)
     except (OverflowError, TypeError, ValueError):
@@ -126,9 +78,7 @@ def format_eng(value):
             return "%s%g%s" % (sign, value / scale, suffix)
     return "%s%g" % (sign, value)
 
-
 def format_value(value):
-    """Numeric/engineering value to compact text; other strings verbatim."""
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, (int, float)):
@@ -148,9 +98,7 @@ def format_value(value):
     except (OverflowError, ValueError):
         return ""
 
-
 def _format_fixed(value):
-    """Fixed values keep caller spelling (may be an expression)."""
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, (int, float)):
@@ -162,11 +110,6 @@ def _format_fixed(value):
         return ""
     return str(value).strip()
 
-
-# ---------------------------------------------------------------------------
-# line / token scanning
-# ---------------------------------------------------------------------------
-
 _KEYWORDS = frozenset("""
 simulator global include ahdl_include hdl_include parameters subckt ends
 inline model library endlibrary section endsection statistics process
@@ -176,17 +119,11 @@ tran ac dc noise sp pss hb envlp xf sens pz stb dcmatch acmatch sweep
 load pull correlate mismatch montecarlo
 """.split())
 
-# `ac1 ac start=...` style analysis statements: the second token is the
-# analysis type.  Their `name=value` pairs must never be patched.
-# Keep in sync with optimizer._ANALYSIS_KEYWORDS; a type missing here makes
-# a named analysis look like an instance, so its options are treated as
-# design parameters.
 _ANALYSIS = frozenset("""
 ac acmatch acnoise dc dcmatch dcop disto envlp fourier hb hbac hbnoise hbsp
 montecarlo mpde noise pac pacnoise pnoise pss pstb psp pz ql sens sp
 spnoise stb sweep sweephb tf tran xf
 """.split())
-
 
 def _split_lines(text):
     lines = text.splitlines(keepends=True)
@@ -197,7 +134,6 @@ def _split_lines(text):
         pos += len(line)
     return lines, starts
 
-
 def _body(line):
     body = line
     if body.endswith("\n"):
@@ -206,9 +142,7 @@ def _body(line):
         body = body[:-1]
     return body
 
-
-def _mask_block_comments(text):
-    """Blank /* ... */ outside quotes, keeping length and newlines."""
+def _mask_block_comments(text):  # 掩码必须等长替换，偏移才不漂移
     out = list(text)
     in_block = False
     quote = None
@@ -243,7 +177,6 @@ def _mask_block_comments(text):
             i += 2
             continue
         if ch == "/" and i + 1 < n and text[i + 1] == "/":
-            # line comment: skip to end of line without touching quotes
             i += 2
             while i < n and text[i] not in "\r\n":
                 i += 1
@@ -251,9 +184,7 @@ def _mask_block_comments(text):
         i += 1
     return "".join(out)
 
-
 def _comment_index(body):
-    """Index where a // comment starts, or len(body)."""
     quote = None
     i = 0
     n = len(body)
@@ -269,7 +200,6 @@ def _comment_index(body):
         i += 1
     return n
 
-
 def _code_of(body):
     stripped = body.lstrip()
     if not stripped:
@@ -279,9 +209,7 @@ def _code_of(body):
         return ""
     return body[:_comment_index(body)]
 
-
 def _tokenize(code, base):
-    """Whitespace split that respects quotes and (), [], {} grouping."""
     tokens = []
     n = len(code)
     i = 0
@@ -311,9 +239,7 @@ def _tokenize(code, base):
         tokens.append((code[start:i], base + start, base + i))
     return tokens
 
-
 def _balance(code):
-    """Unclosed (), [], {} count of one code line (quotes respected)."""
     depth = 0
     quote = None
     for ch in code:
@@ -328,9 +254,7 @@ def _balance(code):
             depth -= 1
     return depth
 
-
 def _parse(text):
-    """Split text into logical statements with absolute token spans."""
     masked = _mask_block_comments(text)
     lines, starts = _split_lines(masked)
     stmts = []
@@ -377,9 +301,7 @@ def _parse(text):
         i = j + 1
     return masked, lines, starts, stmts
 
-
 def _assign_parts(tok):
-    """Split one 'name=value' token; None when there is no top level '='."""
     text, start, end = tok
     quote = None
     depth = 0
@@ -409,9 +331,7 @@ def _assign_parts(tok):
             }
     return None
 
-
 def _param_entries(stmt, start=1, allow_bare=True):
-    """name/value entries of a parameters statement (or subckt header)."""
     out = []
     for tok in stmt["tokens"][start:]:
         parts = _assign_parts(tok)
@@ -432,7 +352,6 @@ def _param_entries(stmt, start=1, allow_bare=True):
             "value_end": None,
         })
     return out
-
 
 def _classify(stmt):
     toks = stmt["tokens"]
@@ -471,7 +390,6 @@ def _classify(stmt):
     stmt["kind"] = "instance"
     stmt["name"] = toks[0][0]
 
-
 def _instance_info(stmt):
     toks = stmt["tokens"]
     name = toks[0][0]
@@ -479,7 +397,6 @@ def _instance_info(stmt):
     master = None
     index = 0
     if rest and rest[0][0].startswith("("):
-        # node list, possibly wrapped over several physical lines
         depth = rest[0][0].count("(") - rest[0][0].count(")")
         index = 1
         while index < len(rest) and depth > 0:
@@ -502,7 +419,6 @@ def _instance_info(stmt):
         "scope": None,
     }
 
-
 def _include_info(stmt):
     toks = stmt["tokens"]
     if len(toks) < 2:
@@ -512,9 +428,7 @@ def _include_info(stmt):
         path = path[1:-1]
     return {"path": path, "line": stmt["first"], "kind": toks[0][0].lower()}
 
-
 def _analyze(text):
-    """Parse once, returning statements, scopes, instances and includes."""
     masked, lines, starts, stmts = _parse(text)
     scopes = []
     top_stmts = []
@@ -573,13 +487,7 @@ def _analyze(text):
         "includes": includes,
     }
 
-
-# ---------------------------------------------------------------------------
-# legacy compatible API
-# ---------------------------------------------------------------------------
-
 def parse_netlist_parameters(text):
-    """Top level parameters as {name: raw value}; bare names map to ''."""
     info = _analyze("" if text is None else str(text))
     out = {}
     for idx in info["top_stmts"]:
@@ -587,13 +495,7 @@ def parse_netlist_parameters(text):
             out[entry["name"]] = "" if entry["value"] is None else entry["value"]
     return out
 
-
 def rewrite_netlist_parameters(text, line):
-    """Replace every top level parameters statement with one ``line``.
-
-    Returns ``(new_text, replaced_count)``; legacy byte layout is kept so
-    existing compact deck records still reconstruct.
-    """
     text = "" if text is None else str(text)
     info = _analyze(text)
     spans = []
@@ -616,20 +518,7 @@ def rewrite_netlist_parameters(text, line):
         new_text += "\n"
     return new_text, len(spans)
 
-
-# ---------------------------------------------------------------------------
-# inspect
-# ---------------------------------------------------------------------------
-
 def inspect_netlist(text):
-    """Structure of a netlist: top params, scopes, instances, includes.
-
-    ``scopes`` starts with the ``top`` pseudo scope (kind ``top``); each
-    subckt scope carries the physical line range [start, end] (0 based,
-    inclusive) of its ``subckt`` .. ``ends`` block.  Parameters without an
-    explicit default are reported as ``None``.  Instance parameter values
-    come with ``[start, end]`` character offsets into ``text``.
-    """
     text = "" if text is None else str(text)
     info = _analyze(text)
     stmts = info["stmts"]
@@ -683,11 +572,6 @@ def inspect_netlist(text):
         "includes": [inc["path"] for inc in info["includes"]],
     }
 
-
-# ---------------------------------------------------------------------------
-# patch
-# ---------------------------------------------------------------------------
-
 def _option_bool(value, default):
     if value is None:
         return default
@@ -701,7 +585,6 @@ def _option_bool(value, default):
     if text in ("0", "false", "no", "off", "n", ""):
         return False
     return default
-
 
 def _normalize_scope_map(raw):
     out = {}
@@ -718,7 +601,6 @@ def _normalize_scope_map(raw):
         out[str(key)] = cleaned
     return out
 
-
 def _valid_location(loc):
     if loc in ("top", "sub", "sub:*", "inst", "instance", "inst:*"):
         return True
@@ -727,7 +609,6 @@ def _valid_location(loc):
     if loc.startswith("inst:") and len(loc) > 5:
         return True
     return False
-
 
 def _allows(scope_map, name, kind, scope_name):
     if name not in scope_map:
@@ -747,7 +628,6 @@ def _allows(scope_map, name, kind, scope_name):
         return False
     return True
 
-
 def _unique(items):
     seen = set()
     out = []
@@ -757,13 +637,10 @@ def _unique(items):
             out.append(item)
     return out
 
-
 def _eol_of(text):
     return "\r\n" if "\r\n" in text else "\n"
 
-
 def _append_offset(stmt, lines, starts):
-    """Offset where extra tokens can join the statement's last code line."""
     index = stmt["last"]
     body = _body(lines[index])
     code = _code_of(body)
@@ -775,21 +652,13 @@ def _append_offset(stmt, lines, starts):
             rel -= 1
     return starts[index] + rel
 
-
-def _apply_edits(text, edits):
+def _apply_edits(text, edits):  # 从后往前替换，前部偏移不受影响
     for start, end, replacement in sorted(
             edits, key=lambda item: (item[0], item[1]), reverse=True):
         text = text[:start] + replacement + text[end:]
     return text
 
-
 def patch_netlist(text, values, fixed=None, options=None):
-    """Rewrite parameters everywhere they really matter.
-
-    ``values`` are the tuned variables, ``fixed`` the constants that must
-    also be written at the top level (their spelling is kept).  Returns
-    ``(new_text, report)``; ``report`` follows the design contract.
-    """
     text = "" if text is None else str(text)
     values = dict(values or {})
     fixed = dict(fixed or {})
@@ -850,7 +719,6 @@ def patch_netlist(text, values, fixed=None, options=None):
     invalid = _unique(invalid)
     for name in list(invalid):
         if name in targets and target_kind.get(name) != "fixed":
-            # a valid values entry wins over an invalid fixed entry
             invalid.remove(name)
 
     for name in scope_map:
@@ -868,7 +736,6 @@ def patch_netlist(text, values, fixed=None, options=None):
     lines = info["lines"]
     starts = info["starts"]
 
-    # -- where does every name occur? -------------------------------------
     found = set()
     top_present = set()
     for idx in top_ids:
@@ -906,7 +773,6 @@ def patch_netlist(text, values, fixed=None, options=None):
         if location not in entry["locations"]:
             entry["locations"].append(location)
 
-    # -- rule 1: top level statements -------------------------------------
     for idx in top_ids:
         stmt = stmts[idx]
         for entry in _param_entries(stmt, 1, True):
@@ -969,7 +835,6 @@ def patch_netlist(text, values, fixed=None, options=None):
                 note(name, "top")
                 counts["top"] += 1
 
-    # -- rule 2: subckt defaults ------------------------------------------
     for scope in scopes:
         scope_name = scope["name"]
         for idx in scope["stmts"]:
@@ -981,7 +846,6 @@ def patch_netlist(text, values, fixed=None, options=None):
                 if name not in targets:
                     continue
                 if entry["value"] is None:
-                    # bare declaration: the top value passes through
                     continue
                 key = (name, scope_name)
                 if key not in seen_shadow:
@@ -1005,7 +869,6 @@ def patch_netlist(text, values, fixed=None, options=None):
                     counts["subckt"] += 1
                 note(name, "sub:%s" % scope_name)
 
-    # -- rule 3: literal instance overrides -------------------------------
     for instance in info["instances"]:
         for key, (old_value, span) in instance["params"].items():
             if key not in targets:
@@ -1020,7 +883,6 @@ def patch_netlist(text, values, fixed=None, options=None):
             if old_value is None:
                 continue
             if old_value == key:
-                # self reference: inherits from the enclosing scope
                 continue
             try:
                 parse_value(old_value)
@@ -1042,7 +904,6 @@ def patch_netlist(text, values, fixed=None, options=None):
                 })
             note(key, "inst:%s.%s" % (instance["name"], key))
 
-    # -- rule 4: nothing reachable ----------------------------------------
     for name in targets:
         if name in applied or name in missing:
             continue
@@ -1054,8 +915,6 @@ def patch_netlist(text, values, fixed=None, options=None):
     missing = _unique(missing)
 
     new_text = _apply_edits(text, edits)
-    if not missing:
-        pass
     report = {
         "ok": not missing,
         "applied": applied,
@@ -1067,9 +926,7 @@ def patch_netlist(text, values, fixed=None, options=None):
     }
     return new_text, report
 
-
 def _new_statement_offset(stmts, lines, starts, text):
-    """Where a brand new top level parameters statement should go."""
     anchor = None
     for stmt in stmts:
         if stmt["kind"] != "directive" or stmt["depth"] != 0:
@@ -1085,11 +942,6 @@ def _new_statement_offset(stmts, lines, starts, text):
         if stmt["kind"] != "blank":
             return starts[stmt["first"]]
     return len(text)
-
-
-# ---------------------------------------------------------------------------
-# self test
-# ---------------------------------------------------------------------------
 
 _DECK_LINES = [
     "// top of deck, comment mentions w=9u l=9u",
@@ -1174,7 +1026,6 @@ _MULTILINE = "\n".join([
     "",
 ])
 
-
 def _selftest():
     results = []
 
@@ -1186,7 +1037,6 @@ def _selftest():
         else:
             print("[FAIL] %s%s" % (name, (": " + detail) if detail else ""))
 
-    # -- numbers ----------------------------------------------------------
     check("format 4e-6 -> 4u", format_value(4e-6) == "4u",
           format_value(4e-6))
     check("format 0", format_value(0) == "0")
@@ -1212,7 +1062,6 @@ def _selftest():
     except ValueError:
         check("format huge int rejected", True)
 
-    # -- non-finite values are refused, never written as infT ------------
     for bad in (float("inf"), float("-inf"), float("nan"), 10 ** 400,
                 "1e999", "nan"):
         bad_text, bad_report = patch_netlist("parameters w=1u\n", {"w": bad})
@@ -1230,7 +1079,6 @@ def _selftest():
     check("non-finite fixed leaves text",
           fixed_bad_text == "parameters nf=2\n", fixed_bad_text)
 
-    # -- inspect ----------------------------------------------------------
     info = inspect_netlist(DECK)
     top = info["top_params"]
     check("inspect top w", top.get("w") == "1u", str(top))
@@ -1262,14 +1110,12 @@ def _selftest():
     check("inspect includes",
           info["includes"] == ["/pdk/models.scs"], str(info["includes"]))
 
-    # -- legacy parse -----------------------------------------------------
     parsed = parse_netlist_parameters(DECK)
     check("parse top params", parsed == {"w": "1u", "l": "0.1u", "nf": "2"},
           str(parsed))
     check("parse top ignores subckt",
           "Ls" not in parsed and "Rs" not in parsed, str(parsed))
 
-    # -- legacy rewrite ---------------------------------------------------
     rewritten, replaced = rewrite_netlist_parameters(
         DECK, "parameters w=2u l=0.2u nf=3")
     check("rewrite count", replaced == 1, str(replaced))
@@ -1286,7 +1132,6 @@ def _selftest():
     check("rewrite without top is a no-op",
           no_top_count == 0 and no_top_text == _NO_TOP)
 
-    # -- patch: top, subckt, instance -------------------------------------
     new_text, report = patch_netlist(
         DECK, {"w": 4e-6, "l": 2e-7, "nf": 3, "Ls": 3e-9})
     check("patch ok", report["ok"] is True, str(report["missing"]))
@@ -1327,7 +1172,6 @@ def _selftest():
           any("I1.l=Ls" in text for text in report["warnings"]),
           str(report["warnings"]))
 
-    # -- idempotent -------------------------------------------------------
     again, report2 = patch_netlist(
         new_text, {"w": 4e-6, "l": 2e-7, "nf": 3, "Ls": 3e-9})
     check("patch idempotent", again == new_text)
@@ -1335,7 +1179,6 @@ def _selftest():
           report2["counts"] == {"top": 0, "subckt": 0, "instance": 0},
           str(report2["counts"]))
 
-    # -- bare declarations ------------------------------------------------
     bare_text, bare_report = patch_netlist(_BARE, {"w": 4e-6, "Ls": 2e-9})
     check("bare top declaration", "parameters w=4u Ls=2n" in bare_text,
           _line_with(bare_text, "parameters "))
@@ -1345,7 +1188,6 @@ def _selftest():
           bare_report["counts"] == {"top": 2, "subckt": 0, "instance": 0},
           str(bare_report["counts"]))
 
-    # -- no top parameters ------------------------------------------------
     inserted, insert_report = patch_netlist(_NO_TOP, {"Ls": 2e-9})
     lines = inserted.splitlines()
     check("insert after global", len(lines) > 2
@@ -1360,7 +1202,6 @@ def _selftest():
           == ["top", "sub:foo", "inst:X1.Ls"],
           str(insert_report["applied"]["Ls"]))
 
-    # -- variable only at an instance ------------------------------------
     inst_text, inst_report = patch_netlist(_INST_ONLY, {"Ls": 2e-9})
     inst_lines = inst_text.splitlines()
     check("instance only inserts top",
@@ -1372,7 +1213,6 @@ def _selftest():
           == ["top", "inst:X1.Ls"],
           str(inst_report["applied"]["Ls"]))
 
-    # -- analysis statements are not instances ---------------------------
     analysis_info = inspect_netlist(_ANALYSIS_DECK)
     inst_names = [inst["name"] for inst in analysis_info["instances"]]
     check("analysis not an instance", inst_names == ["X1"], str(inst_names))
@@ -1390,9 +1230,6 @@ def _selftest():
           analysis_report["counts"] == {"top": 1, "subckt": 0, "instance": 1},
           str(analysis_report["counts"]))
 
-    # -- named analyses of every supported type --------------------------
-    # ADE writes `<name> <type> ...`; a type missing from _ANALYSIS makes
-    # the statement look like an instance whose options get patched.
     named_analyses = "\n".join([
         "simulator lang=spectre",
         "parameters dec=20",
@@ -1423,7 +1260,6 @@ def _selftest():
           and option_report["missing"] == ["start"],
           str(option_report["missing"]))
 
-    # -- multi-line node list without + / \ ------------------------------
     multi_info = inspect_netlist(_MULTILINE)
     multi_inst = multi_info["instances"][0]
     check("multiline instance name", multi_inst["name"] == "X1",
@@ -1442,17 +1278,12 @@ def _selftest():
           multi_report["counts"] == {"top": 2, "subckt": 1, "instance": 1},
           str(multi_report["counts"]))
 
-    # -- missing ----------------------------------------------------------
     same_text, missing_report = patch_netlist(DECK, {"nope": 1.0})
     check("missing ok false", missing_report["ok"] is False)
     check("missing list", missing_report["missing"] == ["nope"],
           str(missing_report["missing"]))
     check("missing leaves text", same_text == DECK)
 
-    # -- scope_map --------------------------------------------------------
-    # Use a target value different from both the top (1u) and instance
-    # (4u) spellings, otherwise "instance untouched" would pass merely
-    # because the old value already equals the formatted target.
     scoped, scoped_report = patch_netlist(
         DECK, {"w": 6e-6},
         options={"scope_map": {"w": ["sub:xfmr_tap"]}})
@@ -1474,7 +1305,6 @@ def _selftest():
           any("bogus" in warning for warning in bad_report["warnings"]),
           str(bad_report["warnings"]))
 
-    # -- options ----------------------------------------------------------
     no_inst, no_inst_report = patch_netlist(
         DECK, {"w": 5e-6}, options={"patch_instances": False})
     check("patch_instances false keeps literal",
@@ -1492,7 +1322,6 @@ def _selftest():
               for warning in no_sub_report["warnings"]),
           str(no_sub_report["warnings"]))
 
-    # -- fixed ------------------------------------------------------------
     fixed_text, fixed_report = patch_netlist(DECK, {}, fixed={"nf": "2*pi"})
     check("fixed expression written", "nf=2*pi" in fixed_text,
           _line_with(fixed_text, "nf="))
@@ -1510,7 +1339,6 @@ def _selftest():
           unknown_fixed.count("zzz=1n") == 1,
           str(unknown_fixed.count("zzz=1n")))
 
-    # -- invalid values ---------------------------------------------------
     invalid_text, invalid_report = patch_netlist(DECK, {"w": "2 * pi"})
     check("space value fails", invalid_report["ok"] is False)
     check("space value listed", "w" in invalid_report["missing"],
@@ -1527,7 +1355,6 @@ def _selftest():
         DECK, {}, fixed={"nf": "2 * pi"})
     check("space fixed fails", space_fixed_report["ok"] is False)
 
-    # -- CRLF -------------------------------------------------------------
     crlf = "\r\n".join(["simulator lang=spectre", "global 0",
                         "subckt c (a b)", "parameters Ls=1n",
                         "ends c", ""])
@@ -1539,7 +1366,6 @@ def _selftest():
           "global 0\r\nparameters Ls=2n\r\n" in crlf_text,
           crlf_text.replace("\r\n", "\\n"))
 
-    # -- weird input ------------------------------------------------------
     empty_text, empty_report = patch_netlist("", {"w": 1e-6})
     check("empty deck missing", empty_report["ok"] is False
           and empty_text == "")
@@ -1556,28 +1382,19 @@ def _selftest():
         return 1
     return 0
 
-
 def _line_with(text, needle):
     for line in text.splitlines():
         if needle in line:
             return line
     return "<not found: %s>" % needle
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def _read_text(path):
-    # newline="" keeps CRLF exactly as it is on disk
     with open(path, "r", encoding="utf-8", newline="") as handle:
         return handle.read()
-
 
 def _write_text(path, text):
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
-
 
 def _parse_assignments(items):
     out = {}
@@ -1590,7 +1407,6 @@ def _parse_assignments(items):
         except ValueError:
             out[name] = value
     return out
-
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -1639,7 +1455,6 @@ def main(argv=None):
           "[--fixed NAME=VALUE] [--out PATH] [--no-subckts] "
           "[--no-instances]")
     return 2
-
 
 if __name__ == "__main__":
     sys.exit(main())

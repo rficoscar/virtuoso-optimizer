@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""gui.py - Tkinter front end of the Virtuoso parameter optimizer."""
 import glob
 import json
 import math
@@ -31,13 +29,9 @@ from optimizer import (  # noqa: E402
     summarize
 )
 
-# Tkinter GUI
 _SET_DEFAULTS = {"max_iter": 100, "patience": 10, "improve_rel": 0.001,
                  "fail_limit": 5, "max_restarts": 2, "seed": 0,
                  "strategy": "simplex"}
-# Config keys the form owns. Everything else is passed through untouched
-# in self.extra; owning these here keeps a cleared tech field from being
-# resurrected by the previous config's value.
 _MANAGED_CFG_KEYS = (
     "name", "library", "cell", "view", "state", "state_dir",
     "work_dir", "virtuoso_bin", "output_dir", "analyses", "save_raw",
@@ -48,8 +42,8 @@ _MANAGED_CFG_KEYS = (
 )
 _VAR_PALETTE = ("#c23b22", "#2266cc", "#2a9d3a", "#d17a00",
                 "#7a3cb0", "#00a0a0", "#d4368c", "#5a5a5a")
-_AGE_OLD_RGB = (0xCC, 0xCC, 0xCC)  # #cccccc
-_AGE_NEW_RGB = (0x00, 0x55, 0xCC)  # #0055cc
+_AGE_OLD_RGB = (0xCC, 0xCC, 0xCC)
+_AGE_NEW_RGB = (0x00, 0x55, 0xCC)
 _MARGIN_LEFT, _MARGIN_RIGHT, _MARGIN_TOP, _MARGIN_BOTTOM = 58, 16, 36, 34
 _MIN_PLOT = 40
 
@@ -83,7 +77,6 @@ def _format_num(v):
     return "%.4g" % v
 
 class PlotCanvas:
-    """Interactive plot on a plain tk.Canvas. Pure tkinter."""
     def __init__(self, parent, log_y=False, font=None, small_font=None, empty_text="无数据", **kw):
         import tkinter as tk
         kw.setdefault("background", "white")
@@ -112,10 +105,8 @@ class PlotCanvas:
             c.bind(seq, cb)
     def __getattr__(self, name):
         return getattr(self.canvas, name)
-    # public
     def show(self, series, title="", xlabel="", ylabel="", legend=False,
              keep_view=False, empty_text=None):
-        """Replace the plotted series. keep_view preserves user zoom."""
         self.series = [s for s in series if s.get("xs") and s.get("ys")]
         self.title, self.xlabel, self.ylabel = title, xlabel, ylabel
         self.legend = legend
@@ -125,7 +116,6 @@ class PlotCanvas:
         if not keep_view:
             self._view = None
         self.redraw()
-    # geometry
     def _ty(self, y):
         return math.log10(max(float(y), 1e-12)) if self.log_y else float(y)
     def _data_bounds(self):
@@ -168,7 +158,6 @@ class PlotCanvas:
         l, t, r, b = rect
         return (x0 + (px - l) / ((r - l) or 1.0) * (x1 - x0),
                 y0 + (b - py) / ((b - t) or 1.0) * (y1 - y0))
-    # ticks
     @staticmethod
     def _nice_ticks(lo, hi, target=5):
         if not (hi > lo):
@@ -180,7 +169,7 @@ class PlotCanvas:
         step = next((m * mag for m in (1.0, 2.0, 5.0, 10.0) if raw <= m * mag), mag)
         ticks = []
         t = math.floor(lo / step) * step
-        for _guard in range(64):  # never hang on tiny steps
+        for _guard in range(64):
             t2 = t + step
             if t2 <= t:
                 break
@@ -198,7 +187,6 @@ class PlotCanvas:
             hi = lo + 1
         step = max(1, int((hi - lo) / 5) + 1)
         return [float(v) for v in range(lo, hi + 1, step)]
-    # drawing
     def redraw(self):
         c = self.canvas
         c.delete("all")
@@ -266,7 +254,6 @@ class PlotCanvas:
         c.create_text(0, 0, anchor="se", text="", fill="#333333", font=self.small_font, tags="crossinfo")
         c.itemconfigure("cross", state="hidden")
         c.itemconfigure("crossinfo", state="hidden")
-    # interactions
     def _clear_cross(self):
         self.canvas.itemconfigure("cross", state="hidden")
         self.canvas.itemconfigure("crossinfo", state="hidden")
@@ -329,7 +316,6 @@ class PlotCanvas:
         self._view = (vb[0] - dx, vb[1] - dx, vb[2] + dy, vb[3] + dy)
         self.redraw()
     def fit(self):
-        """Reset the view to show all data (same as double-click)."""
         self._view = None
         self.redraw()
     def _on_double(self, _event):
@@ -353,7 +339,6 @@ class PlotCanvas:
     def _on_wheel_down(self, event):
         self._zoom_at(event.x, event.y, 1.2)
 
-# Sim-settings display helpers (pure functions, no tkinter)
 _FREQ_ANALYSES = ("ac", "sp", "noise", "snoise", "pac", "psp", "xf")
 _FREQ_LO_KEYS = ("start", "fstart", "f1", "fmin", "begin", "from")
 _FREQ_HI_KEYS = ("stop", "fstop", "f2", "fmax", "end", "to")
@@ -365,7 +350,6 @@ _UNIT_HINT = ("提示: 数值无工程后缀时按 SI Hz 解读 (start=1 即 1 H
               " 覆盖判断可能偏严, 请以网表后缀为准。")
 
 def _eng_or_none(text):
-    """parse_eng, but None on empty/bad input (display only)."""
     if text is None:
         return None
     s = str(text).strip()
@@ -377,7 +361,6 @@ def _eng_or_none(text):
         return None
 
 def _eng_bare(text):
-    """(value_or_None, had_eng_suffix). Bare number => suffix False."""
     if text is None:
         return None, False
     s = str(text).strip()
@@ -386,7 +369,6 @@ def _eng_bare(text):
     return _eng_or_none(s), bool(re.search(r"[A-Za-z]+$", s))
 
 def _lower_fields(fields):
-    """Case-insensitive view of one analyses.fields dict."""
     return {str(k).strip().lower(): v for k, v in (fields or {}).items()}
 
 def _freq_from_fields(fields, bare_flag):
@@ -417,7 +399,6 @@ def _freq_from_fields(fields, bare_flag):
     return (hi, lo) if lo > hi else (lo, hi)
 
 def _freq_union(entries, missing, tag_prefix, tag_src):
-    """Union (lo, hi, source_label) of frequency sweeps in parsed entries."""
     los, his, labels, bare_flag = [], [], [], [False]
     for a in entries or []:
         atype = str(a.get("type", "")).strip().lower()
@@ -437,7 +418,6 @@ def _freq_union(entries, missing, tag_prefix, tag_src):
     return min(los), max(his), tag
 
 def freq_range_from_analyses(analyses):
-    """Union (lo, hi) of frequency sweeps in parsed analyses."""
     return _freq_union(analyses, "分析字段中未找到频率范围", "analyses.state:", "analyses")
 
 def _strip_inline_comment(s):
@@ -473,7 +453,6 @@ def _join_continuations(text):
     return out
 
 def _split_tokens(s):
-    """Whitespace split that keeps quoted values together."""
     toks, cur, in_q = [], [], None
     for ch in s:
         if in_q:
@@ -494,7 +473,6 @@ def _split_tokens(s):
     return toks
 
 def parse_netlist_analyses(text):
-    """Spectre analysis statements of a deck: name type key=val ..."""
     out = []
     for raw in _join_continuations(text):
         s = _strip_inline_comment(raw)
@@ -512,11 +490,9 @@ def parse_netlist_analyses(text):
     return out
 
 def freq_range_from_netlist(text):
-    """Union (lo, hi) of frequency sweeps written in the spectre deck."""
     return _freq_union(parse_netlist_analyses(text), "网表中未找到频率扫描语句", "netlist:", "netlist")
 
 def coverage_label(sim_lo, sim_hi, band):
-    """How one target band sits inside the simulated frequency range."""
     if band is None:
         return "目标无band"
     try:
@@ -549,7 +525,6 @@ def _fmt_hz(v):
 
 def build_simset_text(state_dir, info, netlist_path, netlist_params,
                       netlist_text, targets, extra_notes=None):
-    """Build the read-only sim-settings report. Pure string assembly."""
     nl = chr(10)
     lines = [
         "仿真设置（只读 · 实时展示 · 优化器不修改 ADE）", "=" * 52,
@@ -582,7 +557,6 @@ def build_simset_text(state_dir, info, netlist_path, netlist_params,
         "【仿真频率范围】",
         f"  analyses.state : {_fmt_hz(st_lo)} ~ {_fmt_hz(st_hi)}   ({st_src})",
         f"  网表快照       : {_fmt_hz(nl_lo)} ~ {_fmt_hz(nl_hi)}   ({nl_src})",
-        # Never silently treat bare numbers as GHz.
         "  " + _UNIT_HINT,
         f"  用于覆盖判断   : {_fmt_hz(sim_lo)} ~ {_fmt_hz(sim_hi)}", ""]
     lines.append("【网表快照】")
@@ -651,7 +625,6 @@ def build_simset_text(state_dir, info, netlist_path, netlist_params,
     return nl.join(lines)
 
 def read_result_any(iter_dir):
-    """Read one iteration's result.txt, then result.txt.gz (A4 compact)."""
     plain = os.path.join(iter_dir, "result.txt")
     gz_path = os.path.join(iter_dir, "result.txt.gz")
     if os.path.isfile(plain):
@@ -668,8 +641,6 @@ def read_result_any(iter_dir):
             text = f.read()
     except Exception:
         return None
-    # RealRunner._read_result takes a path; hand it a temp file so the
-    # parsing logic stays a single copy (no drift).
     import tempfile
     fd = tmp = None
     try:
@@ -693,17 +664,14 @@ def read_result_any(iter_dir):
             except OSError:
                 pass
 
-# EM display: contract field names, statuses, formatters
-# Contract field names (C-1..C-4): rename ONLY here.
-F_DIST = "distance"            # 排序/验收键 d=max|Δ|/tol（主列）
-F_DELTA = "delta_vs_request"   # 物理相对偏差（次列，非排序键）
+F_DIST = "distance"
+F_DELTA = "delta_vs_request"
 F_DELIVERED = "delivered"
 F_ACTUAL = "actual_fingerprint"
 F_STATUS = "status"
 F_SOURCE = "source"
 
 def _f_get(d, const_key, default=None):
-    """按常量取字段；const_key 为 F_* 值。"""
     return d.get(const_key, default) if isinstance(d, dict) else default
 
 SCHEMA = "gui_em_panel/1"
@@ -720,8 +688,8 @@ STATUS_LABELS = {
     STATUS_BEST_EFFORT: "尽力交付", STATUS_MISS: "库未命中",
     STATUS_INFRA: "工具链失败", STATUS_ERROR: "查询错误"}
 HISTORY_LIMIT = 50
-WARN_GATE = "GATE"  # 契约 L2 硬门槛(SRF); 勿与已弃 xfmr L1/L2 混淆
-WARN_SOFT = "SOFT"  # 契约 L3 软告警(Q)
+WARN_GATE = "GATE"
+WARN_SOFT = "SOFT"
 WARN_INFO = "INFO"
 WEAK_HIT_DISTANCE = 10.0
 
@@ -755,12 +723,10 @@ def _fmt_delta(delta):
     return "n/a" if delta is None or not _is_num(delta) else _fmt_pct(delta)
 
 def status_label(status):
-    """枚举中文名；未知值原样括注，不抛。"""
     s = str(status or "").strip()
     return STATUS_LABELS[s] if s in STATUS_LABELS else "未知(%s)" % (s or "空")
 
 def _q_of_fingerprint(fp):
-    """Q@f0 from fingerprint (stub semantics)."""
     if not isinstance(fp, dict):
         return None
     if "Q_at" in fp:
@@ -783,7 +749,6 @@ def _metric_value(fp, key):
     return float(v) if _is_num(v) else None
 
 def iter_triple_rows(em_actual, tol=None):
-    """Triple rows requested/grid/delivered (stub fields)."""
     if not isinstance(em_actual, dict):
         return []
     tol = tol or {}
@@ -820,7 +785,7 @@ def iter_triple_rows(em_actual, tol=None):
         elif req_v is not None and isinstance(grid_all, dict) and _is_num(grid_all.get(key)):
             grid_v = float(grid_all[key])
         else:
-            grid_v = req_v  # 无独立格点时退化为请求值
+            grid_v = req_v
         del_v = delivered_map.get(key)
         del_v = float(del_v) if _is_num(del_v) else _metric_value(actual, key)
         delta = deltas.get(key)
@@ -842,7 +807,6 @@ def iter_triple_rows(em_actual, tol=None):
     return rows
 
 def format_query_triple(name, em_actual, tol=None, show_geom=False):
-    """356->358 table. C-2: distance (sort key) + delta_vs_request (physical)."""
     nl = "\n"
     if not isinstance(em_actual, dict):
         return "  (本轮无 EM 信息)"
@@ -902,7 +866,6 @@ def format_query_triple(name, em_actual, tol=None, show_geom=False):
     return nl.join(lines)
 
 def format_library_stats(stats, hit_counts=None):
-    """Library stats; empty placeholder."""
     stats = stats if isinstance(stats, dict) else {}
     hit_counts = hit_counts if isinstance(hit_counts, dict) else {}
     nl = "\n"
@@ -945,7 +908,6 @@ def format_library_stats(stats, hit_counts=None):
     return nl.join(lines)
 
 def format_em_opt_status(em_meta, budget=None, device=None):
-    """EmOptimizer status or placeholder."""
     em_meta = em_meta if isinstance(em_meta, dict) else {}
     budget = budget if isinstance(budget, dict) else {}
     nl = "\n"
@@ -1020,7 +982,6 @@ def format_em_opt_status(em_meta, budget=None, device=None):
     return nl.join(lines)
 
 def build_warns(em_actual, em_meta=None, f_op=None, srf_margin=1.5, q_tol=0.30):
-    """Synthesize warns: GATE(SRF hard) / SOFT(Q) / INFO."""
     out, seen = [], set()
     def add(level, text, metric=None, detail=None, device=None):
         key = (level, text)
@@ -1083,7 +1044,6 @@ def build_warns(em_actual, em_meta=None, f_op=None, srf_margin=1.5, q_tol=0.30):
     return out
 
 def format_warns(warns):
-    """Warns text."""
     nl = "\n"
     lines = ["【告警】"]
     if not warns:
@@ -1096,7 +1056,6 @@ def format_warns(warns):
     return nl.join(lines)
 
 def build_em_report(model):
-    """Full page text. Never raises."""
     try:
         model = model if isinstance(model, dict) else {}
         nl = "\n"
@@ -1140,7 +1099,6 @@ def build_em_report(model):
         return "EM_DISPLAY_ERROR: %s" % exc
 
 def em_watch_paths(work_dir, out_dir):
-    """Fixed paths to stat (no recursive glob)."""
     work = os.path.expanduser(str(work_dir or "work"))
     lib = os.path.join(work, "em_lib")
     paths = [os.path.join(lib, name) for name in
@@ -1152,7 +1110,6 @@ def em_watch_paths(work_dir, out_dir):
     return paths
 
 def em_signature(paths):
-    """(path, mtime_ns, size); size catches same-second writes."""
     sig = []
     for p in paths or []:
         try:
@@ -1164,7 +1121,6 @@ def em_signature(paths):
     return tuple(sig)
 
 def read_jsonl_tail(path, limit=200):
-    """jsonl tail, skip bad lines."""
     if not path or not os.path.isfile(path):
         return []
     out = []
@@ -1185,7 +1141,6 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
                      em_meta=None, budget=None, f_op=None,
                      srf_margin=1.5, q_tol=0.30, mode=None,
                      disabled=False, tol=None):
-    """Read-only EmUiModel. Never raises."""
     model = {
         "schema": SCHEMA, "disabled": bool(disabled), "library": {},
         "hit_counts": {}, "queries": [], "em_opt": em_meta or {},
@@ -1239,7 +1194,6 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
                 continue
             em = rec.get("em_actual")
             if not isinstance(em, dict):
-                # LogWriter stores EM data under record.extra.
                 extra = rec.get("extra")
                 em = extra.get("em_actual") if isinstance(extra, dict) else None
             if not isinstance(em, dict):
@@ -1258,7 +1212,6 @@ def collect_em_model(work_dir=None, out_dir=None, history=None,
     return model
 
 def _auto_netlist_on(value):
-    """Map a config value (bool / "auto" / "off") to the checkbox state."""
     if isinstance(value, bool):
         return value
     if value is None:
@@ -1268,23 +1221,16 @@ def _auto_netlist_on(value):
     return bool(value)
 
 def _var_extra_rename(extra, old, new):
-    """Move per-variable metadata (scale/integer/...) to the new name."""
     out = {k: dict(v) for k, v in (extra or {}).items()}
     if old != new and old in out:
         out[new] = out.pop(old)
     return out
 
 def _var_extra_drop(extra, names):
-    """Forget metadata of variables removed from the optimized table."""
     drop = set(names or ())
     return {k: v for k, v in (extra or {}).items() if k not in drop}
 
 def _targets_signature(target_specs):
-    """Stable digest of target definitions for the 2 s sim-settings refresh.
-
-    The count alone misses edits to an existing target's band/goal, which
-    leaves the coverage hint stale forever.
-    """
     try:
         items = []
         for iid, spec in (target_specs or {}).items():
@@ -1296,7 +1242,6 @@ def _targets_signature(target_specs):
         return None
 
 def netlist_report_text(report):
-    """Human-readable summary of netlist_create.ensure_netlist() output."""
     if not isinstance(report, dict):
         return "网表生成返回异常: %r" % (report,)
     status = str(report.get("status") or "unknown")
@@ -1324,7 +1269,6 @@ def netlist_report_text(report):
     return "\n".join(lines)
 
 def em_align_event_text(event):
-    """Render one on_event() payload for the EM 对齐 log box."""
     if isinstance(event, str):
         return event
     if isinstance(event, dict):
@@ -1341,7 +1285,6 @@ def em_align_event_text(event):
     return str(event)
 
 def find_em_report_md(report, dirs):
-    """Locate em_align_report.md from the report or the usual output dirs."""
     keys = ("report_md", "em_align_md", "markdown_path", "md_path")
     if isinstance(report, dict):
         for key in keys:
@@ -1363,11 +1306,6 @@ def find_em_report_md(report, dirs):
     return None
 
 class _TechTab:
-    """「工艺」页：工艺文件路径输入 + require_tech_ready 门禁 + 横截面（懒加载）。
-
-    真源优先级：内建默认 < tech_profile.json < 本页填写项（见 build_tech）。
-    示教 fixture 会出 1 条警告，状态显示「通过（1 条警告）」。
-    """
     FIELDS = (
         ("techlib", "工艺库名 techlib", "RFCMOS", "text"),
         ("techlib_dir", "工艺库目录 techlib_dir", "", "dir"),
@@ -1448,17 +1386,11 @@ class _TechTab:
         if path:
             self.vars[key].set(path)
     def fill_from_cfg(self, cfg):
-        """配置载入时回填 5 个键；配置里没有的键回到该字段默认值。
-
-        必须清空缺省键，否则打开另一份不含工艺段的配置（或点「新建」）
-        会沿用上一份配置的 layermap/proc，工艺门禁与保存结果都串味。
-        """
         cfg = cfg if isinstance(cfg, dict) else {}
         for key, _label, default, _kind in self.FIELDS:
             val = cfg.get(key)
             self.vars[key].set(default if val is None else str(val))
     def collect_tech(self):
-        """本页输入 -> tech dict（显式项覆盖 profile，留空沿用 profile）。"""
         import librf_opt
         v = {k: (var.get() or "").strip() for k, var in self.vars.items()}
         return librf_opt.build_tech(
@@ -1468,7 +1400,6 @@ class _TechTab:
             proc=v.get("proc") or None,
             cds_lib=v.get("cds_lib") or None)
     def tech_cfg_keys(self):
-        """非空填写项 -> config 顶层键（保存/载入往返用）。"""
         out = {}
         for key, _label, _default, _kind in self.FIELDS:
             v = (self.vars[key].get() or "").strip()
@@ -1476,7 +1407,6 @@ class _TechTab:
                 out[key] = v
         return out
     def check(self, parent=None, show_dialog=False):
-        """执行 require_tech_ready；状态栏分色。返回是否通过。"""
         import librf_opt
         try:
             prof = self.collect_tech()
@@ -1502,7 +1432,6 @@ class _TechTab:
             self._set_detail("工艺检查通过（无警告）。proc/layermap 叠层与层号一致。")
         return True
     def require_ready_ui(self, parent=None):
-        """任务启动入口调用：失败弹窗并返回 False；警告只更新状态栏。"""
         return self.check(parent=parent, show_dialog=True)
     def _msg(self, title, text, error=False):
         try:
@@ -1512,7 +1441,6 @@ class _TechTab:
         except Exception:
             print(text)
     def show_cross_section(self):
-        """懒加载 proc_cross_section.build_cross_section_frame（第一次点才导入）。"""
         if self._xs_frame is not None:
             return
         try:
@@ -1533,9 +1461,7 @@ class _TechTab:
             self.ttk.Label(self.xs_host, foreground="#b3261e",
                            text="横截面加载失败：%s" % exc).pack(anchor="w")
 
-
 class OptimizerGui:
-    """Tkinter front end. Edit the config. Run and watch the optimizer."""
     def __init__(self, root, smoke=False):
         import tkinter as tk
         from tkinter import ttk
@@ -1571,7 +1497,6 @@ class OptimizerGui:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(100, self._poll)
     def _setup_fonts(self):
-        """Pick a CJK-capable font and wire it into every widget."""
         self.ui_font = self.mono_font = None
         try:
             import tkinter.font as tkfont
@@ -1609,14 +1534,10 @@ class OptimizerGui:
             except Exception:
                 pass
     def _make_text(self, parent, **kw):
-        """tk.Text with the proven ui_font (see _setup_fonts rules)."""
         if self.ui_font is not None:
             kw["font"] = self.ui_font
         elif self.mono_font is not None:
             kw["font"] = self.mono_font
-        # CJK 字形的实际高度常等于字体的 linespace，X11 上的 song ti 等
-        # 甚至更紧；不给换行与逻辑行留行距时中文会上下压叠（实测 16px 字
-        # 压 16px 行）。给所有文本区补行距：spacing2 管自动换行，1/3 管段。
         kw.setdefault("spacing1", 2)
         kw.setdefault("spacing2", 4)
         kw.setdefault("spacing3", 2)
@@ -1655,11 +1576,9 @@ class OptimizerGui:
         body.pack(side="top", fill="both", expand=True)
         box = self._scrolled_text(body, wrap="none", height=24)
         box.configure(state="disabled")
-        # Callers may inject their own strip into the tab, above this body.
         tab._poll_body = body
         return tab, box, status_var, auto_var
     def _add_field(self, parent, row, key, label, store, choices=None, width=16, sticky="w"):
-        """One label + entry/combo grid row; the StringVar lands in store."""
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=4, pady=2)
         var = self.tk.StringVar()
         if choices:
@@ -1684,7 +1603,6 @@ class OptimizerGui:
         self.ttk.Checkbutton(bar, text="续跑(不勾=新建 run 目录, 迭代从 0)",
                              variable=self.resume_var
                              ).pack(side="left", padx=8)
-    # layout
     def _build_menubar(self):
         bar = self.tk.Menu(self.root)
         mfile = self.tk.Menu(bar, tearoff=0)
@@ -1777,7 +1695,6 @@ class OptimizerGui:
             text = "算法说明加载失败: %s" % exc
         self._show_long_text("算法说明", text)
     def _show_param_help(self):
-        """Field reference for 搜索设置 / 运行选项 / 历史与续跑."""
         self._show_long_text("参数说明", (
             "搜索设置详细说明（取值 / 影响）—— 目标页底部\n\n"
             "最大迭代 max_iter —— 整数 ≥1。累计到这么多轮停止（stop_reason=max_iterations）。默认 100。续跑时沿用此前迭代数：历史 N 次 + 本次 (max_iter-N) 次。\n"
@@ -1797,7 +1714,6 @@ class OptimizerGui:
             "4) 预算一致：历史点计入评测数（eval_count），L-SHADE 种群缩减、portfolio 的 UCB 配额等预算感知机制据此分配剩余预算，与运行循环一致。\n"
         ))
     def _show_long_text(self, title, text):
-        """Scrollable read-only window for long help."""
         win = self.tk.Toplevel(self.root)
         win.title(title)
         win.geometry("900x620")
@@ -1818,8 +1734,6 @@ class OptimizerGui:
     def _build_tabs(self):
         self.notebook = self.ttk.Notebook(self.root)
         self.notebook.pack(side="top", fill="both", expand=True, padx=4, pady=4)
-        # Build order follows data dependencies (设计页 first: it owns
-        # self.fields). Display order is set afterwards by _reorder_tabs.
         self._build_design_tab()
         self._build_vars_tab()
         self._build_targets_tab()
@@ -1830,24 +1744,15 @@ class OptimizerGui:
         self._build_em_align_tab()
         self._build_progress_tab()
         self._build_result_tab()
-        self._em_hook = None
         try:
             import librf_opt
-            self._em_hook = librf_opt.register(self)
+            librf_opt.register(self)
         except Exception as exc:
             print("librf_opt 未加载 (版图 EM 页不可用): %s" % exc)
         self._reorder_tabs()
-    # 环境 → 设计 → 变量 → 目标 → 仿真设置 → 进度 → 结果 → 工艺
-    #   → 版图 EM → EM 对齐 → EM 融合
     TAB_ORDER = ("环境", "设计", "变量", "目标", "仿真设置", "进度", "结果",
                  "工艺", "版图 EM", "EM 对齐", "EM 融合")
     def _reorder_tabs(self):
-        """Put the notebook pages in the release order.
-
-        Pages are built in dependency order; ttk moves an existing tab
-        when it is inserted again. Unknown pages keep their position at
-        the end so a missing/extra module never hides a page.
-        """
         wanted = list(self.TAB_ORDER)
         placed = []
         pos = 0
@@ -1941,12 +1846,10 @@ class OptimizerGui:
         lines.append("已把最新的一个填入「网表」栏；要换用请手动改。")
         self._show_text_dialog("查找网表", chr(10).join(lines))
     def _netlist_cfg(self):
-        """Build the subset of cfg netlist_create needs, without validation."""
         cfg = self._collect_cfg(validate=False)
         if cfg is None:
             return None
         cfg = dict(cfg)
-        # 「立即生成」= 强制执行, 不受复选框的 auto 语义影响。
         cfg["auto_netlist"] = "always"
         view = ""
         try:
@@ -1976,7 +1879,6 @@ class OptimizerGui:
         self._set_status("正在生成网表…")
         threading.Thread(target=self._netlist_worker, args=(cfg,), daemon=True).start()
     def _netlist_worker(self, cfg):
-        """Background thread: never touch Tk; report through the queue."""
         try:
             try:
                 import netlist_create as _nc
@@ -2033,7 +1935,6 @@ class OptimizerGui:
             self._set_status("网表生成未完成: %s" % status)
             self._dialog("生成网表", text, error=True)
     def _env_probe(self):
-        """Fill empty rows by probing this machine (no absolute paths)."""
         import optimizer as _opt
         filled = []
         for name, var in self.env_fields.items():
@@ -2110,7 +2011,6 @@ class OptimizerGui:
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="变量")
         self.vars_tab = tab
-        # optimized variables (take part in the search)
         self.ttk.Label(tab, text="优化变量（参与优化搜索）").grid(row=0, column=0, columnspan=4, sticky="w")
         self.var_tree = self.ttk.Treeview(tab, columns=("name", "init", "min", "max"), show="headings", height=7)
         for col, label, width in (("name", "名称", 160), ("init", "初值", 120),
@@ -2129,7 +2029,6 @@ class OptimizerGui:
                           ("删除", self._var_delete), ("移至固定", self._var_move_to_fixed)):
             self.ttk.Button(btns, text=text, command=cmd).pack(side="left", padx=2)
         self.ttk.Label(btns, text="快捷键: Del=删除 · Ctrl+Z=撤销 · Ctrl+Y=重做", foreground="#888888").pack(side="left", padx=10)
-        # fixed variables (value is written to the sim as is)
         self.ttk.Label(tab, text="固定变量（不参与优化，值写入仿真）").grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.fix_tree = self.ttk.Treeview(tab, columns=("name", "value"), show="headings", height=5)
         for col, label, width in (("name", "名称", 160), ("value", "值", 160)):
@@ -2216,7 +2115,6 @@ class OptimizerGui:
                   '一般用「从CSV载入」自动生成。点「字段说明」看全部字段。'))
         help_line.grid(row=3, column=0, columnspan=6, sticky="we", pady=(6, 0))
         self.ttk.Label(btns, text="上下界: 目标=下界 目标2=上界").pack(side="left", padx=8)
-        # 搜索设置（原「设置」页的搜索组）：目标定义优化问题，这里定义怎么搜。
         self.set_fields = {}
         sbar = self.ttk.Frame(tab)
         sbar.grid(row=4, column=0, columnspan=6, sticky="we", pady=(12, 0))
@@ -2309,7 +2207,6 @@ class OptimizerGui:
                        ).grid(row=r2 + 2, column=1, columnspan=2, sticky="w", padx=4)
         tab.columnconfigure(1, weight=1)
         tab.rowconfigure(r2 + 1, weight=1)
-    # sim-settings live display (read-only)
     def _build_simset_tab(self):
         tab, self.simset_text, self.simset_status_var, self.simset_auto_var = \
             self._build_poll_tab(
@@ -2317,7 +2214,6 @@ class OptimizerGui:
                 "只读展示: 在 ADE 里改设置即可, 本页自动跟随;优化器只展示不修改",
                 self._simset_refresh)
         self.simset_tab = tab
-        # 运行选项（原「设置」页）：属于仿真执行，放这一页。
         opt = self.ttk.Frame(tab)
         opt.pack(side="top", fill="x", pady=(0, 4), before=tab._poll_body)
         self.ttk.Label(opt, text="运行选项", foreground="#0066cc").pack(
@@ -2341,13 +2237,6 @@ class OptimizerGui:
         self._simset_refresh(force=True)
         self._simset_after_id = self.root.after(2000, self._simset_tick)
     def _simset_netlist_path(self, rescan=False):
-        """The deck a real run will read, from the shared resolver.
-
-        The 仿真设置 page exists to show the settings of the deck that will
-        actually be simulated, so discovery (explicit path, newest
-        input.scs, netlist_view preference) must be the runner's rules,
-        not a second copy that picks a different view.
-        """
         def field(key):
             try:
                 return self.fields[key].get().strip()
@@ -2380,8 +2269,6 @@ class OptimizerGui:
         try:
             hit = resolve_netlist_path(cfg) or None
         except Exception:
-            # Display only: a deck disappearing mid-scan must not break
-            # the 2 s refresh chain.
             hit = None
         dir_mtime = None
         if hit:
@@ -2423,7 +2310,6 @@ class OptimizerGui:
             pass
         return tuple(sig)
     def _simset_collect(self):
-        """Gather display inputs. Never raises."""
         notes = []
         state_dir = ""
         info = None
@@ -2460,7 +2346,6 @@ class OptimizerGui:
             targets = list(getattr(self, "target_specs", {}) or {}).values()
         return state_dir, info, netlist_path, netlist_params, netlist_text, targets, notes
     def _simset_refresh(self, force=False):
-        """Rebuild the report text. Skip work when nothing changed."""
         if getattr(self, "_simset_closed", False):
             return
         try:
@@ -2517,9 +2402,7 @@ class OptimizerGui:
                              self._simset_refresh, self._simset_tick,
                              "_simset_after_id")
     def _simset_shutdown(self):
-        """Stop the simset poll chain. Safe to call twice."""
         self._poll_text_shutdown("_simset_closed", "_simset_after_id")
-    # EM fusion tab (read-only + 2s poll; S4 spec)
     def _build_em_tab(self):
         tab, self.em_text, self.em_status_var, self.em_auto_var = \
             self._build_poll_tab("EM 融合",
@@ -2605,7 +2488,6 @@ class OptimizerGui:
                              "_em_after_id")
     def _em_shutdown(self):
         self._poll_text_shutdown("_em_closed", "_em_after_id")
-    # EM 两阶段对齐（需求 E / C 的入口）
     def _build_em_align_tab(self):
         tab = self.ttk.Frame(self.notebook, padding=8)
         self.notebook.add(tab, text="EM 对齐")
@@ -2679,7 +2561,6 @@ class OptimizerGui:
         fields = getattr(self, "em_align_fields", None)
         if not fields:
             return {}
-        # 保留 em_align 里本页不显示的键 (band/outputs/max_points/...).
         sec = dict(getattr(self, "em_align_extra", {}) or {})
         for key, var in fields.items():
             text = (var.get() or "").strip()
@@ -2799,7 +2680,6 @@ class OptimizerGui:
                          daemon=True).start()
     def _em_align_worker(self, cfg, stage1, curve, netlist, out_dir,
                          max_iter, tol, mock):
-        """Background thread: never touch Tk; report through the queue."""
         try:
             try:
                 import optimizer as _opt
@@ -2825,7 +2705,6 @@ class OptimizerGui:
         self.queue.put({"type": "em_align_done", "ok": True, "report": report,
                         "report_dir": default_dir})
     def _em_align_event(self, event):
-        """on_event callback. Runs in the worker thread."""
         self.queue.put({"type": "em_align_log", "text": em_align_event_text(event)})
     def _handle_em_align_done(self, ev):
         self._em_align_running = False
@@ -2983,9 +2862,7 @@ class OptimizerGui:
         self.notebook.add(tab, text="结果")
         self.result_tab = tab
         self.result_text = self._scrolled_text(tab, wrap="none")
-    # dialogs and log
     def _dialog(self, title, text, error=False):
-        """Show a message box. Log only in smoke mode."""
         if self.smoke:
             self._log(f"[{title}] {text}\n")
             return
@@ -3013,7 +2890,6 @@ class OptimizerGui:
             pass
     def _set_status(self, text):
         self.status_var.set(text)
-    # config load and save
     def _new_config(self):
         self._run_dir_state = None
         self._load_cfg_to_ui({
@@ -3026,7 +2902,6 @@ class OptimizerGui:
                          "fail_limit": 5, "max_restarts": 2, "seed": 0},
         })
     def open_config(self, path, fresh_output=False):
-        """Load one config file into the form."""
         cfg = load_config(path)
         if fresh_output:
             import tempfile
@@ -3077,9 +2952,6 @@ class OptimizerGui:
         self._set_text(self.env_extra_text, chr(10).join(extras))
         for iid in self.var_tree.get_children():
             self.var_tree.delete(iid)
-        # The table only shows four columns; keep scale/integer (and any
-        # future per-variable key) so a GUI round trip does not silently
-        # turn an integer/log variable into a continuous/linear one.
         self.var_extra = {}
         for v in cfg.get("variables", []):
             extra = {k: v[k] for k in v
@@ -3114,7 +2986,6 @@ class OptimizerGui:
         self._load_em_align(cfg.get("em_align"))
         self._live_refresh_axis_options()
     def _collect_cfg(self, validate=True):
-        """Build the config dict from the form. Return None on bad input."""
         try:
             f = {k: v.get().strip() for k, v in self.fields.items()}
             cfg = dict(self.extra)
@@ -3147,7 +3018,6 @@ class OptimizerGui:
                 k, _eq, v = line.partition("=")
                 env_map[k.strip()] = v.strip()
             cfg["env"] = env_map
-            # 工艺页输入随配置往返（非空项）；门禁本身在任务启动时执行。
             tech = getattr(self, "tech_tab", None)
             if tech is not None:
                 cfg.update(tech.tech_cfg_keys())
@@ -3195,8 +3065,6 @@ class OptimizerGui:
             self._dialog("配置错误", str(exc), error=True)
             return None
         return cfg
-    # variable table
-    # variable-table undo/redo (v05)
     def _vars_snapshot(self):
         var_rows = [tuple(self.var_tree.item(i, "values")) for i in self.var_tree.get_children()]
         fix_rows = [tuple(self.fix_tree.item(i, "values")) for i in self.fix_tree.get_children()]
@@ -3214,7 +3082,6 @@ class OptimizerGui:
             self.fix_tree.insert("", "end", values=row)
         self.var_extra = {k: dict(v) for k, v in (extra or {}).items()}
     def _vars_push_undo(self):
-        """Record the pre-change state. Call BEFORE every mutation."""
         if not hasattr(self, "_vars_undo_stack"):
             self._vars_undo_stack = []
             self._vars_redo_stack = []
@@ -3240,8 +3107,48 @@ class OptimizerGui:
         self._vars_undo_stack.append(current)
         self._vars_restore(snap)
         self._set_status("已重做变量编辑")
+    def _tree_fill(self, tree, edit, keys):
+        sel = tree.selection()
+        if not sel:
+            return
+        for key, val in zip(keys, tree.item(sel[0], "values")):
+            edit[key].set(val)
+    def _tree_add(self, tree, values_fn):
+        vals = values_fn()
+        if vals is None:
+            return
+        self._vars_push_undo()
+        tree.insert("", "end", values=vals)
+    def _tree_update(self, tree, title, values_fn, after=None):
+        sel = tree.selection()
+        if not sel:
+            self._dialog(title, "请先选择一行", error=True)
+            return
+        old = tree.item(sel[0], "values")[0]
+        vals = values_fn()
+        if vals is None:
+            return
+        self._vars_push_undo()
+        tree.item(sel[0], values=vals)
+        if after is not None:
+            after(old, vals[0])
+    def _tree_delete(self, tree, on_names=None):
+        sel = tree.selection()
+        if not sel:
+            return
+        names = [tree.item(i, "values")[0] for i in sel]
+        self._vars_push_undo()
+        for iid in sel:
+            tree.delete(iid)
+        if on_names is not None:
+            on_names(names)
+    def _drop_var_extra(self, names):
+        self.var_extra = _var_extra_drop(
+            getattr(self, "var_extra", {}) or {}, names)
+    def _rename_var_extra(self, old, new):
+        self.var_extra = _var_extra_rename(
+            getattr(self, "var_extra", {}) or {}, old, new)
     def _focus_table(self):
-        """The variable table the keyboard event applies to, or None."""
         try:
             w = self.root.focus_get()
         except Exception:
@@ -3255,18 +3162,13 @@ class OptimizerGui:
     def _on_delete_key(self, _event):
         tree = self._focus_table()
         if tree is None:
-            return None   # let Backspace edit text fields as usual
-        sel = tree.selection()
-        if not sel:
+            return None
+        if not tree.selection():
             return "break"
-        names = [tree.item(i, "values")[0] for i in sel]
-        self._vars_push_undo()
-        for iid in sel:
-            tree.delete(iid)
-        if tree is self.var_tree:
-            self.var_extra = _var_extra_drop(
-                getattr(self, "var_extra", {}) or {}, names)
-        self._set_status("已删除 %d 个变量 (Ctrl+Z 撤销)" % len(sel))
+        n = len(tree.selection())
+        self._tree_delete(
+            tree, self._drop_var_extra if tree is self.var_tree else None)
+        self._set_status("已删除 %d 个变量 (Ctrl+Z 撤销)" % n)
         return "break"
     def _on_undo_key(self, event):
         w = None
@@ -3291,41 +3193,15 @@ class OptimizerGui:
         self._vars_redo()
         return "break"
     def _var_select(self, _event):
-        sel = self.var_tree.selection()
-        if not sel:
-            return
-        vals = self.var_tree.item(sel[0], "values")
-        for key, val in zip(("name", "init", "min", "max"), vals):
-            self.var_edit[key].set(val)
+        self._tree_fill(self.var_tree, self.var_edit,
+                        ("name", "init", "min", "max"))
     def _var_add(self):
-        vals = self._var_values()
-        if vals is None:
-            return
-        self._vars_push_undo()
-        self.var_tree.insert("", "end", values=vals)
+        self._tree_add(self.var_tree, self._var_values)
     def _var_update(self):
-        sel = self.var_tree.selection()
-        if not sel:
-            self._dialog("变量", "请先选择一行", error=True)
-            return
-        old_name = self.var_tree.item(sel[0], "values")[0]
-        vals = self._var_values()
-        if vals is None:
-            return
-        self._vars_push_undo()
-        self.var_tree.item(sel[0], values=vals)
-        self.var_extra = _var_extra_rename(
-            getattr(self, "var_extra", {}) or {}, old_name, vals[0])
+        self._tree_update(self.var_tree, "变量", self._var_values,
+                          self._rename_var_extra)
     def _var_delete(self):
-        sel = self.var_tree.selection()
-        if not sel:
-            return
-        names = [self.var_tree.item(i, "values")[0] for i in sel]
-        self._vars_push_undo()
-        for iid in sel:
-            self.var_tree.delete(iid)
-        self.var_extra = _var_extra_drop(
-            getattr(self, "var_extra", {}) or {}, names)
+        self._tree_delete(self.var_tree, self._drop_var_extra)
     def _var_values(self):
         e = {k: v.get().strip() for k, v in self.var_edit.items()}
         try:
@@ -3337,37 +3213,14 @@ class OptimizerGui:
             self._dialog("变量错误", str(exc), error=True)
             return None
         return (e["name"], e["init"], e["min"], e["max"])
-    # fixed variable table
     def _fix_select(self, _event):
-        sel = self.fix_tree.selection()
-        if not sel:
-            return
-        vals = self.fix_tree.item(sel[0], "values")
-        for key, val in zip(("name", "value"), vals):
-            self.fix_edit[key].set(val)
+        self._tree_fill(self.fix_tree, self.fix_edit, ("name", "value"))
     def _fix_add(self):
-        vals = self._fix_values()
-        if vals is None:
-            return
-        self._vars_push_undo()
-        self.fix_tree.insert("", "end", values=vals)
+        self._tree_add(self.fix_tree, self._fix_values)
     def _fix_update(self):
-        sel = self.fix_tree.selection()
-        if not sel:
-            self._dialog("固定变量", "请先选择一行", error=True)
-            return
-        vals = self._fix_values()
-        if vals is None:
-            return
-        self._vars_push_undo()
-        self.fix_tree.item(sel[0], values=vals)
+        self._tree_update(self.fix_tree, "固定变量", self._fix_values)
     def _fix_delete(self):
-        sel = self.fix_tree.selection()
-        if not sel:
-            return
-        self._vars_push_undo()
-        for iid in sel:
-            self.fix_tree.delete(iid)
+        self._tree_delete(self.fix_tree)
     def _fix_values(self):
         e = {k: v.get().strip() for k, v in self.fix_edit.items()}
         try:
@@ -3409,7 +3262,6 @@ class OptimizerGui:
         self._vars_push_undo()
         self.var_tree.insert("", "end", values=(name, value, lo, hi))
         self.fix_tree.delete(sel[0])
-    # target table
     def _target_select(self, _event):
         sel = self.target_tree.selection()
         if not sel:
@@ -3491,7 +3343,6 @@ class OptimizerGui:
                 str(band[0]), str(band[1]), spec.get("freq", ""),
                 spec.get("curve_op", ""))
     def _target_limit_from_csv(self):
-        """Load a limit curve from a data file with x,y columns."""
         from tkinter import filedialog
         path = filedialog.askopenfilename(parent=self.root,
                                           filetypes=[("数据文件", "*.csv *.txt *.dat"), ("全部文件", "*.*")])
@@ -3566,7 +3417,6 @@ class OptimizerGui:
             '  band_max<=45 两条目标。',
         ])
         self._show_text_dialog("目标字段说明", text)
-    # ADE state probe
     def _explore_state(self):
         state_dir = self.fields["state_dir"].get().strip()
         if not state_dir:
@@ -3787,7 +3637,6 @@ class OptimizerGui:
             st["total"] += 1
         self._update_curve_coverage_hint()
         self._draw_live_curves()
-    # dynamic curve window with user-chosen axes (v05)
     _X_FREQ = "频率"
     _X_ITER = "迭代"
     _X_VAR_PREFIX = "变量:"
@@ -3876,11 +3725,11 @@ class OptimizerGui:
             if not fx:
                 continue
             if best_idx is not None and idx == best_idx:
-                color, width = "#d62728", 2   # red = best
+                color, width = "#d62728", 2
             elif idx == latest_idx:
-                color, width = "#1f77b4", 2   # blue = latest
+                color, width = "#1f77b4", 2
             else:
-                color, width = "#cccccc", 1   # light gray = rest
+                color, width = "#cccccc", 1
             series.append({"xs": fx, "ys": fy, "color": color, "width": width})
             if best_idx is not None and best_idx == latest_idx and idx == best_idx:
                 series.append({"xs": fx, "ys": fy, "color": "#1f77b4", "width": 1, "dash": (4, 2)})
@@ -3956,7 +3805,7 @@ class OptimizerGui:
             return
         n = len(pts)
         series = [{"xs": [p[1] for p in pts], "ys": [p[2] for p in pts],
-                   "color": "#bbbbbb", "width": 1}]  # path in iter order
+                   "color": "#bbbbbb", "width": 1}]
         for i, (_idx, xv, yv) in enumerate(pts):
             t = 0.0 if n < 2 else float(i) / (n - 1)
             series.append({"xs": [xv], "ys": [yv], "color": _age_color(t), "width": 1})
@@ -4052,7 +3901,6 @@ class OptimizerGui:
                 c.create_line(x0 - pad, y_best, x1 + pad, y_best, fill="#dd0000", width=3)
                 c.create_text(cx, y_best + 2, anchor="n", text=format_eng(bval), fill="#dd0000", font=self.ui_font)
     def start(self, force_mock=False, max_iter=None, cfg=None):
-        """Start the optimization in a worker thread. Return True on start."""
         if self.running:
             self._dialog("运行", "优化正在运行", error=True)
             return False
@@ -4096,18 +3944,14 @@ class OptimizerGui:
         self.worker.start()
         return True
     def _start_with_cfg(self, cfg):
-        """v06 librf_opt hook: start with an externally built config."""
         return self.start(cfg=cfg)
     def stop(self):
-        """Ask the worker to stop. Kill the running virtuoso process."""
         if self.stop_event is not None:
             self.stop_event.set()
             self._log("停止请求已发送\n")
         stop_all_runners()
     def _worker(self, cfg, mock, resume=None):
-        """Run one optimization session. Send all events to the queue."""
         class Writer:
-            """Capture print output of the optimizer into the queue."""
             def __init__(self, q):
                 self.q = q
             def write(self, text):
@@ -4128,19 +3972,14 @@ class OptimizerGui:
         except Exception as exc:
             import traceback
             self.queue.put({"type": "log", "text": traceback.format_exc()})
-            # Preflight failures (missing analysis, bad netlist) are user
-            # mistakes, not crashes: say it in a dialog, not only a log.
             self.queue.put({"type": "error", "text": str(exc) or repr(exc)})
         finally:
             sys.stdout = real
         self.queue.put({"type": "done", "report": report})
     def _on_event(self, event):
-        """Optimizer callback. Runs in the worker thread."""
         self.queue.put(dict(event))
     def _stop_check(self):
-        """Optimizer stop check. Runs in the worker thread."""
         return self.stop_event is not None and self.stop_event.is_set()
-    # queue polling and progress
     def _poll(self):
         self._drain()
         self.root.after(100, self._poll)
@@ -4202,7 +4041,6 @@ class OptimizerGui:
             self._set_status("完成" if self.report else "失败")
         self._show_report(self.report)
     def iter_rows(self):
-        """Number of completed iterations (kept for --gui-smoke)."""
         return self.iter_events
     def _draw_plot(self):
         pts = self.plot_points
@@ -4245,11 +4083,7 @@ class OptimizerGui:
         self.stop()
         self.root.destroy()
 
-# GUI entry point
-# Demo (synthetic data) — embed in a tk.Tk root.
-
 def run_gui(cfg_path=None, smoke=False):
-    """Start the GUI. Return 0 on success, 1 on failure."""
     import time
     import tkinter as tk
     try:
@@ -4338,7 +4172,6 @@ def run_gui(cfg_path=None, smoke=False):
                     reason = "em_align 不是配置段"
         except Exception as exc:
             reason = "配置键检查失败: %s" % exc
-    # P2-2: stop the poll chain before destroy (same as _on_close).
     try:
         gui._simset_shutdown()
         gui._em_shutdown()
