@@ -1,14 +1,14 @@
 version: v1.7.2
-files: 51  raw_tar: 1249280  xz: 239704  base64: 323814 chars
+files: 51  raw_tar: 1249280  xz: 240200  base64: 324483 chars
 tests: excluded (src/virtuoso_optimizer/lri/selftest_librf.py)
 docs: excluded (release/)
 chunks: 2 at limit 200000 chars/paste
-blob sha256: f4d07601b8a0056cf143211bee3cf019e74657eae57197594694b170f26a0f40
+blob sha256: 75177d24ff4cb2228aac6cf359280e864d0077aba3131ace9c94ecd668ac9d56
 
 paste counts: 8k=41  16k=21  32k=11  64k=6  128k=3  256k=2  512k=1
 
-p001.b64    199960 chars  sha256=27c3dd77a9620643d961864ddba467136244bd895788caaa810252b2ead64f35
-p002.b64    123855 chars  sha256=28b2dec04eae8755f2540e4a244c528b962eeb87a5099a6fe8918c33ec9592f3
+p001.b64    199245 chars  sha256=6234ba55f41405f2aca5118797ff298b90660aeff42c0336e3d9b2fea01b1291
+p002.b64    125239 chars  sha256=e6c60787716bb14f96a681802bf99e41361bce6180258beb18c6a8a938319b8e
 
 A 终端粘贴: 依次粘贴 paste_001.sh .. paste_002.sh，再执行 sh check.sh && sh unpack.sh
 B 剪贴板落盘: 复制 raw_001.b64 .. raw_002.b64，每片在服务器执行
