@@ -259,6 +259,71 @@ def build_sym(rx, ry, n, w, s, chamfer=None, lead_len=20.0, lead_gap=None,
                "xe": xe, "vlen": vlen, "e": e, "y_bridge": y_bridge}
 
 
+def point_at(pts, frac):
+    """Point at arc-length fraction ``frac`` of a polyline."""
+    seg = []
+    total = 0.0
+    for i in range(len(pts) - 1):
+        d = math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+        seg.append(d)
+        total += d
+    want = max(0.0, min(1.0, float(frac))) * total
+    acc = 0.0
+    for i, d in enumerate(seg):
+        if acc + d >= want - 1e-12 or i == len(seg) - 1:
+            t = 0.0 if d < 1e-12 else (want - acc) / d
+            t = max(0.0, min(1.0, t))
+            return (pts[i][0] + t * (pts[i + 1][0] - pts[i][0]),
+                    pts[i][1] + t * (pts[i + 1][1] - pts[i][1]))
+        acc += d
+    return pts[-1]
+
+
+# ------------------------------------------------------------------ single ended
+def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
+    """Single-ended octagonal inductor: one inward spiral on one layer.
+
+    The winding follows the rfgeom law -- concentric octagons one pitch
+    apart, turn changes as symmetric 45 deg X crossings on the coil axis --
+    and, being a single winding, never crosses itself, so it needs no
+    underpass at all.  Leads are straight and axis aligned: p01 goes up from
+    the outer end, p02 leaves the inner end along that end's own y sign (up
+    when the last half-ring finishes on the top, down when it finishes on
+    the bottom), so the two never collide whatever the turn count.
+
+    ``ct`` adds a centre tap: a via pad at the winding's mid-length point
+    plus a straight radial stub on the "ct" layer out past the coil edge.
+    The stub is on its own layer, so it may cross the winding it taps.
+    """
+    if chamfer is None:
+        chamfer = 2.0 - SQ2
+    rings, pitch, nring = ring_family(rx, ry, w, s, n, chamfer)
+    a0, b0, _c0 = rings[0]
+    xj = pitch / 2.0
+    pts, inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=+1)
+    g = Geo()
+    g.path(pts, w, "main")
+    p_out, p_in = pts[0], pts[-1]
+    g.path([p_out, (p_out[0], p_out[1] + lead_len)], w, "main")
+    g.pin("p01", p_out[0], p_out[1] + lead_len, "N", "main")
+    sgn = 1.0 if p_in[1] >= 0.0 else -1.0
+    g.path([p_in, (p_in[0], p_in[1] + sgn * lead_len)], w, "main")
+    g.pin("p02", p_in[0], p_in[1] + sgn * lead_len,
+          "N" if sgn > 0.0 else "S", "main")
+    if ct:
+        mid = point_at(pts, 0.5)
+        sgc = 1.0 if mid[1] >= 0.0 else -1.0
+        y_tip = sgc * (ry + float(ct_len))
+        g.viapad(mid[0] - w / 2.0, min(mid[1], mid[1] + sgc * w),
+                 mid[0] + w / 2.0, max(mid[1], mid[1] + sgc * w),
+                 ("ct", "main"))
+        g.path([mid, (mid[0], y_tip)], w, "ct")
+        g.pin("ct1", mid[0], y_tip, "N" if sgc > 0.0 else "S", "ct")
+    return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
+               "e": inf["e"], "p_out": p_out, "p_in": p_in}
+
+
+
 # ------------------------------------------------------------------ single winding
 def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1):
     """One inward spiral on a SINGLE layer: octagon half-rings joined by
