@@ -300,7 +300,8 @@ def lri_norm_geom(g):
     sm = str(g.get("seam", "S")).strip().upper()
     g["seam"] = SEAM_MAP.get(sm, "bottom")
     try:
-        g["tangle"] = int(float(g.get("tangle", 180) or 180))
+        _tv = g.get("tangle", 180)
+        g["tangle"] = int(float(180 if _tv in (None, "") else _tv))
     except (TypeError, ValueError):
         g["tangle"] = 180
     if g["tangle"] not in (0, 90, 180):
@@ -521,7 +522,10 @@ def lri_sym_under_poly(pts, w):
         (x4, y2 - sg * h),
         (x4, yb),
         (x2 - back, yb),
-        (x0, y0 + sg * (h + back - (x1 - x0))),
+        # abs(): the end flare must not depend on the sign of (x1-x0), else
+        # one side of the crossing gets a shorter band end and its via column
+        # sticks out (G4b floating vias).  Symmetric in x by construction.
+        (x0, y0 + sg * (h + back + abs(x1 - x0))),
     ]
 
 def lri_sym_delta_window(w, s, R, p):
@@ -581,16 +585,31 @@ def lri_i3_rings(rx, ry, w, s, n_turns, chamfer):
         out.append((a, b, c))
     return out, p, N
 
-def lri_i3_half_r(a, b, c, xj):
-    if xj > a - c + 1e-9:
-        raise ValueError(
-            "xj=%.3f 超出顶边直段 (a-c=%.3f)；减小 w/s、增大 rx/ry 或减小 "
-            "chamfer" % (xj, a - c))
-    return [(xj, b), (a - c, b), (a, b - c), (a, c - b), (a - c, -b),
-            (xj, -b)]
+def lri_i3_cross_gap(w, s, p):
+    """rfgeom.cross_gap: ring-end pull-back so the gap at a crossing is s.
 
-def lri_i3_half_l(a, b, c, xj):
-    return [(-x, y) for x, y in reversed(lri_i3_half_r(a, b, c, xj))]
+    Algebraically identical to the old lri_i3_window dmin
+    ``(sqrt(2)-1)*(s + w/2)``.
+    """
+    return max(0.0, math.sqrt(2.0) * (s + w / 2.0) - p + w / 2.0)
+
+
+def lri_i3_half_xy(a, b, c, x_top, x_bot, sg):
+    """Half ring with independent end abscissae (rfgeom.half_top_to_bot).
+
+    x_top/x_bot are UNSIGNED and sg picks the side: +1 right half, -1 mirrored
+    left half.  Passing a pre-signed x negates the endpoints twice and drags
+    the ring end onto the opposite side.
+    """
+    if max(x_top, x_bot) > a - c + 1e-9:
+        raise ValueError(
+            "环端 x=%.3f 超出顶边直段 (a-c=%.3f)；减小 w/s、增大 rx/ry 或减小 "
+            "chamfer" % (max(x_top, x_bot), a - c))
+    pts = [(x_top, b), (a - c, b), (a, b - c), (a, c - b), (a - c, -b),
+           (x_bot, -b)]
+    if sg < 0:
+        pts = [(-x, y) for x, y in pts]
+    return lri_dedup(pts)
 
 def lri_i3_window(w, s_req, ring_k, ring_k1, xj, via_edge, stub):
     a, b, c = ring_k
@@ -613,53 +632,83 @@ def lri_i3_via_span(w, cut, sp, encl):
 
 def lri_i3_arm(rings, p, N, xj, w, s, side, via_edge, stub,
                delta_frac=SYM_I3_DELTA_FRAC):
-    """Single arm -> (tops, unders, vias, trim_pts). Edges are flat via point lists."""
-    halfs = []
-    for k, (a, b, c) in enumerate(rings):
-        seg = (lri_i3_half_r(a, b, c, xj) if k % 2 == 0
-               else lri_i3_half_l(a, b, c, xj))
-        if side < 0:
-            seg = [(-x, y) for x, y in seg]
-        halfs.append(seg)
+    """Single arm -> (tops, unders, vias, trim_pts). Edges are flat via point lists.
+
+    Turn changes follow the rfgeom law (line-by-line counterpart of SKILL
+    lriI3Arm): ring ends pulled out by the closed-form cross gap e, joined by
+    a symmetric 45-degree X crossing on the coil axis, one branch on the main
+    metal and the other on the under layer.  The old lri_i3_window /
+    delta_frac sliding heuristic is gone -- it picked a fit-dependent offset,
+    which is what made the windings irregular.  Only its dmax feasibility
+    bound is kept: it accounts for the 45-degree chamfer miter
+    w*(sqrt(2)-1)/2 at the inner ring end, which the plain edge length does
+    not, and dropping it let e.g. w=14/rx=60 build when the suite expects a
+    rejection.
+    """
+    e = lri_i3_cross_gap(w, s, p)
+    xe = xj + e
+    a0, _b0, c0 = rings[0]
+    aN, _bN, cN = rings[-1]
+    lmax = min(a0 - c0, aN - cN) - xe
+    if lmax < via_edge + stub:
+        raise ValueError(
+            "45° 跨线放不下通孔区 (可用 %.3f < 需要 %.3f)；请增大 rx/ry 或减小 "
+            "w/s/n" % (lmax, via_edge + stub))
     unders, vias, trim_pts = [], [], []
-    for k in range(N - 1):
-        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
-        if not under_here:
-            continue
-        dmin, dmax = lri_i3_window(w, s, rings[k], rings[k + 1], xj,
-                                   via_edge, stub)
-        if dmax < dmin - 1e-9:
-            raise ValueError(
-                "换圈 k=%d 的 45° 夹缝放不下 w=%.2f 端头（窗口 %.3f..%.3f）"
-                % (k, w, dmin, dmax))
-        delta = dmin + delta_frac * (dmax - dmin)
-        a = halfs[k][-1]
-        b = halfs[k + 1][0]
-        sa = 1.0 if a[0] >= 0.0 else -1.0
-        sb = 1.0 if b[0] >= 0.0 else -1.0
-        at = (a[0] + sa * delta, a[1])
-        bt = (b[0] + sb * delta, b[1])
-        halfs[k][-1] = at
-        halfs[k + 1][0] = bt
-        av = (at[0] + sa * via_edge, at[1])
-        bv = (bt[0] + sb * via_edge, bt[1])
-        ae = (av[0] + sa * stub, av[1])
-        be = (bv[0] + sb * stub, bv[1])
-        cc = (av[0] - sa * p, bv[1])
-        unders.append([ae, av, cc, bv, be])
-        vias.extend([av, bv])
-        trim_pts.extend([at, bt])
     tops = []
-    run = list(halfs[0])
-    for k in range(N - 1):
-        nxt = halfs[k + 1][0]
+    run = None
+    for k in range(N):
+        a, b, c = rings[k]
+        kside = side * (1 if k % 2 == 0 else -1)
+        last = (k == N - 1)
+        # both abscissae UNSIGNED -- lri_i3_half_xy mirrors by kside.  The
+        # free end of the innermost ring lands on xj to meet the bridge; only
+        # ring changes use the pulled-out xe.
+        x_end = xj if last else xe
+        x_lead = xj if (k == 0 or last) else xe
+        seg = lri_i3_half_xy(a, b, c, x_lead, x_end, kside)
+        if k % 2 == 1:
+            seg = list(reversed(seg))
+        run = (run + seg[1:]) if run else list(seg)
+        if last:
+            break
+        y_end = -b if k % 2 == 0 else b
+        y_next = -(b - p) if k % 2 == 0 else (b - p)
+        r1 = rings[k + 1]
+        dmax = min(
+            (a - c) - xj - (via_edge + stub),
+            (r1[0] - r1[2]) - w * (math.sqrt(2.0) - 1.0) / 2.0 - xj,
+            (a - c) + s / 2.0 - math.sqrt(2.0) * (w / 2.0 + s))
+        if dmax < e - 1e-9:
+            raise ValueError(
+                "换圈 k=%d 的 45° 夹缝放不下（需 %.3f > 可用 %.3f）；请增大 "
+                "rx/ry 或减小 w/s" % (k, e, dmax))
         under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
+        at = (kside * xe, y_end)
+        bt = (-kside * xe, y_next)
+        av = (kside * (xe + via_edge), y_end)
+        bv = (-kside * (xe + via_edge), y_next)
+        ae = (kside * (xe + via_edge + stub), y_end)
+        be = (-kside * (xe + via_edge + stub), y_next)
+        trim_pts.extend([at, bt])
         if under_here:
             tops.append(run)
-            run = list(halfs[k + 1])
+            run = None
+            # rfgeom law: the X crossing is centred on the coil axis -- the
+            # diagonal runs (kside*xj, y_end) -> (-kside*xj, y_next), so
+            # dx = dy = p and the crossing point is exactly x = 0.  Starting
+            # the diagonal at the via pad (av, cc) puts it off-axis; that
+            # asymmetry is the irregularity this rewrite removes.  Both
+            # horizontal runs still sweep through the via pads.
+            unders.append([ae, (kside * xj, y_end), (-kside * xj, y_next),
+                           (-kside * xe, y_next), be])
+            vias.extend([av, bv])
         else:
-            run.append(nxt)
-            run.extend(halfs[k + 1][1:])
+            # the X crossing stays on the main metal this turn: same 4-point
+            # jog, folded into the run
+            jog = [(kside * xe, y_end), (kside * xj, y_end),
+                   (-kside * xj, y_next), (-kside * xe, y_next)]
+            run.extend(jog[1:])
     tops.append(run)
     return tops, unders, vias, trim_pts
 
@@ -719,6 +768,104 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
         "bx": 2.0 * rx, "by": 2.0 * ry,
         "bbox": (-rx, -ry, rx, y_port),
     }
+
+def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm):
+    """One inward spiral on a SINGLE layer -> point list.
+
+    Counterpart of SKILL lriI3SpiralRun / rfgeom.spiral_run.  A single
+    winding never crosses itself at a turn change -- the jog only carries it
+    from one side of the coil axis to the other -- so the X crossing stays on
+    the same metal and no underpass is needed.  ``arm=-1`` is the 180 deg
+    rotation of ``arm=+1``, which is how a transformer secondary sits
+    opposite its primary.
+    """
+    e = lri_i3_cross_gap(w, s, p)
+    xe = xj + e
+    a0, _b0, c0 = rings[0]
+    aN, _bN, cN = rings[-1]
+    lmax = min(a0 - c0, aN - cN) - xe
+    if lmax < 0.0:
+        raise ValueError(
+            "45° 跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" % lmax)
+    N = len(rings)
+    pts = None
+    for k in range(N):
+        a, b, c = rings[k]
+        kside = arm * (1 if k % 2 == 0 else -1)
+        last = (k == N - 1)
+        x_end = xj if last else xe
+        # both abscissae UNSIGNED -- lri_i3_half_xy mirrors by kside.  The
+        # free end of the innermost ring lands on xj; only ring changes use
+        # the pulled-out xe.
+        xl = x_lead if k == 0 else (xj if last else xe)
+        seg = lri_i3_half_xy(a, b, c, xl, x_end, kside)
+        if k % 2 == 1:
+            seg = list(reversed(seg))
+        pts = (pts + seg[1:]) if pts else list(seg)
+        if last:
+            break
+        y_end = -b if k % 2 == 0 else b
+        y_next = -(b - p) if k % 2 == 0 else (b - p)
+        jog = lri_dedup([(kside * xe, y_end), (kside * xj, y_end),
+                         (-kside * xj, y_next), (-kside * xe, y_next)])
+        pts = pts + jog[1:]
+    return pts
+
+
+def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
+                      gap=None, chamfer=None, ct=0, shrink=1,
+                      lead_len=20.0):
+    """Interleaved / stacked transformer -> dict.
+
+    Line-by-line counterpart of SKILL lriI3BuildXfmr and rfgeom.build_xfmr:
+    two concentric octagonal spirals, primary on the main metal (``tops``) and
+    secondary on the under metal (``under``) rotated 180 deg, so the layer
+    change does the crossing work and neither winding needs an underpass.
+    ``shrink`` pulls the secondary outer radius in by that many primary
+    pitches -- the interleaving knob; 0 degenerates to a plain stack.
+    """
+    if chamfer is None:
+        chamfer = 2.0 - math.sqrt(2.0)
+    gap = s if gap is None else float(gap)
+    if gap < s - 1e-9:
+        raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
+    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, np_turns, chamfer)
+    rs = max(0, int(round(float(shrink))))
+    rings_s, p_s, nS = lri_i3_rings(max(0.0, rx - rs * p),
+                                    max(0.0, ry - rs * p),
+                                    w, s, ns_turns, chamfer)
+    if abs(p_s - p) > 1e-9:
+        raise ValueError("primary/secondary pitch mismatch")
+    xj = p / 2.0
+    p_pts = lri_i3_spiral_run(rings_p, p, xj, xj, w, s, +1)
+    s_pts = lri_i3_spiral_run(rings_s, p, xj, xj, w, s, -1)
+    p_out, s_out = p_pts[0], s_pts[0]
+    p_in, s_in = p_pts[-1], s_pts[-1]
+    p_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
+    s_lead = [s_out, (s_out[0], s_out[1] + lead_len)]
+    tops = [p_pts, p_lead]
+    under = [s_pts, s_lead]
+    ports = [("p01", p_lead[-1]), ("p02", p_in),
+             ("p03", s_lead[-1]), ("p04", s_in)]
+    ct_geom = None
+    if ct:
+        # the stub starts at s_in itself, not on the axis -- an axis-only
+        # start would leave it detached from the winding by |s_in.x|
+        y_tip = s_in[1] + (lead_len if s_in[1] >= 0.0 else -lead_len)
+        ct_geom = {"stem": [s_in, (0.0, s_in[1]), (0.0, y_tip)]}
+        under.append(ct_geom["stem"])
+        ports.append(("ct1", (0.0, y_tip)))
+    ymax = max(p_lead[-1][1], s_lead[-1][1])
+    ymin = min(p_in[1], s_in[1])
+    return {
+        "tops": tops, "under": under, "under_poly": [], "vias": [],
+        "ports": ports, "ct": ct_geom, "kind": "xfmr",
+        "rings_p": rings_p, "rings_s": rings_s,
+        "nP": nP, "nS": nS, "p": p, "xj": xj,
+        "bx": 2.0 * rx, "by": 2.0 * ry,
+        "bbox": (-rx, ymin, rx, ymax),
+    }
+
 
 def lri_sym_arm(dout, n, w, s, side=1):
     if dout <= 0.0 or w <= 0.0 or s <= 0.0:

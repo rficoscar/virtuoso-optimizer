@@ -139,7 +139,7 @@ def emit_il(d, src_name):
     w("  list(")
     w("    list(\"spiral\" %s) list(\"underpass\" %s)" % (_q(main), _q(aux)))
     w("    list(\"route\" %s) list(\"ground\" %s)" % (_q(route), _q(route)))
-    w("    list(\"via_sp\" %s) list(\"via_un\" %s)" % (_q(vmain), _q(vmain)))
+    w("    list(\"via_sp\" %s) list(\"via_un\" %s)" % (_q(vmain), _q(vroute)))
     w("    list(\"via_st\" %s)" % _q(vroute))
     w("    list(\"marker\" %s)))" % _q(d["marker"]["oa"][0]))
     w("setq(librfTechText")

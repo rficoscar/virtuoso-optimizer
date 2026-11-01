@@ -102,7 +102,7 @@ procedure(lriPcellTechSmic55Inline()
   librfTechName = "SMIC55LL_ULP_RF (inline)"
   librfTech = list(
     list("spiral" "TM2") list("underpass" "TM1") list("route" "M6")
-    list("ground" "M6") list("via_sp" "TV2") list("via_un" "TV2")
+    list("ground" "M6") list("via_sp" "TV2") list("via_un" "TV1")
     list("via_st" "TV1")
     list("marker" "INDMY"))
   librfTechText = list(

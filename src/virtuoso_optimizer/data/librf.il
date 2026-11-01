@@ -596,14 +596,15 @@ procedure(librfDrcWideSpace(metalName)
         ans = 1.0 * cadr(sub)))
     ans))
 procedure(librfDrcMinArea(metalName)
-  let((p sub)
+  let((p sub ans)
+    ans = 4.0
     when(boundp('librfDrc) && librfDrc
       p = assoc("min_area" librfDrc))
     when(p && cdr(p)
       sub = assoc(metalName cadr(p))
       when(sub && cdr(sub) && numberp(cadr(sub))
-        return(1.0 * cadr(sub))))
-    4.0))
+        ans = 1.0 * cadr(sub)))
+    ans))
 procedure(librfMetalPair(nm) list(nm "drawing"))
 procedure(librfViaPair(nm)   list(nm "drawing"))
 procedure(librfTxtPair(nm)
@@ -3168,7 +3169,10 @@ procedure(lriUnderPolyPts(pts w)
       list(x4 (y2 - sg * h))
       list(x4 yb)
       list((x2 - back) yb)
-      list(x0 (y0 + sg * (h + back - (x1 - x0)))))))
+      ; abs(): the end flare must not depend on the sign of (x1-x0), else one
+      ; side of the crossing gets a shorter band end and its via column sticks
+      ; out (G4b floating vias).  Symmetric in x by construction.
+      list(x0 (y0 + sg * (h + back + abs(x1 - x0)))))))
 
 procedure(lriBridgeVia(cv pts w)
   when(length(pts) == 5
@@ -3291,34 +3295,10 @@ procedure(lriI3Rings(rx ry w s n chamfer)
       out = append(out list(list(a b c))))
     return(list(out p N))))
 
-; Right half-turn: top (xj,b) -> bottom (xj,-b)
-procedure(lriI3HalfR(a b c xj)
-  prog((ac nb bc)
-    when(xj > a - c + 1.0e-9
-      librfErr(sprintf(nil
-        "lri[i3]: xj=%.3f 超出顶边直段 (a-c=%.3f)；减小 w/s、增大 rx/ry 或减小 chamfer"
-        xj (a - c)))
-      return(nil))
-    ac = a - c
-    nb = 0.0 - b
-    bc = b - c
-    return(lriDedup(list(list(xj b) list(ac b) list(a bc)
-                         list(a 0.0 - bc) list(ac nb) list(xj nb))))))
-
-; Left half-turn: bottom (-xj,-b) -> top (-xj,b)
-procedure(lriI3HalfL(a b c xj)
-  lriMirrorX(reverse(lriI3HalfR(a b c xj))))
+; (the fixed-xj half-turn constructors lriI3HalfR/L were replaced by
+;  lriI3HalfXY, which takes independent end abscissae)
 
 ; Turn-flush outer-window shift (dmin dmax).
-procedure(lriI3Window(w s ringK ringK1 xj viaEdge stub)
-  let((a b c a1 b1 c1 dmin dm1 dm2 dm3)
-    a = car(ringK)   b = cadr(ringK)   c = caddr(ringK)
-    a1 = car(ringK1) b1 = cadr(ringK1) c1 = caddr(ringK1)
-    dmin = (sqrt(2.0) - 1.0) * (s + w / 2.0)
-    dm1 = (a - c) - xj - (viaEdge + stub)
-    dm2 = (a1 - c1) - w * (sqrt(2.0) - 1.0) / 2.0 - xj
-    dm3 = (a - c) + s / 2.0 - sqrt(2.0) * (w / 2.0 + s)
-    list(dmin min(dm1 min(dm2 dm3)))))
 
 ; Largest odd cut count that fits the wide end -> (span ncut)
 procedure(lriI3ViaSpan(w cut sp encl)
@@ -3331,63 +3311,124 @@ procedure(lriI3ViaSpan(w cut sp encl)
     span = n * cut + (n - 1) * sp
     list(span n)))
 
+; ---- rfgeom law: concentric octagons joined by symmetric 45 deg X crossings
+; Closed-form outward pull-back of a ring end next to a crossing, so the
+; edge-to-edge gap at the crossing is exactly the coil spacing s.  Mirrors
+; rfgeom.cross_gap; replaces the old lriI3Window/delta heuristic.
+procedure(lriI3CrossGap(w s p)
+  max(0.0 sqrt(2.0) * (s + w / 2.0) - p + w / 2.0))
+
+; Half ring with independent end abscissae, mirroring rfgeom.half_top_to_bot.
+; xTop/xBot are UNSIGNED and sg picks the side: +1 right half, -1 mirrored
+; left half.  Passing a pre-signed x here negates the endpoints twice and
+; drags the ring end onto the opposite side (shorts the lead row).
+procedure(lriI3HalfXY(a b c xTop xBot sg)
+  prog((ac nb bc pts)
+    when(max(xTop xBot) > a - c + 1.0e-9
+      librfErr(sprintf(nil
+        "lri[i3]: 环端 x=%.3f 超出顶边直段 (a-c=%.3f)；减小 w/s、增大 rx/ry 或减小 chamfer"
+        max(xTop xBot) (a - c)))
+      return(nil))
+    ac = a - c
+    nb = 0.0 - b
+    bc = b - c
+    pts = list(list(xTop b) list(ac b) list(a bc)
+               list(a 0.0 - bc) list(ac nb) list(xBot nb))
+    return(lriDedup(if(sg < 0 then lriMirrorX(pts) else pts)))))
+
 ; Single arm. Returns (tops unders vias).
-; tops = top-layer continuous polyline table; unders = 5-point underpass path; vias = via centre points.
+;   tops   = main-metal continuous polyline table
+;   unders = 5-point turn-change underpass path (ae av cc bv be)
+;   vias   = via pad centres (x y)
+; Turn changes follow the rfgeom law: each ring end is pulled out by the
+; closed-form cross gap e, and consecutive rings are joined by a symmetric
+; 45-degree X crossing on the coil axis (dx = dy = p) -- one branch on the
+; main metal, the other on the under layer, with a via pad at both ring ends.
+; The old lriI3Window/deltaFrac sliding heuristic is gone: it picked a
+; fit-dependent offset out of a window, which is what made the windings
+; irregular.  The viaEdge/stub enclosure relation is unchanged -- only where
+; the ring ends sit moved, so the DRC-proven via coverage is preserved.
 procedure(lriI3Arm(rings p N xj w s side viaEdge stub deltaFrac)
-  prog((halfs unders vias tops run nxt k uh q dmin dmax delta ring ring1
-        a b sa sb at bt av bv ae be cc seg)
-    halfs = nil
+  prog((e xe lmax a0 c0 aN cN unders vias tops run k last r1 dmax
+        a b c kside xEnd xLead seg yEnd yNext jog uh av bv ae be)
+    e = lriI3CrossGap(w s p)
+    xe = xj + e
+    a0 = car(car(rings))     c0 = caddr(car(rings))
+    aN = car(lriLast(rings)) cN = caddr(lriLast(rings))
+    lmax = min(a0 - c0  aN - cN) - xe
+    ; The via pad sits on the ring's straight edge past the crossing, so the
+    ; edge must be at least viaEdge+stub long.  (Do not reuse rfgeom's fixed
+    ; 2.0 um floor: there the pad extends a full vlen outward, whereas here
+    ; it is viaEdge+stub and lands on the edge itself.)
+    when(lmax < viaEdge + stub
+      librfErr(sprintf(nil
+        "lri[i3]: 45 度跨线放不下通孔区 (可用 %.3f < 需要 %.3f)；请增大 rx/ry 或减小 w/s/n"
+        lmax (viaEdge + stub)))
+      return(nil))
+    unders = nil   vias = nil   tops = nil   run = nil
     for(k 0 N-1
-      ring = nth(k rings)
-      seg = if(mod(k 2) == 0
-              then lriI3HalfR(car(ring) cadr(ring) caddr(ring) xj)
-              else lriI3HalfL(car(ring) cadr(ring) caddr(ring) xj))
+      a = car(nth(k rings))  b = cadr(nth(k rings))  c = caddr(nth(k rings))
+      kside = side * if(mod(k 2) == 0 then 1 else -1)
+      last = (k == N-1)
+      ; both abscissae UNSIGNED -- lriI3HalfXY mirrors by kside.  Passing a
+      ; pre-signed x negates the endpoints twice and drags the ring end onto
+      ; the opposite side (shorts the lead row).  The free end of the
+      ; innermost ring lands on xj to meet the bridge; only ring changes use
+      ; the pulled-out xe -- using xe there leaves the bridge hanging e away.
+      xEnd  = if(last then xj else xe)
+      xLead = if(or(k == 0  last) then xj else xe)
+      seg = lriI3HalfXY(a b c xLead xEnd kside)
       when(seg == nil  return(nil))
-      halfs = append(halfs list(seg)))
-    when(side < 0
-      let((m h)
-        m = nil
-        foreach(h halfs  m = append(m list(lriMirrorX(h))))
-        halfs = m))
-    unders = nil
-    vias = nil
-    for(k 0 N-2
-      uh = if(side < 0 then mod(k 2) == 0 else mod(k 2) == 1)
-      when(uh
-        q = lriI3Window(w s nth(k rings) nth(k+1 rings) xj viaEdge stub)
-        dmin = car(q)  dmax = cadr(q)
-        when(dmax < dmin - 1.0e-9
+      when(mod(k 2) == 1  seg = reverse(seg))
+      run = if(run then append(run cdr(seg)) else seg)
+      unless(last
+        yEnd  = if(mod(k 2) == 0 then 0.0 - b else b)
+        yNext = if(mod(k 2) == 0 then 0.0 - (b - p) else (b - p))
+        ; Feasibility window at this ring change.  e == (sqrt(2)-1)*(s+w/2) is
+        ; the tightest legal pull-back (gap at the crossing == s), so it plays
+        ; the role of the old dmin; dmax is kept because it also accounts for
+        ; the 45-degree chamfer miter w*(sqrt(2)-1)/2 at the inner ring end,
+        ; which lmax alone does not -- dropping it let w=14/rx=60 build, a
+        ; case the suite expects to be rejected.
+        r1 = nth(k + 1 rings)
+        dmax = min(((a - c) - xj - (viaEdge + stub))
+                   ((car(r1) - caddr(r1)) - w * (sqrt(2.0) - 1.0) / 2.0 - xj)
+                   ((a - c) + s / 2.0 - sqrt(2.0) * (w / 2.0 + s)))
+        when(dmax < e - 1.0e-9
           librfErr(sprintf(nil
-            "lri[i3]: 换圈 k=%d 的 45 度夹缝放不下 w=%.2f 端头（窗口 %.3f..%.3f）；请增大 rx/ry 或减小 w/s"
-            k w dmin dmax))
+            "lri[i3]: 换圈 k=%d 的 45 度夹缝放不下（需 %.3f > 可用 %.3f）；请增大 rx/ry 或减小 w/s"
+            k e dmax))
           return(nil))
-        delta = dmin + deltaFrac * (dmax - dmin)
-        a = lriLast(nth(k halfs))
-        b = car(nth(k+1 halfs))
-        sa = if(car(a) >= 0.0 then 1.0 else -1.0)
-        sb = if(car(b) >= 0.0 then 1.0 else -1.0)
-        at = list(car(a) + sa * delta cadr(a))
-        bt = list(car(b) + sb * delta cadr(b))
-        rplaca(lriLastCell(nth(k halfs)) at)
-        rplaca(nth(k+1 halfs) bt)
-        av = list(car(at) + sa * viaEdge cadr(at))
-        bv = list(car(bt) + sb * viaEdge cadr(bt))
-        ae = list(car(av) + sa * stub cadr(av))
-        be = list(car(bv) + sb * stub cadr(bv))
-        cc = list(car(av) - sa * p cadr(bv))
-        unders = append(unders list(list(ae av cc bv be)))
-        vias = append(vias list(av bv))))
-    tops = nil
-    run = car(halfs)
-    for(k 0 N-2
-      uh = if(side < 0 then mod(k 2) == 0 else mod(k 2) == 1)
-      nxt = car(nth(k+1 halfs))
-      cond(
-        (uh
-          tops = append(tops list(run))
-          run = nth(k+1 halfs))
-        (t
-          run = append(run cons(nxt cdr(nth(k+1 halfs)))))))
+        uh = if(side < 0 then mod(k 2) == 0 else mod(k 2) == 1)
+        av = list(kside * (xe + viaEdge) yEnd)
+        bv = list(0.0 - kside * (xe + viaEdge) yNext)
+        ae = list(kside * (xe + viaEdge + stub) yEnd)
+        be = list(0.0 - kside * (xe + viaEdge + stub) yNext)
+        cond(
+          (uh
+            tops = append(tops list(run))
+            run = nil
+            ; rfgeom law: the X crossing is centred on the coil axis.  The
+            ; diagonal runs (kside*xj,yEnd) -> (-kside*xj,yNext), so dx = dy
+            ; = p and the crossing point is exactly x = 0.  The old (av,cc)
+            ; form started the diagonal at the via pad instead, putting it
+            ; off-axis -- that asymmetry is the irregularity this rewrite
+            ; removes.  Both horizontal runs still sweep through the via pads
+            ; (xj .. xe+viaEdge+stub covers xe+viaEdge on each side).
+            unders = append(unders
+                     list(list(ae
+                               list(kside * xj yEnd)
+                               list(0.0 - kside * xj yNext)
+                               list(0.0 - kside * xe yNext)
+                               be)))
+            vias = append(vias list(av bv)))
+          (t
+            ; the X crossing stays on the main metal this turn: same 4-point
+            ; jog, folded into the run (av/bv are the via-column centres)
+            jog = list(list(kside * xe yEnd) list(kside * xj yEnd)
+                       list(0.0 - kside * xj yNext)
+                       list(0.0 - kside * xe yNext))
+            run = append(run cdr(jog))))))
     tops = append(tops list(run))
     return(list(tops unders vias))))
 
@@ -3469,6 +3510,18 @@ procedure(lriViaSq(cv vpair x y cut)
   librfRect(cv vpair (x - cut / 2.0) (y - cut / 2.0)
                      (x + cut / 2.0) (y + cut / 2.0)))
 
+; Turn-change via columns occupy the ring edge they sit on; stack stitching
+; fills that same edge and would collide with them (G5b via spacing).  Build
+; sets this list to (x y halfX halfY) boxes before filling and clears it after.
+defvar(lriI3FillSkip nil)
+procedure(lriI3FillHit(x y)
+  let((hit z)
+    hit = nil
+    foreach(z lriI3FillSkip
+      when(and(abs(x - nth(0 z)) < nth(2 z)  abs(y - nth(1 z)) < nth(3 z))
+        hit = t))
+    hit))
+
 procedure(lriStackFill(cv vlyr pts w cut sp enc)
   prog((vpair r dpitch nrow x1 y1 x2 y2 dx dy L ux uy nx ny s j off px py)
     r = w / 2.0 - enc - cut / 2.0
@@ -3499,7 +3552,8 @@ procedure(lriStackFill(cv vlyr pts w cut sp enc)
                      else 0.0)
             px = x1 + ux * s + nx * off
             py = y1 + uy * s + ny * off
-            lriViaSq(cv vpair px py cut))
+            unless(lriI3FillHit(px py)
+              lriViaSq(cv vpair px py cut)))
           s = s + dpitch)))
     t))
 
@@ -3642,6 +3696,13 @@ procedure(lriI3BuildSym(cv req)
     T = librfTxtPair(mainName)
     mName = car(M)  tName = car(T)
     ; Main winding: all top-layer continuous segments (no square caps at flush ends, avoiding 45-degree gaps)
+    ; Keep stack stitching clear of the turn-change via columns -- they sit on
+    ; the same ring edge that lriStackFill walks, and collided there (G5b).
+    when(stack > 0.5
+      lriI3FillSkip = nil
+      foreach(z append(va vb)
+        lriI3FillSkip = append(lriI3FillSkip
+          list(list(car(z) cadr(z) (vcut + vsp) (span / 2.0 + ven + vcut))))))
     foreach(run append(ta tb)
       librfPathSweepEx(cv M run w nil nil)
       when(stack > 0.5
@@ -3690,6 +3751,7 @@ procedure(lriI3BuildSym(cv req)
         ly = bridgeY - if(bridgeY >= 0.0 then 1.5 else -1.5)
         librfPortPin(cv mName T 0.0 ly "ct1")
         librfNotePort("ct1" 0.0 ly tName)))
+    lriI3FillSkip = nil
     ; Assertions
     let((x1 y1 x2 y2)
       x1 = 1.0e30  y1 = 1.0e30  x2 = -1.0e30  y2 = -1.0e30
@@ -3737,6 +3799,9 @@ procedure(lriBuildInd(cv req)
     cond(
       ((kind == "sym" || kind == "symmetric" || kind == "wiki")
         lriI3BuildSym(cv req))
+      ((kind == "xfmr" || kind == "transformer" || kind == "xfmr_il" ||
+        kind == "xfmr_st" || kind == "balun")
+        lriI3BuildXfmr(cv req))
       ((kind == "sym_legacy")
         lriBuildSym(cv req doutDef n w s))
       ((kind == "se")
@@ -3746,12 +3811,132 @@ procedure(lriBuildInd(cv req)
       ((kind == "f8" || kind == "fig8" || kind == "figure8")
         lriBuildF8(cv req W H w s n corner gap stubLen))
       (t
-        librfErr(sprintf(nil "lri: 未知 kind=%s (sym/se/diff/f8)" kind))))
+        librfErr(sprintf(nil "lri: 未知 kind=%s (sym/xfmr/se/diff/f8)" kind))))
 
     when(librfReqNum(req 'ind_mark 0) != 0
       librfIndMark(cv librfCvBBox(cv) 1.0))
     ; Assertion results are reported through librfErr; the return value only means the build completed (callers judge success by t)
     t))
+
+; ---- transformer / single-winding spiral (rfgeom law) ------------------
+; One inward spiral on a SINGLE layer: octagon half-rings joined by axis
+; jogs, no underpass.  A single winding never crosses itself at a turn
+; change -- the jog just carries it from one side of the coil axis to the
+; other -- so the X crossing stays on the same metal.  arm picks the
+; starting side; arm=-1 is the 180-degree rotation of arm=+1, which is how
+; the transformer secondary sits opposite its primary.  Mirrors
+; rfgeom.spiral_run.
+procedure(lriI3SpiralRun(rings p xj xLead w s arm)
+  prog((e xe a0 c0 aN cN lmax pts k a b c side last xEnd xl seg yEnd yNext jog)
+    e = lriI3CrossGap(w s p)
+    xe = xj + e
+    a0 = car(car(rings))     c0 = caddr(car(rings))
+    aN = car(lriLast(rings)) cN = caddr(lriLast(rings))
+    lmax = min(a0 - c0  aN - cN) - xe
+    when(lmax < 0.0
+      librfErr(sprintf(nil
+        "lri[i3]: 45 度跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" lmax))
+      return(nil))
+    pts = nil
+    for(k 0 length(rings) - 1
+      a = car(nth(k rings)) b = cadr(nth(k rings)) c = caddr(nth(k rings))
+      side = arm * if(mod(k 2) == 0 then 1 else -1)
+      last = (k == length(rings) - 1)
+      xEnd = if(last then xj else xe)
+      xl   = if(k == 0 then xLead else xEnd)
+      seg = lriI3HalfXY(a b c xl xEnd side)
+      when(seg == nil  return(nil))
+      when(mod(k 2) == 1  seg = reverse(seg))
+      pts = if(pts then append(pts cdr(seg)) else seg)
+      unless(last
+        yEnd  = if(mod(k 2) == 0 then 0.0 - b else b)
+        yNext = if(mod(k 2) == 0 then 0.0 - (b - p) else (b - p))
+        jog = list(list(side * xe yEnd) list(side * xj yEnd)
+                   list(0.0 - side * xj yNext) list(0.0 - side * xe yNext))
+        pts = append(pts cdr(jog))))
+    ; prog 的值默认是 nil：必须显式 return，否则这个函数永远返回 nil
+    return(pts)))
+
+; Interleaved / stacked transformer: two concentric octagonal spirals.
+; Primary on the spiral metal, secondary on the under metal rotated 180
+; degrees, so the two windings pass over each other without any extra
+; underpass -- the layer change does the work.  Each winding follows the
+; rfgeom law.  shrink pulls the secondary in by that many pitches (the
+; interleaving knob of the legacy kernel); shrink=0 is a plain stack.
+; Ports p01/p02 primary outer/inner, p03/p04 secondary outer/inner, plus
+; ct1 on the secondary midpoint when ct=1.  Mirrors rfgeom.build_xfmr.
+; Port label at a path's free end sits ON the metal boundary and fails the
+; "label on conductor" check -- inset 1.5um along the path, the same trick
+; librfTipLabel uses.  mPair is the metal pair, tPair the TEXT pair (a list;
+; dbCreateLabel needs list(name dt), a bare name string drops the label).
+procedure(lriI3EndPin(cv mPair tPair pts portName)
+  let((n a b dx dy L x y tn)
+    n = length(pts)
+    b = lriLast(pts)
+    a = nth(n - 2 pts)
+    dx = car(b) - car(a)   dy = cadr(b) - cadr(a)
+    L = sqrt(dx * dx + dy * dy)
+    when(L < 1.0e-9  L = 1.0)
+    x = car(b)  - 1.5 * dx / L
+    y = cadr(b) - 1.5 * dy / L
+    tn = if(listp(tPair) then car(tPair) else tPair)
+    librfPortPin(cv car(mPair) tPair x y portName)
+    librfNotePort(portName x y tn)))
+
+procedure(lriI3BuildXfmr(cv req)
+  prog((rx ry np ns w s gap chamfer ct shrink
+        q ringsP ringsS p nP nS xj pPts sPts pOut pIn sOut sIn
+        M ML TS TL yTip leadLen)
+    rx  = librfReqNum(req 'rx 80.0)
+    ry  = librfReqNum(req 'ry rx)
+    np  = librfReqNum(req 'np 2.0)
+    ns  = librfReqNum(req 'ns 2.0)
+    w   = librfReqNum(req 'w 8.0)
+    s   = librfReqNum(req 's 3.0)
+    gap = librfReqNum(req 'gap s)
+    chamfer = librfReqNum(req 'chamfer (2.0 - sqrt(2.0)))
+    ct  = librfReqNum(req 'ct 0)
+    shrink = librfReqNum(req 'shrink 1)
+    leadLen = librfReqNum(req 'lead_len 20.0)
+    when(gap < s - 1.0e-9
+      librfErr(sprintf(nil "xfmr: gap=%.3f < s=%.3f" gap s))
+      return(nil))
+    q = lriI3Rings(rx ry w s np chamfer)
+    when(q == nil  return(nil))
+    ringsP = nth(0 q)  p = nth(1 q)  nP = nth(2 q)
+    q = lriI3Rings(max(0.0 rx - shrink * p) max(0.0 ry - shrink * p)
+                   w s ns chamfer)
+    when(q == nil  return(nil))
+    ringsS = nth(0 q)  nS = nth(2 q)
+    xj = p / 2.0
+    pPts = lriI3SpiralRun(ringsP p xj xj w s 1)
+    when(pPts == nil  return(nil))
+    sPts = lriI3SpiralRun(ringsS p xj xj w s -1)
+    when(sPts == nil  return(nil))
+    M  = librfMetalPair(librfLyr("spiral"))
+    ML = librfMetalPair(librfLyr("underpass"))
+    TS = librfTxtPair(librfLyr("spiral"))
+    TL = librfTxtPair(librfLyr("underpass"))
+    librfPathSweepEx(cv M pPts w nil nil)
+    librfPathSweepEx(cv ML sPts w nil nil)
+    pOut = car(pPts)   pIn = lriLast(pPts)
+    sOut = car(sPts)   sIn = lriLast(sPts)
+    ; outer leads: straight, axis aligned, flush with the coil
+    librfPathSweepEx(cv M
+      list(pOut list(car(pOut) cadr(pOut) + leadLen)) w nil nil)
+    librfPathSweepEx(cv ML
+      list(sOut list(car(sOut) cadr(sOut) + leadLen)) w nil nil)
+    lriI3EndPin(cv M  TS list(pOut list(car(pOut) cadr(pOut) + leadLen)) "p01")
+    lriI3EndPin(cv ML TL list(sOut list(car(sOut) cadr(sOut) + leadLen)) "p03")
+    ; inner ends terminate on the coil axis side
+    lriI3EndPin(cv M  TS pPts "p02")
+    lriI3EndPin(cv ML TL sPts "p04")
+    when(ct != 0
+      yTip = cadr(sIn) + if(cadr(sIn) >= 0.0 then leadLen else 0.0 - leadLen)
+      librfPathSweepEx(cv ML
+        list(sIn list(0.0 cadr(sIn)) list(0.0 yTip)) w nil nil)
+      lriI3EndPin(cv ML TL list(sIn list(0.0 cadr(sIn)) list(0.0 yTip)) "ct1"))
+    return(t)))
 
 procedure(lriSelfTest2()
   let((pts bb w s W H n corner ok nf)
