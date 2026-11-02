@@ -829,11 +829,17 @@ def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
     gap = s if gap is None else float(gap)
     if gap < s - 1e-9:
         raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
-    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, np_turns, chamfer)
+    # np/ns count FULL turns of each winding (same convention as
+    # lri_i3_build_se): one winding covers the whole coil, so two half-rings
+    # per turn
+    for _t in (np_turns, ns_turns):
+        if abs(2.0 * float(_t) - round(2.0 * float(_t))) > 1e-6:
+            raise ValueError("np/ns=%.3f 必须是 0.5 的整数倍（半圈）" % float(_t))
+    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, 2.0 * float(np_turns), chamfer)
     rs = max(0, int(round(float(shrink))))
     rings_s, p_s, nS = lri_i3_rings(max(0.0, rx - rs * p),
                                     max(0.0, ry - rs * p),
-                                    w, s, ns_turns, chamfer)
+                                    w, s, 2.0 * float(ns_turns), chamfer)
     if abs(p_s - p) > 1e-9:
         raise ValueError("primary/secondary pitch mismatch")
     xj = p / 2.0
@@ -864,6 +870,56 @@ def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
         "nP": nP, "nS": nS, "p": p, "xj": xj,
         "bx": 2.0 * rx, "by": 2.0 * ry,
         "bbox": (-rx, ymin, rx, ymax),
+    }
+
+
+def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
+                    lead_len=20.0, ct=0, ct_len=20.0):
+    """Single-ended octagonal inductor -> dict.
+
+    Line-by-line counterpart of SKILL lriI3BuildSe and rfgeom.build_se: one
+    inward spiral on a single layer -- a single winding never crosses
+    itself, so no underpass is needed -- with straight axis-aligned leads.
+    p02 leaves the inner end along that end's own y sign so the two leads
+    never collide whatever the turn count.  ``n`` counts FULL turns, as the
+    legacy lriSpiral did: one winding covers the whole coil, so the ring
+    family holds ``2*n`` half-rings.  Half turns are legal, quarter turns
+    are not.
+    """
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    rings, p, N = lri_i3_rings(rx, ry, w, s, 2.0 * float(n), chamfer)
+    a0, b0, _c0 = rings[0]
+    xj = p / 2.0
+    pts = lri_i3_spiral_run(rings, p, xj, xj, w, s, +1)
+    p_out, p_in = pts[0], pts[-1]
+    out_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
+    sgn = 1.0 if p_in[1] >= 0.0 else -1.0
+    in_lead = [p_in, (p_in[0], p_in[1] + sgn * lead_len)]
+    tops = [pts, out_lead, in_lead]
+    ports = [("p01", out_lead[-1]), ("p02", in_lead[-1])]
+    under = []
+    ct_geom = None
+    if ct:
+        # the tap leaves on the under metal so it may cross the winding it
+        # taps; the via pad at `mid` joins the two
+        mid = lri_point_at(pts, 0.5)
+        sgc = 1.0 if mid[1] >= 0.0 else -1.0
+        y_tip = sgc * (ry + float(ct_len))
+        ct_geom = {"tap": mid, "stem": [mid, (mid[0], y_tip)],
+                   "pad": (mid[0], mid[1], w)}
+        under.append(ct_geom["stem"])
+        ports.append(("ct1", (mid[0], y_tip)))
+    ymax = max(out_lead[-1][1], in_lead[-1][1])
+    # single winding: even k fills the right, odd k the left, so the box is
+    # one pitch narrower than the symmetric coil on the left
+    xmin = -(rx - p) if N >= 2 else (p / 2.0 - w / 2.0)
+    return {
+        "tops": tops, "under": under, "under_poly": [], "vias": [],
+        "ports": ports, "ct": ct_geom, "kind": "se",
+        "rings": rings, "N": N, "p": p, "xj": xj,
+        "bx": 2.0 * rx, "by": 2.0 * ry,
+        "bbox": (xmin, -ry, rx, ymax),
     }
 
 
@@ -993,6 +1049,31 @@ def lri_build_ind(g):
         out["ports"] = list(m["ports"])
         out["bx"] = 2.0 * rx
         out["by"] = 2.0 * ry
+        out["N"] = m["N"]
+        out["bbox"] = m["bbox"]
+        return out
+
+    if kind == "se":
+        # Second-generation kernel: rfgeom law, one winding on one layer and
+        # no underpass (a single winding never crosses itself); same geometry
+        # as SKILL lriI3BuildSe.  The legacy seam/tangle/corner knobs are gone.
+        dout = float(g.get("dout", W))
+        rx = float(g.get("rx", dout / 2.0))
+        ry = float(g.get("ry", float(g.get("H", W)) / 2.0))
+        m = lri_i3_build_se(
+            rx, ry, n, w, s,
+            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+            lead_len=float(g.get("lead_len", 20.0) or 20.0),
+            ct=int(float(g.get("ct", 0) or 0)),
+            ct_len=float(g.get("ct_len", 20.0) or 20.0))
+        out["metal"] = list(m["tops"])
+        out["topcaps"] = [(False, False)] * len(out["metal"])
+        out["under"] = list(m["under"])
+        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
+        out["vias"] = list(m["vias"])
+        out["ports"] = list(m["ports"])
+        out["bx"] = m["bx"]
+        out["by"] = m["by"]
         out["N"] = m["N"]
         out["bbox"] = m["bbox"]
         return out

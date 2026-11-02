@@ -2893,64 +2893,6 @@ procedure(lriCheck(pts w W H s tag)
       "存在非 0/45/90 段")
     t))
 
-procedure(lriBuildSE(cv req W H w s n corner seam stubLen ct)
-  let((body p0 p1 ex ey L dx dy dir tangle dirs nat2 vx vy bb)
-    body = lriSpiral(W H w s n corner seam nil)
-    lriCheck(body w W H s "se")
-    lriDraw(cv body w)
-    p0 = car(body)
-    dir = cond(
-            ((seam == "top")    'N)
-            ((seam == "left")   'W)
-            ((seam == "right")  'E)
-            (t                  'S))
-    p1 = lriLast(body)
-    dx = car(p1)  dy = cadr(p1)
-    L = sqrt(dx*dx + dy*dy)
-    if(L < 1.0e-6  then progn(dx = 0.0  dy = 1.0  L = 1.0))
-    nat2 = librfExitDir(dx dy)
-
-    tangle = librfReqNum(req 'tangle -1)
-    when(tangle >= 0
-      dirs = librfTangleDirs(tangle dir nat2)
-      dir = car(dirs)  nat2 = cadr(dirs)
-      cond(
-        ((nat2 == 'N)  vx = 0.0   vy = 1.0)
-        ((nat2 == 'S)  vx = 0.0   vy = -1.0)
-        ((nat2 == 'E)  vx = 1.0   vy = 0.0)
-        (t             vx = -1.0  vy = 0.0)
-      )
-      ex = car(p1) + vx*40.0
-      ey = cadr(p1) + vy*40.0
-    )
-    when(tangle < 0
-      vx = dx/L  vy = dy/L
-      ex = car(p1) + vx*40.0
-      ey = cadr(p1) + vy*40.0
-    )
-
-    when(vy > 0.5 && ey < H/2.0 + w + 20.0  ey = H/2.0 + w + 40.0)
-    when(vy < -0.5 && ey > 0.0 - H/2.0 - w - 20.0  ey = 0.0 - H/2.0 - w - 40.0)
-    when(vx > 0.5 && ex < W/2.0 + w + 20.0  ex = W/2.0 + w + 40.0)
-    when(vx < -0.5 && ex > 0.0 - W/2.0 - w - 20.0  ex = 0.0 - W/2.0 - w - 40.0)
-    lriPortDir(cv car(p0) cadr(p0) dir w stubLen "p01")
-    lriBridge(cv list(p1 list(ex ey)) w)
-    lriPortVec(cv ex ey vx vy w stubLen "p02")
-    when(ct != 0 && ct != nil
-      let((cut tx ty ctDir vx2 vy2 ex2 ey2)
-        cut = lriPointAt(body 0.5)
-        tx = car(cut)  ty = cadr(cut)
-
-        ctDir = if(dir == 'S then 'N else 'S)
-        if(ctDir == 'N
-          then vx2 = 0.0  vy2 = 1.0
-               ex2 = tx  ey2 = H/2.0 + w + 40.0
-          else vx2 = 0.0  vy2 = -1.0
-               ex2 = tx  ey2 = 0.0 - H/2.0 - w - 40.0)
-        lriBridge(cv list(cut list(ex2 ey2)) w)
-        lriPortVec(cv ex2 ey2 vx2 vy2 w stubLen "ct1")))
-    body))
-
 procedure(lriBuildDiff(cv req W H w s n corner seam stubLen ct)
   let((p A B stepsA stepsB tangle dirs d1 d2)
     p = w + s
@@ -3805,7 +3747,7 @@ procedure(lriBuildInd(cv req)
       ((kind == "sym_legacy")
         lriBuildSym(cv req doutDef n w s))
       ((kind == "se")
-        lriBuildSE(cv req W H w s n corner seam stubLen ct))
+        lriI3BuildSe(cv req))
       ((kind == "diff")
         lriBuildDiff(cv req W H w s n corner seam stubLen ct))
       ((kind == "f8" || kind == "fig8" || kind == "figure8")
@@ -3883,6 +3825,65 @@ procedure(lriI3EndPin(cv mPair tPair pts portName)
     librfPortPin(cv car(mPair) tPair x y portName)
     librfNotePort(portName x y tn)))
 
+; Single-ended octagonal inductor: one inward spiral on ONE layer.
+; Mirrors rfgeom.build_se.  The winding follows the rfgeom law (concentric
+; octagons one pitch apart, turn changes as symmetric 45 deg X crossings on
+; the coil axis) and, being a single winding, never crosses itself, so it
+; needs no underpass at all.  Leads are straight and axis aligned: p01 goes
+; up from the outer end, p02 leaves the inner end along that end's own y
+; sign -- up when the last half-ring finishes on the top, down when it
+; finishes on the bottom -- so the two never collide whatever the turn
+; count.  The legacy seam/tangle/corner knobs are gone on purpose: they are
+; what made the windings irregular.
+procedure(lriI3BuildSe(cv req)
+  prog((rx ry n w s chamfer leadLen ct ctLen
+        q rings p N xj pts pOut pIn sgn mid sgc yTip M TS ML TL)
+    rx  = librfReqNum(req 'rx 0.0)
+    when(rx <= 0.0
+      rx = librfReqNum(req 'dout 0.0) / 2.0
+      when(rx <= 0.0  rx = librfReqNum(req 'W 160.0) / 2.0))
+    ry  = librfReqNum(req 'ry 0.0)
+    when(ry <= 0.0  ry = librfReqNum(req 'H rx * 2.0) / 2.0)
+    n   = librfReqNum(req 'n 3.0)
+    w   = librfReqNum(req 'w 8.0)
+    s   = librfReqNum(req 's 3.0)
+    chamfer = librfReqNum(req 'chamfer (2.0 - sqrt(2.0)))
+    leadLen = librfReqNum(req 'lead_len 20.0)
+    ct  = librfReqNum(req 'ct 0)
+    ctLen = librfReqNum(req 'ct_len 20.0)
+    ; n 是整圈数（沿用 lriSpiral 的语义）：单绕线一整圈要两个半圈环
+    when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
+      librfErr(sprintf(nil "lri[i3]: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
+      return(nil))
+    q = lriI3Rings(rx ry w s 2.0 * n chamfer)
+    when(q == nil  return(nil))
+    rings = nth(0 q)  p = nth(1 q)  N = nth(2 q)
+    xj = p / 2.0
+    pts = lriI3SpiralRun(rings p xj xj w s 1)
+    when(pts == nil  return(nil))
+    M  = librfMetalPair(librfLyr("spiral"))
+    TS = librfTxtPair(librfLyr("spiral"))
+    librfPathSweepEx(cv M pts w nil nil)
+    pOut = car(pts)   pIn = lriLast(pts)
+    librfPathSweepEx(cv M
+      list(pOut list(car(pOut) cadr(pOut) + leadLen)) w nil nil)
+    lriI3EndPin(cv M TS list(pOut list(car(pOut) cadr(pOut) + leadLen)) "p01")
+    sgn = if(cadr(pIn) >= 0.0 then 1.0 else 0.0 - 1.0)
+    librfPathSweepEx(cv M
+      list(pIn list(car(pIn) cadr(pIn) + sgn * leadLen)) w nil nil)
+    lriI3EndPin(cv M TS
+      list(pIn list(car(pIn) cadr(pIn) + sgn * leadLen)) "p02")
+    when(ct != 0
+      ML = librfMetalPair(librfLyr("underpass"))
+      TL = librfTxtPair(librfLyr("underpass"))
+      mid = lriPointAt(pts 0.5)
+      sgc = if(cadr(mid) >= 0.0 then 1.0 else 0.0 - 1.0)
+      yTip = sgc * (ry + ctLen)
+      ; 抽头走副金属，靠绕线中点的通孔焊盘接回来；副金属可以和绕线交叠
+      lriBridgeTap(cv list(list(car(mid) yTip) mid) w)
+      lriI3EndPin(cv ML TL list(mid list(car(mid) yTip)) "ct1"))
+    return(t)))
+
 procedure(lriI3BuildXfmr(cv req)
   prog((rx ry np ns w s gap chamfer ct shrink
         q ringsP ringsS p nP nS xj pPts sPts pOut pIn sOut sIn
@@ -3901,11 +3902,17 @@ procedure(lriI3BuildXfmr(cv req)
     when(gap < s - 1.0e-9
       librfErr(sprintf(nil "xfmr: gap=%.3f < s=%.3f" gap s))
       return(nil))
-    q = lriI3Rings(rx ry w s np chamfer)
+    ; np/ns 是各自绕线的整圈数（和 lriI3BuildSe 同一约定）：单绕线
+    ; 一整圈要两个半圈环
+    foreach(_t list(np ns)
+      when(abs(2.0 * _t - round(2.0 * _t)) > 1.0e-6
+        librfErr(sprintf(nil "xfmr: np/ns=%.3f 必须是 0.5 的整数倍（半圈）" _t))
+        return(nil)))
+    q = lriI3Rings(rx ry w s 2.0 * np chamfer)
     when(q == nil  return(nil))
     ringsP = nth(0 q)  p = nth(1 q)  nP = nth(2 q)
     q = lriI3Rings(max(0.0 rx - shrink * p) max(0.0 ry - shrink * p)
-                   w s ns chamfer)
+                   w s 2.0 * ns chamfer)
     when(q == nil  return(nil))
     ringsS = nth(0 q)  nS = nth(2 q)
     xj = p / 2.0

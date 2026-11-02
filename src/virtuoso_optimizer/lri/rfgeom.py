@@ -65,6 +65,10 @@ def mirror_x(pts):
     return [(-x, y) for (x, y) in pts]
 
 
+def shift(pts, dx, dy):
+    return [(x + dx, y + dy) for (x, y) in pts]
+
+
 # ------------------------------------------------------------------ ring family
 def ring_family(rx, ry, w, s, n_turns, chamfer):
     """Concentric inward-offset octagons -> (rings, pitch, N), ring=(a,b,c)."""
@@ -294,10 +298,16 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
     ``ct`` adds a centre tap: a via pad at the winding's mid-length point
     plus a straight radial stub on the "ct" layer out past the coil edge.
     The stub is on its own layer, so it may cross the winding it taps.
+    ``n`` counts FULL turns, as the legacy ``lriSpiral`` did -- a single
+    winding covers the whole coil, so it needs two half-rings per turn and
+    the ring family is built with ``2*n`` of them.  Half turns are legal,
+    quarter turns are not.
     """
     if chamfer is None:
         chamfer = 2.0 - SQ2
-    rings, pitch, nring = ring_family(rx, ry, w, s, n, chamfer)
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    rings, pitch, nring = ring_family(rx, ry, w, s, 2.0 * float(n), chamfer)
     a0, b0, _c0 = rings[0]
     xj = pitch / 2.0
     pts, inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=+1)
@@ -322,6 +332,55 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
     return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
                "e": inf["e"], "p_out": p_out, "p_in": p_in}
 
+
+
+# ------------------------------------------------------------------ figure 8
+def build_f8(rx, ry, n, w, s, gap=None, chamfer=None, lead_len=20.0):
+    """Figure-8 inductor: two counter-wound lobes in series.
+
+    Each lobe is one inward spiral following the rfgeom law.  The right
+    lobe is the x-mirror of the left one, so the two are wound in opposite
+    senses and their fluxes add -- the point of a figure-8 -- and the
+    finished device is x-mirror symmetric.  The inner ends meet at the coil
+    centre through an underpass; the bridge has to leave lobe A across its
+    own outer ring, so it lives on its own layer and taps back with a via
+    block at each end.
+
+    ``rx``/``ry`` are PER-LOBE half extents, ``gap`` the spacing between the
+    two lobes, ``n`` the turns of each lobe (full turns; half turns legal).
+    """
+    if chamfer is None:
+        chamfer = 2.0 - SQ2
+    gap = s if gap is None else float(gap)
+    if gap < s - 1e-9:
+        raise GeomError("gap=%.3f < s=%.3f" % (gap, s))
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    rings, pitch, nring = ring_family(rx, ry, w, s, 2.0 * float(n), chamfer)
+    a0, b0, _c0 = rings[0]
+    xj = pitch / 2.0
+    dx = rx + gap / 2.0
+    # arm=-1 puts lobe A's free end on the far left; its mirror lands on the
+    # far right, so both ports sit on the outside of the device
+    run_a, _inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=-1)
+    pts_a = shift(run_a, -dx, 0.0)
+    pts_b = mirror_x(pts_a)
+    g = Geo()
+    g.path(pts_a, w, "main")
+    g.path(pts_b, w, "main")
+    a_in, b_in = pts_a[-1], pts_b[-1]
+    bridge = dedup([a_in, (a_in[0], 0.0), (0.0, 0.0), (b_in[0], 0.0), b_in])
+    g.path(bridge, w, "under")
+    for p in (a_in, b_in):
+        g.viapad(p[0] - w / 2.0, p[1] - w / 2.0,
+                 p[0] + w / 2.0, p[1] + w / 2.0, ("under", "main"))
+    for pts, name in ((pts_a, "p01"), (pts_b, "p02")):
+        p0 = pts[0]
+        g.path([p0, (p0[0], p0[1] + lead_len)], w, "main")
+        g.pin(name, p0[0], p0[1] + lead_len, "N", "main")
+    return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
+               "dx": dx, "p_out": (pts_a[0], pts_b[0]),
+               "p_in": (a_in, b_in)}
 
 
 # ------------------------------------------------------------------ single winding
@@ -388,11 +447,17 @@ def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
     gap = s if gap is None else float(gap)
     if gap < s - 1e-9:
         raise GeomError("gap=%.3f < s=%.3f" % (gap, s))
-    rings_p, pitch, nP = ring_family(rx, ry, w, s, np_turns, chamfer)
+    # np/ns count FULL turns of each winding (same convention as build_se):
+    # one winding covers the whole coil, so two half-rings per turn
+    for _t in (np_turns, ns_turns):
+        if abs(2.0 * float(_t) - round(2.0 * float(_t))) > 1e-6:
+            raise GeomError("np/ns=%.3f 必须是 0.5 的整数倍（半圈）" % float(_t))
+    rings_p, pitch, nP = ring_family(rx, ry, w, s, 2.0 * float(np_turns),
+                                    chamfer)
     # interleaving: pull the secondary in by `shrink` pitches of the primary
     rs = max(0, int(round(float(shrink))))
     rings_s, pitch_s, nS = ring_family(rx - rs * pitch, ry - rs * pitch,
-                                       w, s, ns_turns, chamfer)
+                                       w, s, 2.0 * float(ns_turns), chamfer)
     if abs(pitch_s - pitch) > 1e-9:
         raise GeomError("primary/secondary pitch mismatch")
 
