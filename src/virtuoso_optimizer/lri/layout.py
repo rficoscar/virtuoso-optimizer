@@ -923,6 +923,98 @@ def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     }
 
 
+def lri_i3_build_f8(rx, ry, n, w, s, gap=None,
+                    chamfer=2.0 - math.sqrt(2.0), lead_len=20.0):
+    """Figure-8 inductor -> dict.
+
+    Counterpart of SKILL lriI3BuildF8 and rfgeom.build_f8: two lobes, the
+    right one the x-mirror of the left, so they are wound in opposite
+    senses and their fluxes add.  The inner ends meet at the coil centre
+    on the under metal -- the bridge has to leave lobe A across its own
+    outer ring, so it cannot live on the main metal.  ``rx``/``ry`` are
+    PER-LOBE half extents, ``gap`` the spacing between the lobes, ``n``
+    the turns of each lobe (full turns; half turns legal).
+    """
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    gap = s if gap is None else float(gap)
+    if gap < s - 1e-9:
+        raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
+    rings, p, N = lri_i3_rings(rx, ry, w, s, 2.0 * float(n), chamfer)
+    xj = p / 2.0
+    dx = rx + gap / 2.0
+    # arm=-1 puts lobe A's free end on the far left; its mirror lands on
+    # the far right, so both ports sit on the outside of the device
+    run_a = lri_i3_spiral_run(rings, p, xj, xj, w, s, -1)
+    pts_a = lri_shift(run_a, -dx, 0.0)
+    pts_b = lri_mirrorx(pts_a)
+    a_in, b_in = pts_a[-1], pts_b[-1]
+    bridge = lri_dedup([a_in, (a_in[0], 0.0), (0.0, 0.0),
+                        (b_in[0], 0.0), b_in])
+    tops = [pts_a, pts_b]
+    ports = []
+    for pts, name in ((pts_a, "p01"), (pts_b, "p02")):
+        p0 = pts[0]
+        lead = [p0, (p0[0], p0[1] + lead_len)]
+        tops.append(lead)
+        ports.append((name, lead[-1]))
+    ymax = pts_a[0][1] + lead_len
+    return {
+        "tops": tops, "under": [bridge], "under_poly": [], "vias": [],
+        "ports": ports, "ct": None, "kind": "f8",
+        "rings": rings, "N": N, "p": p, "xj": xj, "dx": dx,
+        "bx": 2.0 * (dx + rx), "by": 2.0 * ry,
+        "bbox": (-dx - rx, -ry, dx + rx, ymax),
+    }
+
+
+def lri_i3_build_diff(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
+                      lead_len=20.0, ct=0, ct_len=20.0):
+    """Centre-tapped inductor -> dict.
+
+    Counterpart of SKILL lriI3BuildDiff and rfgeom.build_diff: two
+    concentric counter-wound spirals, the inner one a whole ring family
+    inside the outer and y-mirrored.  The two occupy disjoint radial
+    ranges, so no turn change needs an underpass; only the series join of
+    the two inner ends lives on the under metal.  ``n`` counts the turns
+    of EACH coil (full turns; half turns legal).
+    """
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    nh = 2.0 * float(n)
+    rings_a, p, N = lri_i3_rings(rx, ry, w, s, nh, chamfer)
+    rings_b, _pb, _nb = lri_i3_rings(rx - N * p, ry - N * p, w, s, nh,
+                                     chamfer)
+    xj = p / 2.0
+    pts_a = lri_i3_spiral_run(rings_a, p, xj, xj, w, s, +1)
+    pts_b = lri_mirrory(lri_i3_spiral_run(rings_b, p, xj, xj, w, s, +1))
+    a_in, b_in = pts_a[-1], pts_b[-1]
+    bridge = lri_dedup([a_in, (b_in[0], a_in[1]), b_in])
+    a_out, b_out = pts_a[0], pts_b[0]
+    tops = [pts_a, pts_b,
+            [a_out, (a_out[0], a_out[1] + lead_len)],
+            [b_out, (b_out[0], b_out[1] - lead_len)]]
+    ports = [("p01", tops[2][-1]), ("p02", tops[3][-1])]
+    under = [bridge]
+    ct_geom = None
+    if ct:
+        jx, jy = b_in[0], a_in[1]
+        sgn = 1.0 if jy >= 0.0 else -1.0
+        y_tip = sgn * (ry + float(ct_len))
+        ct_geom = {"stem": [(jx, jy), (jx, y_tip)],
+                   "pad": (jx, jy, w)}
+        under.append(ct_geom["stem"])
+        ports.append(("ct1", (jx, y_tip)))
+    ymax = max(a_out[1] + lead_len, b_out[1] - lead_len)
+    return {
+        "tops": tops, "under": under, "under_poly": [], "vias": [],
+        "ports": ports, "ct": ct_geom, "kind": "diff",
+        "rings": (rings_a, rings_b), "N": N, "p": p, "xj": xj,
+        "bx": 2.0 * rx, "by": 2.0 * ry,
+        "bbox": (-rx, -ry, rx, ymax),
+    }
+
+
 def lri_sym_arm(dout, n, w, s, side=1):
     if dout <= 0.0 or w <= 0.0 or s <= 0.0:
         raise ValueError("dout/w/s 必须 > 0")
@@ -1079,51 +1171,59 @@ def lri_build_ind(g):
         return out
 
     if kind == "diff":
-        p2 = w + s
-        A = lri_spiral(W, H, w, s, n, corner, "bottom", 2.0 * p2)
-        B = lri_mirrory(lri_spiral(W - 2.0 * p2, H - 2.0 * p2, w, s, n,
-                                   corner, "bottom", 2.0 * p2))
-        out["metal"] = [A, B]
-        out["under"] = [[A[-1], (B[-1][0], A[-1][1]), B[-1]]]
-        lead1 = _lri_lead(A[0], "S", stub)
-        bx, _by = B[0]
-        pex, pey = bx, H / 2.0 + w + 40.0 + stub
-        out["under"].append([B[0], (pex, pey)])
-        lead2 = [(pex, pey), (pex, pey + stub)]
-        out["metal"] += [lead1, lead2]
-        out["ports"] = [("p01", lead1[-1]), ("p02", lead2[-1])]
-        if ct:
-            tip = (B[-1][0], -(H / 2.0 + w + 40.0 + stub))
-            out["under"].append([B[-1], tip])
-            out["ports"].append(("ct1", tip))
+        # Second-generation kernel: two concentric counter-wound spirals,
+        # the inner one a whole ring family inside the outer and y-mirrored;
+        # same geometry as SKILL lriI3BuildDiff.  The legacy seam/tangle/
+        # corner knobs are gone.
+        dout = float(g.get("dout", W))
+        rx = float(g.get("rx", dout / 2.0))
+        ry = float(g.get("ry", float(g.get("H", W)) / 2.0))
+        m = lri_i3_build_diff(
+            rx, ry, n, w, s,
+            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+            lead_len=float(g.get("lead_len", 20.0) or 20.0),
+            ct=int(float(g.get("ct", 0) or 0)),
+            ct_len=float(g.get("ct_len", 20.0) or 20.0))
+        out["metal"] = list(m["tops"])
+        out["topcaps"] = [(False, False)] * len(out["metal"])
+        out["under"] = list(m["under"])
+        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
+        out["vias"] = list(m["vias"])
+        out["ports"] = list(m["ports"])
+        out["bx"] = m["bx"]
+        out["by"] = m["by"]
+        out["N"] = m["N"]
+        out["bbox"] = m["bbox"]
         return out
 
     if kind == "f8":
+        # Second-generation kernel: two counter-wound lobes joined at the
+        # coil centre on the under metal; same geometry as SKILL
+        # lriI3BuildF8.  rx/ry (and the dout/W fallbacks) are PER-LOBE
+        # sizes, and n counts the turns of each lobe.
         gapf = g.get("gap")
-        gapf = 8.0 if gapf in (None, "") else float(gapf)
-        gapf = max(gapf, w + s)
-        d = (W - gapf) / 2.0
-        nA = n / 2.0
-        dx = (gapf + d) / 2.0
-        a0m, b0m = (W - w) / 2.0, (H - w) / 2.0
-        cf8 = corner
-        if min(a0m, b0m) > 0.0:
-            cf8 = corner * min((d - w) / 2.0, b0m) / min(a0m, b0m)
-        Lf = lri_shift(lri_spiral(d, H, w, s, nA, cf8, "left"), -dx, 0.0)
-        Rg = lri_shift(lri_mirrorx(
-            lri_spiral(d, H, w, s, nA, cf8, "left")), dx, 0.0)
-        out["metal"] = [Lf, Rg]
-        out["under"] = [[Lf[-1], (Lf[-1][0], 0.0), (0.0, 0.0),
-                         (Rg[-1][0], 0.0), Rg[-1]]]
-        nat1 = lri_dir_key((Lf[0][0] + dx, Lf[0][1]))
-        nat2 = lri_dir_key((Rg[0][0] - dx, Rg[0][1]))
-        k1, k2 = lri_pick_dirs(tangle, nat1, nat2)
-        lead1 = _lri_lead(Lf[0], k1, stub)
-        lead2 = _lri_lead(Rg[0], k2, stub)
-        out["metal"] += [lead1, lead2]
-        out["ports"] = [("p01", lead1[-1]), ("p02", lead2[-1])]
+        gapf = s if gapf in (None, "") else float(gapf)
+        rx = float(g.get("rx", 0.0) or 0.0)
+        if rx <= 0.0:
+            rx = float(g.get("dout", W)) / 2.0
+        ry = float(g.get("ry", 0.0) or 0.0)
+        if ry <= 0.0:
+            ry = float(g.get("H", W)) / 2.0
+        m = lri_i3_build_f8(
+            rx, ry, n, w, s, gap=gapf,
+            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+            lead_len=float(g.get("lead_len", 20.0) or 20.0))
+        out["metal"] = list(m["tops"])
+        out["topcaps"] = [(False, False)] * len(out["metal"])
+        out["under"] = list(m["under"])
+        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
+        out["vias"] = list(m["vias"])
+        out["ports"] = list(m["ports"])
+        out["bx"] = m["bx"]
+        out["by"] = m["by"]
+        out["N"] = m["N"]
+        out["bbox"] = m["bbox"]
         return out
-
     body = lri_spiral(W, H, w, s, n, corner, seam)
     out["metal"] = [body]
     nat1 = {"top": "N", "left": "W", "right": "E"}.get(seam, "S")

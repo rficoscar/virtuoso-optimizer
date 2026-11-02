@@ -178,7 +178,9 @@ def _selftest():
     check("lri seam map N->top", gn.get("seam") == "top")
     for _kind in ("se", "diff", "f8", "sym"):
         _n = 3 if _kind == "sym" else 2.5
-        _g = lri_norm_geom({"kind": _kind, "shape": "oct", "dout": 220,
+        # diff 是两组同心绕线，内圈整套缩在内圈里，占地约两倍
+        _dout = 320 if _kind == "diff" else 220
+        _g = lri_norm_geom({"kind": _kind, "shape": "oct", "dout": _dout,
                             "n": _n, "w": 10, "s": 2.6})
         _ok, _msg = lri_validate(_g)
         check("lri validate %s" % _kind, _ok, _msg)

@@ -65,6 +65,10 @@ def mirror_x(pts):
     return [(-x, y) for (x, y) in pts]
 
 
+def mirror_y(pts):
+    return [(x, -y) for (x, y) in pts]
+
+
 def shift(pts, dx, dy):
     return [(x + dx, y + dy) for (x, y) in pts]
 
@@ -332,6 +336,62 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
     return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
                "e": inf["e"], "p_out": p_out, "p_in": p_in}
 
+
+
+# --------------------------------------------------------------- centre tap
+def build_diff(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0,
+               ct_len=20.0):
+    """Centre-tapped inductor: two concentric counter-wound spirals.
+
+    The outer coil spirals inward on the main metal; the inner coil sits a
+    whole ring family inside it and is y-mirrored, so the two are wound in
+    opposite senses.  Because the two occupy disjoint radial ranges,
+    neither one's turn changes cross the other -- unlike the legacy
+    interleaved layout, no turn change needs an underpass at all.  The
+    coils are in series: the two INNER ends meet on the under metal (the
+    bridge has to cross the outer coil's rings on its way out), and the
+    two OUTER ends are the ports.
+
+    Ports: p01 at the outer coil's outer end (lead up), p02 at the inner
+    coil's outer end (lead down, the y-mirror image of p01), ct1 at the
+    series junction when ``ct`` is set.  ``n`` counts the turns of EACH
+    coil (full turns; half turns legal).
+    """
+    if chamfer is None:
+        chamfer = 2.0 - SQ2
+    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
+        raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
+    nh = 2.0 * float(n)
+    rings_a, pitch, N = ring_family(rx, ry, w, s, nh, chamfer)
+    a0, b0, _c0 = rings_a[0]
+    rings_b, _pb, _Nb = ring_family(rx - N * pitch, ry - N * pitch,
+                                    w, s, nh, chamfer)
+    xj = pitch / 2.0
+    pts_a, _ia = spiral_run(rings_a, pitch, xj, w, s, chamfer, arm=+1)
+    pts_b = mirror_y(spiral_run(rings_b, pitch, xj, w, s, chamfer, arm=+1)[0])
+    g = Geo()
+    g.path(pts_a, w, "main")
+    g.path(pts_b, w, "main")
+    a_in, b_in = pts_a[-1], pts_b[-1]
+    g.path(dedup([a_in, (b_in[0], a_in[1]), b_in]), w, "under")
+    for p in (a_in, b_in):
+        g.viapad(p[0] - w / 2.0, p[1] - w / 2.0,
+                 p[0] + w / 2.0, p[1] + w / 2.0, ("under", "main"))
+    a_out, b_out = pts_a[0], pts_b[0]
+    g.path([a_out, (a_out[0], a_out[1] + lead_len)], w, "main")
+    g.pin("p01", a_out[0], a_out[1] + lead_len, "N", "main")
+    g.path([b_out, (b_out[0], b_out[1] - lead_len)], w, "main")
+    g.pin("p02", b_out[0], b_out[1] - lead_len, "S", "main")
+    if ct:
+        jx, jy = (b_in[0], a_in[1])
+        sgn = 1.0 if jy >= 0.0 else -1.0
+        y_tip = sgn * (ry + float(ct_len))
+        g.viapad(jx - w / 2.0, min(jy, jy + sgn * w),
+                 jx + w / 2.0, max(jy, jy + sgn * w), ("ct", "under"))
+        g.path([(jx, jy), (jx, y_tip)], w, "ct")
+        g.pin("ct1", jx, y_tip, "N" if sgn > 0.0 else "S", "ct")
+    return g, {"rings": (rings_a, rings_b), "pitch": pitch, "N": N,
+               "xj": xj, "p_out": (a_out, b_out), "p_in": (a_in, b_in)}
 
 
 # ------------------------------------------------------------------ figure 8

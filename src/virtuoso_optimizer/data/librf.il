@@ -2893,80 +2893,6 @@ procedure(lriCheck(pts w W H s tag)
       "存在非 0/45/90 段")
     t))
 
-procedure(lriBuildDiff(cv req W H w s n corner seam stubLen ct)
-  let((p A B stepsA stepsB tangle dirs d1 d2)
-    p = w + s
-    A = lriSpiral(W H w s n corner "bottom" 2.0*p)
-    stepsA = lriStepList
-
-    B = lriMirrorY(lriSpiral(W-2.0*p H-2.0*p w s n corner "bottom" 2.0*p))
-    lriStepList = lriMirrorStepsY(lriStepList)
-    stepsB = lriStepList
-    lriCheck(A w W H s "diff.A")
-    lriCheck(B w (W-2.0*p) (H-2.0*p) s "diff.B")
-
-    lriDrawSteps(cv A w stepsA)
-    lriDrawSteps(cv B w stepsB)
-
-    d1 = 'S
-    tangle = librfReqNum(req 'tangle -1)
-    when(tangle >= 0 && tangle != 180
-      librfWarn(sprintf(nil "lri[diff]: tangle=%g 会使 B 端口同层穿过 A 外圈, 已改用自然 180 度出线 (p01=S, p02=N)" tangle)))
-    lriPortDir(cv car(car(A)) cadr(car(A)) d1 w stubLen "p01")
-
-    let((pB ex ey)
-      pB = car(B)
-      ex = car(pB)
-      ey = H/2.0 + w + 40.0 + stubLen
-      lriBridge(cv list(pB list(ex ey)) w)
-      lriPortVec(cv ex ey 0.0 1.0 w stubLen "p02"))
-
-    lriBridge(cv list(lriLast(A) list(car(lriLast(B)) cadr(lriLast(A)))
-                      lriLast(B)) w)
-    when(ct != 0 && ct != nil
-      let((ctEnd)
-
-        ctEnd = list(car(lriLast(B)) 0.0-H/2.0-w-40.0-stubLen)
-        lriBridgeTap(cv list(lriLast(B) ctEnd) w)
-        lriPortVec(cv car(ctEnd) cadr(ctEnd) 0.0 -1.0 w stubLen "ct1")))
-    list(A B)))
-
-procedure(lriBuildF8(cv req W H w s n corner gap stubLen)
-  let((d nA Lft Rgt dx tangle dirs d1 d2 cf8)
-    when(gap == nil || gap < 1.0  gap = 8.0)
-
-    when(gap < w + s
-      librfWarn(sprintf(nil "lri[f8]: gap=%g 小于 w+s=%g, 已放大到 w+s" gap (w+s)))
-      gap = w + s)
-    d = (W - gap)/2.0
-    nA = n/2.0
-    when(abs(nA - round(nA)) < 1.0e-6  nA = nA + 0.5)
-    dx = d/2.0 + gap/2.0
-
-    cf8 = corner
-    when(min((W-w)/2.0 (H-w)/2.0) > 0.0
-      cf8 = corner*min((d-w)/2.0 (H-w)/2.0)/min((W-w)/2.0 (H-w)/2.0))
-    Lft = lriShift(lriSpiral(d H w s nA cf8 "left" nil) (0.0-dx) 0.0)
-    Rgt = lriShift(lriMirrorX(lriSpiral(d H w s nA cf8 "left" nil)) dx 0.0)
-    lriCheck(Lft w d H s "f8.L")
-    lriDraw(cv Lft w)
-    lriDraw(cv Rgt w)
-    d1 = 'W  d2 = 'E
-    tangle = librfReqNum(req 'tangle -1)
-    when(tangle >= 0
-      dirs = librfTangleDirs(tangle d1 d2)
-      d1 = car(dirs)  d2 = cadr(dirs)
-    )
-    lriPortDir(cv car(car(Lft)) cadr(car(Lft)) d1 w stubLen "p01")
-    lriPortDir(cv car(car(Rgt)) cadr(car(Rgt)) d2 w stubLen "p02")
-
-    lriBridge(cv list(lriLast(Lft)
-                      list(car(lriLast(Lft)) 0.0)
-                      list(0.0 0.0)
-                      list(car(lriLast(Rgt)) 0.0)
-                      lriLast(Rgt)) w)
-    list(Lft Rgt)))
-
 procedure(lriHalfOctR(R xj)
   let((c)
     c = (2.0 - sqrt(2.0)) * R
@@ -3749,9 +3675,9 @@ procedure(lriBuildInd(cv req)
       ((kind == "se")
         lriI3BuildSe(cv req))
       ((kind == "diff")
-        lriBuildDiff(cv req W H w s n corner seam stubLen ct))
+        lriI3BuildDiff(cv req))
       ((kind == "f8" || kind == "fig8" || kind == "figure8")
-        lriBuildF8(cv req W H w s n corner gap stubLen))
+        lriI3BuildF8(cv req))
       (t
         librfErr(sprintf(nil "lri: 未知 kind=%s (sym/xfmr/se/diff/f8)" kind))))
 
@@ -3882,6 +3808,150 @@ procedure(lriI3BuildSe(cv req)
       ; 抽头走副金属，靠绕线中点的通孔焊盘接回来；副金属可以和绕线交叠
       lriBridgeTap(cv list(list(car(mid) yTip) mid) w)
       lriI3EndPin(cv ML TL list(mid list(car(mid) yTip)) "ct1"))
+    return(t)))
+
+; Figure-8 inductor: two counter-wound lobes in series.  Mirrors
+; rfgeom.build_f8.  Each lobe is one inward spiral following the rfgeom
+; law; the right lobe is the x-mirror of the left one, so the two are
+; wound in opposite senses and their fluxes add -- the point of a
+; figure-8 -- and the finished device is x-mirror symmetric.  The inner
+; ends meet at the coil centre through an underpass: the bridge has to
+; leave lobe A across its own outer ring, so it lives on the under metal
+; and taps back through a via block at each end.  rx/ry are PER-LOBE half
+; extents, gap the spacing between the two lobes, n the turns of each
+; lobe (full turns; half turns legal).
+procedure(lriI3BuildF8(cv req)
+  prog((rx ry n w s gap chamfer leadLen negDx
+        q rings p N xj dx runA ptsA ptsB aIn bIn bridge pp p0
+        M ML TS cut vc vs ve x1 y1 x2 y2)
+    w   = librfReqNum(req 'w 8.0)
+    s   = librfReqNum(req 's 3.0)
+    gap = librfReqNum(req 'gap s)
+    rx  = librfReqNum(req 'rx 0.0)
+    when(rx <= 0.0
+      rx = librfReqNum(req 'dout 0.0) / 2.0
+      ; dout/W 是【单瓣】尺寸，n 是【单瓣】圈数
+      when(rx <= 0.0  rx = librfReqNum(req 'W 160.0) / 2.0))
+    ry  = librfReqNum(req 'ry 0.0)
+    when(ry <= 0.0  ry = librfReqNum(req 'H rx * 2.0) / 2.0)
+    n   = librfReqNum(req 'n 1.0)
+    chamfer = librfReqNum(req 'chamfer (2.0 - sqrt(2.0)))
+    leadLen = librfReqNum(req 'lead_len 20.0)
+    when(gap < s - 1.0e-9
+      librfErr(sprintf(nil "f8: gap=%.3f < s=%.3f" gap s))
+      return(nil))
+    when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
+      librfErr(sprintf(nil "f8: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
+      return(nil))
+    q = lriI3Rings(rx ry w s 2.0 * n chamfer)
+    when(q == nil  return(nil))
+    rings = nth(0 q)  p = nth(1 q)  N = nth(2 q)
+    xj = p / 2.0
+    dx = rx + gap / 2.0
+    negDx = 0.0 - dx
+    ; arm=-1 把左瓣的自由端放在最左，镜像后右瓣在最右，两个端口都在外侧
+    runA = lriI3SpiralRun(rings p xj xj w s -1)
+    when(runA == nil  return(nil))
+    ptsA = lriShift(runA negDx 0.0)
+    ptsB = lriMirrorX(ptsA)
+    M  = librfMetalPair(librfLyr("spiral"))
+    ML = librfMetalPair(librfLyr("underpass"))
+    TS = librfTxtPair(librfLyr("spiral"))
+    librfPathSweepEx(cv M ptsA w nil nil)
+    librfPathSweepEx(cv M ptsB w nil nil)
+    aIn = lriLast(ptsA)   bIn = lriLast(ptsB)
+    bridge = lriDedup(list(aIn list(car(aIn) 0.0) list(0.0 0.0)
+                           list(car(bIn) 0.0) bIn))
+    librfPathSweepEx(cv ML bridge w nil nil)
+    cut = librfViaPair(librfLyr("via_sp"))
+    vc = librfDrcViaNum("cut" 0.5)
+    vs = librfDrcViaNum("spacing" 0.5)
+    ve = librfDrcViaNum("enclosure" 0.2)
+    foreach(pp list(aIn bIn)
+      x1 = car(pp) - w / 2.0   y1 = cadr(pp) - w / 2.0
+      x2 = car(pp) + w / 2.0   y2 = cadr(pp) + w / 2.0
+      librfRect(cv ML x1 y1 x2 y2)
+      librfRect(cv M  x1 y1 x2 y2)
+      librfViaArray(cv cut x1 y1 x2 y2 vc vs ve ve))
+    foreach(pair list(list(ptsA "p01") list(ptsB "p02"))
+      p0 = car(car(pair))
+      librfPathSweepEx(cv M
+        list(p0 list(car(p0) cadr(p0) + leadLen)) w nil nil)
+      lriI3EndPin(cv M TS list(p0 list(car(p0) cadr(p0) + leadLen))
+                   cadr(pair)))
+    return(t)))
+
+; Centre-tapped inductor: two concentric counter-wound spirals.  Mirrors
+; rfgeom.build_diff.  The outer coil spirals inward on the spiral metal;
+; the inner coil sits a whole ring family inside it and is y-mirrored, so
+; the two are wound in opposite senses.  They occupy disjoint radial
+; ranges, so neither one's turn changes cross the other and no turn change
+; needs an underpass -- only the series join of the two inner ends lives
+; on the under metal.  n counts the turns of EACH coil (full turns; half
+; turns legal).
+procedure(lriI3BuildDiff(cv req)
+  prog((rx ry n w s chamfer leadLen ct ctLen nh
+        q ringsA ringsB p N xj ptsA ptsB aIn bIn aOut bOut bridge
+        jx jy sgc yTip M ML TS TL cut vc vs ve x1 y1 x2 y2 pp)
+    rx  = librfReqNum(req 'rx 0.0)
+    when(rx <= 0.0
+      rx = librfReqNum(req 'dout 0.0) / 2.0
+      when(rx <= 0.0  rx = librfReqNum(req 'W 320.0) / 2.0))
+    ry  = librfReqNum(req 'ry 0.0)
+    when(ry <= 0.0  ry = librfReqNum(req 'H rx * 2.0) / 2.0)
+    n   = librfReqNum(req 'n 2.5)
+    w   = librfReqNum(req 'w 8.0)
+    s   = librfReqNum(req 's 3.0)
+    chamfer = librfReqNum(req 'chamfer (2.0 - sqrt(2.0)))
+    leadLen = librfReqNum(req 'lead_len 20.0)
+    ct  = librfReqNum(req 'ct 0)
+    ctLen = librfReqNum(req 'ct_len 20.0)
+    when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
+      librfErr(sprintf(nil "diff: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
+      return(nil))
+    nh = 2.0 * n
+    q = lriI3Rings(rx ry w s nh chamfer)
+    when(q == nil  return(nil))
+    ringsA = nth(0 q)  p = nth(1 q)  N = nth(2 q)
+    q = lriI3Rings(rx - N * p  ry - N * p  w s nh chamfer)
+    when(q == nil  return(nil))
+    ringsB = nth(0 q)
+    xj = p / 2.0
+    ptsA = lriI3SpiralRun(ringsA p xj xj w s 1)
+    when(ptsA == nil  return(nil))
+    ptsB = lriMirrorY(lriI3SpiralRun(ringsB p xj xj w s 1))
+    M  = librfMetalPair(librfLyr("spiral"))
+    ML = librfMetalPair(librfLyr("underpass"))
+    TS = librfTxtPair(librfLyr("spiral"))
+    TL = librfTxtPair(librfLyr("underpass"))
+    librfPathSweepEx(cv M ptsA w nil nil)
+    librfPathSweepEx(cv M ptsB w nil nil)
+    aIn = lriLast(ptsA)   bIn = lriLast(ptsB)
+    aOut = car(ptsA)      bOut = car(ptsB)
+    bridge = lriDedup(list(aIn list(car(bIn) cadr(aIn)) bIn))
+    librfPathSweepEx(cv ML bridge w nil nil)
+    cut = librfViaPair(librfLyr("via_sp"))
+    vc = librfDrcViaNum("cut" 0.5)
+    vs = librfDrcViaNum("spacing" 0.5)
+    ve = librfDrcViaNum("enclosure" 0.2)
+    foreach(pp list(aIn bIn)
+      x1 = car(pp) - w / 2.0   y1 = cadr(pp) - w / 2.0
+      x2 = car(pp) + w / 2.0   y2 = cadr(pp) + w / 2.0
+      librfRect(cv ML x1 y1 x2 y2)
+      librfRect(cv M  x1 y1 x2 y2)
+      librfViaArray(cv cut x1 y1 x2 y2 vc vs ve ve))
+    librfPathSweepEx(cv M
+      list(aOut list(car(aOut) cadr(aOut) + leadLen)) w nil nil)
+    lriI3EndPin(cv M TS list(aOut list(car(aOut) cadr(aOut) + leadLen)) "p01")
+    librfPathSweepEx(cv M
+      list(bOut list(car(bOut) cadr(bOut) - leadLen)) w nil nil)
+    lriI3EndPin(cv M TS list(bOut list(car(bOut) cadr(bOut) - leadLen)) "p02")
+    when(ct != 0
+      jx = car(bIn)   jy = cadr(aIn)
+      sgc = if(jy >= 0.0 then 1.0 else 0.0 - 1.0)
+      yTip = sgc * (ry + ctLen)
+      lriBridgeTap(cv list(list(jx yTip) list(jx jy)) w)
+      lriI3EndPin(cv ML TL list(list(jx jy) list(jx yTip)) "ct1"))
     return(t)))
 
 procedure(lriI3BuildXfmr(cv req)
