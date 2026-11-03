@@ -383,6 +383,10 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     lead_w = w if lead_w is None else float(lead_w)
     if lead_gap < s - 1e-9:
         raise ValueError("lead_gap=%.3f < s=%.3f" % (lead_gap, s))
+    if lead_w < w / 2.0 - 1e-9:
+        raise ValueError(
+            "lead_w=%.3f < w/2=%.3f，引线比半圈金属窄，端口根部会留台阶"
+            % (lead_w, w / 2.0))
     x_port = (lead_gap + lead_w) / 2.0
     y_port = b0 + lead_len
     if lead_len < w / 2.0 - 1e-9:
@@ -406,8 +410,12 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     bridge_y = bridge[0][1]
     if abs(bridge[1][1] - bridge_y) > 1e-9:
         raise ValueError("桥两端不等高")
-    lead_a = [(xj, b0), (x_port, b0), (x_port, y_port)]
-    lead_b = [(-xj, b0), (-x_port, b0), (-x_port, y_port)]
+    # The lead starts at the inner edge of the outer ring band (b0 - w/2), not
+    # at its centreline, so the lead wall and the ring wall form one straight
+    # line.  A centreline start leaves a w/2 x (x_port - xj) notch on each side
+    # of the port stub (32 um^2 total at the factory default).
+    lead_a = [(x_port, b0 - w / 2.0), (x_port, y_port)]
+    lead_b = [(-x_port, b0 - w / 2.0), (-x_port, y_port)]
     metal = list(tops_a) + list(tops_b) + [bridge, lead_a, lead_b]
     ports = [("p01", (x_port, y_port)), ("p02", (-x_port, y_port))]
     ct_geom = None
@@ -461,120 +469,6 @@ def lri_build_ind(g):
            "kind": "sym"}
     return out
 
-def lri_draw_sketch(c, raw):
-    try:
-        g = form_to_geom("ind", raw)
-        ok, msg = lri_validate(g)
-        if not ok:
-            raise ValueError(msg)
-        geo = lri_build_ind(g)
-    except Exception as exc:
-        c.create_text(140, 86, text="参数不可行", fill="#a03030",
-                      font=("fixed", 10))
-        c.create_text(140, 110, text=str(exc)[:42], fill="#a03030",
-                      font=("fixed", 8))
-        return
-    W, H = geo["bx"], geo["by"]
-    w = float(g["w"])
-    wu = w
-    # Include port leads and underpasses in the bounding box so the sketch is not clipped by the canvas edge
-    xs, ys = [-W / 2.0, W / 2.0], [-H / 2.0, H / 2.0]
-    for _name, _pt in geo["ports"]:
-        xs.append(_pt[0])
-        ys.append(_pt[1])
-    for _pp in (geo.get("under_poly") or []):
-        for _q in _pp:
-            xs.append(_q[0])
-            ys.append(_q[1])
-    for _seg in (geo.get("under") or []):
-        for _q in _seg:
-            xs.append(_q[0])
-            ys.append(_q[1])
-    for _vx, _vy, _vw in (geo.get("vias") or []):
-        ys.append(_vy + _vw / 2.0)
-        ys.append(_vy - _vw / 2.0)
-    _pad = w / 2.0
-    minx, maxx = min(xs) - _pad, max(xs) + _pad
-    miny, maxy = min(ys) - _pad, max(ys) + _pad
-    sc = min(240.0 / max(maxx - minx, 1e-9),
-             132.0 / max(maxy - miny, 1e-9))
-    cxm, cym = (minx + maxx) / 2.0, (miny + maxy) / 2.0
-    cx, cy = 140.0, 85.0
-
-    def tx(p):
-        return (cx + (p[0] - cxm) * sc, cy - (p[1] - cym) * sc)
-
-    def poly(pts, width, fill, edge):
-        pp = lri_sweep(pts, width)
-        if len(pp) < 3:
-            return
-        flat = []
-        for q in pp:
-            x, y = tx(q)
-            flat.extend((x, y))
-        c.create_polygon(flat, fill=fill, outline=edge, width=1)
-
-    for pts in geo["metal"]:
-        poly(pts, w, "#3a6ea5", "#1f4064")
-    if geo.get("under_poly"):
-        for pp in geo["under_poly"]:
-            if len(pp) >= 3:
-                flat = []
-                for q in pp:
-                    x, y = tx(q)
-                    flat.extend((x, y))
-                c.create_polygon(flat, fill="#c0504d", outline="#7a2e2c",
-                                 width=1)
-    else:
-        for seg in geo["under"]:
-            poly(seg, wu, "#c0504d", "#7a2e2c")
-    for vx, vy, vw in geo.get("vias", []):
-        pitch = SYM_VIA_CUT + SYM_VIA_SPACE
-        n = max(1, int(round((vw + SYM_VIA_SPACE) / pitch)))
-        for i in range(n):
-            yy = vy + (i - (n - 1) / 2.0) * pitch
-            px, py = tx((vx, yy))
-            hw = max(0.8, SYM_VIA_CUT / 2.0 * sc)
-            c.create_rectangle(px - hw, py - hw, px + hw, py + hw,
-                               fill="#0a7d33", outline="#064d1f")
-    x1, y1 = tx((-W / 2.0, H / 2.0))
-    x2, y2 = tx((W / 2.0, -H / 2.0))
-    c.create_rectangle(x1, y1, x2, y2, outline="#9a9a9a", dash=(3, 3))
-    for name, pt in geo["ports"]:
-        x, y = tx(pt)
-        col = "#b02020" if name.startswith("ct") else "#0a7d33"
-        c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=col, outline="")
-        # Place port names beside the dots so they do not cover dimension lines or metal
-        if x >= cx:
-            c.create_text(x + 7, y, text=name, fill=col,
-                          font=("fixed", 7), anchor="w")
-        else:
-            c.create_text(x - 7, y, text=name, fill=col,
-                          font=("fixed", 7), anchor="e")
-    bb = c.bbox("all") or (cx - 60, cy - 60, cx + 60, cy + 60)
-    yb = bb[3] + 10
-    c.create_line(x1, yb, x2, yb, fill="#a03030", arrow="both")
-    c.create_text((x1 + x2) / 2.0, yb + 8, text="W=%g" % W, fill="#a03030",
-                  font=("fixed", 8))
-    xl = bb[0] - 12
-    c.create_line(xl, y1, xl, y2, fill="#a03030", arrow="both")
-    c.create_text(xl - 2, (y1 + y2) / 2.0, text="H=%g" % H, fill="#a03030",
-                  font=("fixed", 8), angle=90)
-    if g.get("kind") == "sym":
-        c.create_text(140, 186, fill="#444444", font=("fixed", 8),
-                      text="dout=%g  w=%g  s=%g  实际圈数 N=%d"
-                           % (float(g.get("dout", W)), w, float(g["s"]),
-                              int(geo.get("N", 0))))
-        c.create_text(140, 199, fill="#666666", font=("fixed", 8),
-                      text="kind=sym  端口同侧顶部  内端下方对称轴")
-    else:
-        c.create_text(140, 186, fill="#444444", font=("fixed", 8),
-                      text="n=%g  w=%g  s=%g  chamfer=%g"
-                           % (float(g["n"]), w, float(g["s"]),
-                              float(g.get("chamfer", 0.0))))
-        c.create_text(140, 199, fill="#666666", font=("fixed", 8),
-                      text="kind=sym  ct=%d" % int(g["ct"]))
-
 def lri_sketch_after(tab):
     try:
         if getattr(tab, "_lri_after", None):
@@ -598,34 +492,52 @@ def lri_redraw_sketch(tab):
         pass
 
 PRESETS = [
-    {"name": "1nH 对称差分电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"kind": "sym", "n": 2.5, "w": 10, "s": 2.6, "dout": 160,
+    # One entry per panel of the six-parameter preview figure, so the GUI can
+    # reproduce exactly what was reviewed.  Every n is an integer (the kernel
+    # rejects 2.5 turns) and rx/ry are explicit instead of being derived from a
+    # square dout.
+    {"name": "A 出厂默认 (n3 w8 s3 rx80 ry60)", "type": "ind",
+     "freq": "1e9:30e9:30",
+     "geom": {"kind": "sym", "n": 3, "w": 8, "s": 3, "rx": 80, "ry": 60,
               "ct": 0}},
-    {"name": "2nH 对称差分电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"kind": "sym", "n": 3.5, "w": 12, "s": 2.6, "dout": 220,
+    {"name": "B 宽金属 (n2 w12 s4 rx80 ry60)", "type": "ind",
+     "freq": "1e9:30e9:30",
+     "geom": {"kind": "sym", "n": 2, "w": 12, "s": 4, "rx": 80, "ry": 60,
               "ct": 0}},
-    {"name": "中心抽头对称电感", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"kind": "sym", "n": 2, "w": 10, "s": 2.6, "dout": 160,
+    {"name": "C 多圈 (n5 w5 s2.5 rx90 ry70)", "type": "ind",
+     "freq": "1e9:30e9:30",
+     "geom": {"kind": "sym", "n": 5, "w": 5, "s": 2.5, "rx": 90, "ry": 70,
+              "ct": 0}},
+    {"name": "D 中心抽头 (n4 w8 s3 rx85 ry65)", "type": "ind",
+     "freq": "1e9:30e9:21",
+     "geom": {"kind": "sym", "n": 4, "w": 8, "s": 3, "rx": 85, "ry": 65,
               "ct": 1}},
-    {"name": "对称差分电感 (sym)", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"kind": "sym", "n": 2.5, "w": 10, "s": 2.6, "dout": 220,
+    {"name": "E 扁宽 (n3 w6 s2.5 rx110 ry45)", "type": "ind",
+     "freq": "1e9:30e9:21",
+     "geom": {"kind": "sym", "n": 3, "w": 6, "s": 2.5, "rx": 110, "ry": 45,
+              "ct": 0}},
+    {"name": "F 方形 (n3 w10 s3.5 rx70 ry70)", "type": "ind",
+     "freq": "1e9:30e9:21",
+     "geom": {"kind": "sym", "n": 3, "w": 10, "s": 3.5, "rx": 70, "ry": 70,
               "ct": 0}},
 ]
 
-GEOM_FORM = { "ind": [("kind", "拓扑 kind (sym)", "sym", False),
-            ("n", "每臂匝数 n (整数)", "3", True), ("w", "线宽 w (µm)", "10", True),
-            ("s", "间距 s (µm)", "3.2", True), ("dout", "外径 dout (µm)", "160", True),
-            ("rx", "横向半径 rx (µm, 留空=dout/2)", "", True),
-            ("ry", "纵向半径 ry (µm, 留空=dout/2)", "", True),
-            ("chamfer", "拐角切角 chamfer 0..1 (留空=2-sqrt2)", "", True),
-            ("lead_len", "差分引线长 lead_len (µm)", "20", True),
-            ("lead_gap", "差分线间距 lead_gap (µm, 留空=s)", "", True),
-            ("lead_w", "差分线宽 lead_w (µm, 留空=w)", "", True),
-            ("ct", "中心抽头 ct (0/1)", "0", True),
-            ("stack", "叠层 stack (0/1)", "0", True),
-            ("metal_main", "主金属 (留空=工艺档)", "", False),
-            ("metal_aux", "副金属/跨线层 (留空=工艺档)", "", False),
-            ("ind_mark", "MARKER 标记层 (0/1)", "0", True)], }
+GEOM_FORM = { "ind": [("kind", u"拓扑 kind (sym)", "sym", False),
+            ("n", u"每臂匝数 n (整数)", "3", True),
+            ("w", u"线宽 w (µm)", "8", True),
+            ("s", u"间距 s (µm)", "3", True),
+            ("rx", u"横向半径 rx (µm)", "80", True),
+            ("ry", u"纵向半径 ry (µm)", "60", True),
+            ("ct", u"中心抽头 ct (0/1)", "0", True),
+            ("dout", u"外径 dout (µm, 留空则用 rx/ry)", "", True),
+            ("chamfer", u"拐角切角 chamfer 0..1 (留空=2-sqrt2)", "", True),
+            ("lead_len", u"差分引线长 lead_len (µm)", "20", True),
+            ("lead_gap", u"差分线间距 lead_gap (µm, 留空=s)", "", True),
+            ("lead_w", u"差分线宽 lead_w (µm, 留空=w)", "", True),
+            ("stack", u"叠层 stack (0/1)", "0", True),
+            ("metal_main", u"主金属 (留空=工艺档)", "", False),
+            ("metal_aux", u"副金属/跨线层 (留空=工艺档)", "", False),
+            ("ind_mark", u"MARKER 标记层 (0/1)", "0", True)], }
 
 GEOM_NUM = set()
 

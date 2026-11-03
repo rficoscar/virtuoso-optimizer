@@ -92,22 +92,26 @@ def panel(px_w, px_h, world, scale, layers, border=True):
                 for i in range(len(line) - 1):
                     dashed(T(*line[i]), T(*line[i + 1]), C_TM2L, 1, 5, 5)
     if "via" in layers:
+        # SKILL lriViaColStack(librf.il:1927): ONE column -- x is fixed, the odd
+        # ncut cuts are stacked along y, h = (ncut-1)(cut+sp)/2.  The span in
+        # geo.json is exactly ncut*cut + (ncut-1)*sp, so ncut is recovered from
+        # it directly; forcing it odd is what keeps the column centred (E09).
         for (x, y, span) in vias:
-            a, b = T(x - span / 2, y + span / 2), T(x + span / 2, y - span / 2)
-            d.rectangle([a[0], a[1], b[0], b[1]], fill=C_VIA, outline=C_VIAE, width=2)
-            n = int(math.floor((span - 2 * ENCL + SP) / (CUT + SP) + 1e-9))
+            n = int(math.floor((span + SP) / (CUT + SP) + 1e-9))
             n = max(1, n)
             if n % 2 == 0:
                 n -= 1
             n = max(1, n)
-            s2 = n * CUT + (n - 1) * SP
             for i in range(n):
-                for j in range(n):
-                    cx = x - s2 / 2 + CUT / 2 + i * (CUT + SP)
-                    cy = y - s2 / 2 + CUT / 2 + j * (CUT + SP)
-                    p = T(cx - CUT / 2, cy + CUT / 2)
-                    q = T(cx + CUT / 2, cy - CUT / 2)
-                    d.rectangle([p[0], p[1], q[0], q[1]], fill=C_VIAF)
+                cy = y + (i - (n - 1) / 2.0) * (CUT + SP)
+                p = T(x - CUT / 2, cy + CUT / 2)
+                q = T(x + CUT / 2, cy - CUT / 2)
+                if q[0] - p[0] < 3.0:          # keep single cuts visible
+                    m = (3.0 - (q[0] - p[0])) / 2.0
+                    p = (p[0] - m, p[1] - m)
+                    q = (q[0] + m, q[1] + m)
+                d.rectangle([p[0], p[1], q[0], q[1]], fill=C_VIAF,
+                            outline=C_VIAE, width=1)
     if border:
         d.rectangle([0, 0, px_w - 1, px_h - 1], outline="#d5dde5", width=2)
     return im, d, T
@@ -155,7 +159,7 @@ ly = 980
 x = 30
 for lab, col in [("TM2  主金属（中心线折线，带宽 w=%.1f）" % W, C_TM2),
                  ("TM1  underpass（扫掠多边形）", C_TM1),
-                 ("via 阵列  cut 数必为奇数", C_VIA)]:
+                 ("via 一列奇数 cut（x 固定，沿 y 排布）", C_VIA)]:
     D.rectangle([x, ly, x + 26, ly + 14], fill=col, outline="#4a5a68")
     D.text((x + 34, ly - 3), lab, font=F14, fill="#22303c")
     x += 400

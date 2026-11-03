@@ -2040,6 +2040,11 @@ procedure(lriI3BuildSym(cv req)
     when(leadLen < w / 2.0 - 1.0e-9
       librfErr("lri[i3]: lead_len < w/2，端口会落在外圈金属内")
       return(nil))
+    when(leadW < w / 2.0 - 1.0e-9
+      librfErr(sprintf(nil
+        "lri[i3]: lead_w=%.3f < w/2=%.3f，引线比半圈金属窄，端口根部会留台阶"
+        (1.0 * leadW) (1.0 * w / 2.0)))
+      return(nil))
     ; Leads may go inward or outward from the window edge xj: only require centre > 0 and stay inside the outer ring
     when(xPort < 1.0e-9
       librfErr(sprintf(nil "lri[i3]: lead_gap 太小（xPort=%.3f）"
@@ -2155,10 +2160,12 @@ procedure(lriI3BuildSym(cv req)
     ; Wide-end via columns
     foreach(v append(va vb)
       lriViaColStack(cv car(v) cadr(v) w (cond ((stack > 0.5) chainUse) (t chain))))
-    ; Differential leads: radial stub + vertical escape
-    leadA = list(list(xj b0) list(xPort b0) list(xPort yPort))
-    leadB = list(list(0.0 - xj b0) list(0.0 - xPort b0)
-                 list(0.0 - xPort yPort))
+    ; Differential leads: they start on the inner edge of the outer ring band
+    ; (b0 - w/2), not on its centreline, so the lead wall and the ring wall form
+    ; one straight line.  A centreline start leaves a w/2 by (xPort - xj) notch
+    ; on each side of the stub (32 um^2 total at the factory default).
+    leadA = list(list(xPort b0 - w / 2.0) list(xPort yPort))
+    leadB = list(list(0.0 - xPort b0 - w / 2.0) list(0.0 - xPort yPort))
     foreach(ld list(leadA leadB)
       librfPathSweepEx(cv M ld leadW nil nil)
       when(stack > 0.5

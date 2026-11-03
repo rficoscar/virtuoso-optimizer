@@ -25,7 +25,7 @@
 1. 比例尺（µm，画 10 µm 或 20 µm 的 bar）
 2. `x = 0` 中轴线（X 交叉的交点恒在这条线上，画出来才能验证 e 的推导）
 3. 圈号 k=0,1,2…（标在每圈 45° 斜边上，而不是直边）
-4. via 位置（用方块，别用点；要能看出 span 覆盖多宽；默认画成 7 个 cut 的阵列）
+4. via 位置（用方块，别用点）。**一个 via 是一列 cut，不是 n×n 阵列**：SKILL lriViaColStack（librf.il:1927-1932）里 x 固定、ncut 颗 cut 沿 y 排，h=(ncut-1)(cut+sp)/2；默认 w=8 时 ncut=7、span=6.5。cut 像素不足 3px 时就地放大，不要把一列拆成方阵（方阵会凭空多出横向 cut，版图上是错的）
 5. 端口 p01/p02（箭头 + 名字 + 坐标），可选 bbox 虚线框
 
 顺带把派生量印在标题行（`p / xj / e / a0`），读者能对着图找点。
@@ -54,14 +54,33 @@ python scripts/draw_anatomy.py geo.json out.png # 三段式解剖图
 - 标题与图注用 unicode `√ − ± ≈`，别用 `\u221a` 这类转义，PIL 中文/符号字体
   （`msyh.ttc`）能直接渲染。
 
-## 5. 判图流程（图看着不对时）
+## 5. GUI 屏上预览：`lri/ui/layout_view.py`（v1.8.2）
+
+几何页右侧的预览走的是**同一个内核**，不是另画的示意图：`form_to_geom` →
+`lri_build_ind` → `LayoutView.show(geo, params)`，出错就 `show_error(str(exc))`，
+把内核原始报错打到状态栏。
+
+- 屏上渲染零依赖：纯 tkinter 图元（`create_polygon` / `create_line`），
+  `draw_on_canvas` 按层序 TM1 → TM2 → cut → bbox 虚线 → 端口 → 比例尺。
+- 导出 PNG 才用 Pillow：`render_image(...)`，3× 超采样 + LANCZOS；
+  缺 Pillow 时回退 Tk PostScript。
+- 两者共用同一个 `LayoutTransform`（`.xy` / `.flat` / `.world_at` / `.visible_rect`），
+  所以屏上看到的位置和导出图逐点一致——**别在导出路径里另写一套坐标换算**，
+  这是历史上「屏上对、导出错位」的来源。
+- 交互：滚轮以光标为中心缩放（`clamp_zoom` 限 0.2–160 px/µm）、拖拽平移
+  （夹紧后至少留 20% 器件可见）、双击适应窗口。画布对象挂 `_lri_preview = True`，
+  主窗口的 `_on_scroller` 见到它就跳过，否则滚轮会同时缩放预览和滚动页面。
+- 层色固定：TM1 `#cfe0f2`、TM2 `#3d6fa5`、cut `#ffe08a`、bbox `#b4b4b4`、端口 `#c0392b`。
+  无 alpha（铁律 2）。via 按「一列 cut」画，与 §3 第 4 条一致。
+
+## 6. 判图流程（图看着不对时）
 
 1. 先分流：是**内核错**还是**出图错**？
 2. 用坐标/面积/连通性判，不用像素判：`check_geometry.py geo.json` 先跑一遍。
 3. 图与数矛盾时，**信数**。失败案例 §7 就是图错了、几何是对的，白改了一轮 underpass。
 4. 只有在数一致的前提下，才用图去解释「为什么这样画」。
 
-## 6. 给用户讲绘制逻辑的顺序（实测有效）
+## 7. 给用户讲绘制逻辑的顺序（实测有效）
 
 ```
 参数 → 派生量（p / a0 / b0 / c0 / xj / e / xe）→ 单圈 6 点 → 一圈半环

@@ -104,19 +104,24 @@ for k in range(N):
 - via 中心必须**同时**落在 TM2 与 TM1 的中心线上（实测距离 0），这是「换圈连接是否成立」
   最强的单点判据（checker E08）。
 
-## 5. 桥 / 引线 / 端口 / bbox（layout.py:405-431）
+## 5. 桥 / 引线 / 端口 / bbox（layout.py:409-438）
 
-- `bridge = [tops_a[-1][-1], tops_b[-1][-1]]`（`:405`）：两臂末点之间的水平短段，
-  两端必须等高（`:407-408`），默认 `bridge_y = -34`。
-- 引线 `lead_a/lead_b`（`:409-410`）：`[(xj,b0), (x_port,b0), (x_port,y_port)]`。
-  `x_port=(lead_gap+lead_w)/2`（`:386`）、`y_port=b0+lead_len`（`:387`）。
-  默认 `lead_gap=s, lead_w=w` → `x_port == xj == p/2`，于是第一段零长度，
-  **checker E01 会 WARN 一条——这是默认参数的固有形态，不是 bug**（判定见 SKILL.md 第 3 步）。
-- 端口：`p01=(x_port,y_port)`、`p02=(-x_port,y_port)`（`:412`）；`ct` 时追加 `ct1`（`:421`）。
+- `bridge = [tops_a[-1][-1], tops_b[-1][-1]]`（`:409`）：两臂末点之间的水平短段，
+  两端必须等高（`:411-412`），默认 `bridge_y = -34`。
+- 引线 `lead_a/lead_b`（`:417-418`）：右侧 `[(x_port, b0-w/2), (x_port, y_port)]`，
+  左侧 `[(-x_port, b0-w/2), (-x_port, y_port)]`。
+  `x_port=(lead_gap+lead_w)/2`（`:390`）、`y_port=b0+lead_len`（`:391`）。
+  **起点是外圈金属带的内沿 `b0-w/2`，不是外圈中心线 `b0`**：从中心线起笔时引线是平头，
+  与外圈平头端面围出一个 `w/2 × (x_port−xj)` 的缺口（默认 `lead_gap=s, lead_w=w` 时
+  `x_port==xj`，每侧 4×4 µm，共 32 µm²；v1.8.2 修复，失败案例 §11）。下探到内沿后，
+  引线内壁 `x=lead_gap/2` 与外圈内沿 `y=b0−w/2` 连成一条直角 L，缺口消失，
+  checker E01 由 WARN 变 PASS。
+  守卫 `lead_w >= w/2`（`:386-389`）：引线比半圈窄时下探露出的残台补不上，直接抛 ValueError。
+- 端口：`p01=(x_port,y_port)`、`p02=(-x_port,y_port)`（`:420`）；`ct` 时追加 `ct1`（`:429`）。
   端口必须落在金属上（距中心线 ≤ w/2），理想情况恰在中心线端点。
-- `bbox = (-rx, -ry, rx, y_port)`（`:430`）：**上边界是端口 y，不是 ry**。
-- `ct`（中心抽头）：`stem=[(0,bridge_y),(0,0)]` + `pad=(0,0,w)`（`:418-419`），
-  约束 `b_last >= 1.5*w + s`（`:416-417`）。实测 `ct=1` 时 stem 中心线到内圈的平行水平段
+- `bbox = (-rx, -ry, rx, y_port)`（`:438`）：**上边界是端口 y，不是 ry**。
+- `ct`（中心抽头）：`stem=[(0,bridge_y),(0,0)]` + `pad=(0,0,w)`（`:426-427`），
+  约束 `b_last >= 1.5*w + s`（`:424-425`）。实测 `ct=1` 时 stem 中心线到内圈的平行水平段
   只有 5.5 < w=8：**这是 T 接拐角、同一网络的合法连接，不是短路**——那块角域本来就被桥覆盖。
   教训：只看中心线距离会把「拐角」误判成「贴线」；checker 的 E05 因此改成
   「平行且沿走向重叠 > w/2 才算间距不足」，垂直/斜交的近距降为 E05d INFO。
@@ -125,13 +130,14 @@ for k in range(N):
 
 ```
 lead_gap >= s                    layout.py:384-385
-lead_len >= w/2                  :388-389
-x_port   >= xj                   :390-391
-x_port   <= a0                   :392-395
+lead_w   >= w/2                  :386-389
+lead_len >= w/2                  :392-393
+x_port   >= xj                   :394-395
+x_port   <= a0                   :396-398
 lmax      = min(a0-c0, aN-cN) - xe  >= via_edge + stub    :308-312
 dmax      >= e                   :343-346
-桥两端等高                        :407-408
-ct 时 b_last >= 1.5*w + s         :416-417
+桥两端等高                        :411-412
+ct 时 b_last >= 1.5*w + s         :424-425
 ```
 
 任何一条破了就抛 ValueError，**不许为了让参数画得出来而挪几何**（失败案例 §6）。

@@ -24,8 +24,9 @@ from .device import (
 from .runner import (
     load_emx_settings, save_emx_settings, emx_settings_to_opts, emx_cmd_preview)
 from .layout import (
-    lri_validate, lri_draw_sketch, lri_sketch_after, PRESETS, GEOM_FORM, GEOM_CHOICES,
-    form_to_geom)
+    lri_validate, lri_build_ind, lri_sketch_after, PRESETS, GEOM_FORM,
+    GEOM_CHOICES, form_to_geom)
+from .ui.layout_view import LayoutView
 
 
 def _disp_cols(text):
@@ -37,7 +38,9 @@ def _disp_cols(text):
 # The Layout page main form shows only common fields (matching the 08c workflow);
 # advanced fields live in the "Advanced..." window; behavior and config round-tripping are unchanged.
 GEOM_PRIMARY = {
-    "ind": ("kind", "n", "w", "s", "dout", "ct"),
+    # rx/ry are the real shape parameters of the sym coil; dout stays available
+    # as a fallback for presets written before the split, but it is not primary.
+    "ind": ("kind", "n", "w", "s", "rx", "ry", "ct"),
 }
 
 
@@ -136,10 +139,15 @@ class _TabBase(object):
                 return False
 
         def _on_scroller(e):
-            # When the wheel is over a widget with its own scrolling (log/tree), scroll only that widget.
+            # When the wheel is over a widget with its own scrolling (log/tree)
+            # or over an embedded zoomable preview, let that widget win: the
+            # widget binding runs before this bind_all, so scrolling here as
+            # well would move the page while the preview zooms.
             try:
                 w = e.widget
                 while w is not None:
+                    if getattr(w, "_lri_preview", False):
+                        return True
                     if w.winfo_class() in ("Text", "Listbox",
                                            "Treeview", "TCombobox"):
                         return True
@@ -285,16 +293,18 @@ class _LayoutTab(_TabBase):
         self.ttk.Button(r, text="预设…", command=self._preset_dialog).pack(
             side="left", padx=6)
 
-        # --- geometry form + sketch ---
+        # --- geometry form + interactive preview ---
         mid = self.ttk.Frame(f)
-        mid.pack(fill="x", pady=2)
+        mid.pack(fill="both", expand=True, pady=2)
         self.geom_frame = self.ttk.Frame(mid)
-        self.geom_frame.pack(side="left", fill="x", expand=True)
-        self.sketch = self.tk.Canvas(mid, width=280, height=210,
-                                     highlightthickness=1,
-                                     highlightbackground="#aaaaaa",
-                                     background="#fafafa")
-        self.sketch.pack(side="right", padx=6, pady=2, anchor="n")
+        self.geom_frame.pack(side="left", fill="y", anchor="n")
+        self.view = LayoutView(mid, self.tk, self.ttk, height=430, width=520)
+        self.view.frame.pack(side="right", fill="both", expand=True,
+                             padx=(10, 0), pady=2)
+        # The old page called this canvas "sketch"; keep the name so the
+        # debounce helper and any external hook still find a canvas.
+        self.sketch = self.view.canvas
+        self.sketch._lri_preview = True
         self.geom_vars = {}
         self._rebuild_geom()
 
@@ -466,28 +476,28 @@ class _LayoutTab(_TabBase):
             except Exception:
                 pass
     def _draw_geom_sketch(self, typ):
-        """Device geometry sketch with parameter labels (sym inductor only)."""
-        c = getattr(self, "sketch", None)
-        if c is None:
-            return
-        try:
-            c.delete("all")
-        except Exception:
+        """Build the geometry from the form and show it in the preview.
+
+        The preview is the real kernel output (lri_build_ind), not a hand-drawn
+        sketch, so zooming in shows exactly the polygons that will be streamed
+        out; an infeasible parameter set shows the kernel's own error text.
+        """
+        view = getattr(self, "view", None)
+        if view is None:
             return
         typ = typ or self.a_type.get()
-        c.create_text(274, 8, text=("%s sketch" % typ), fill="#333333",
-                      font=("fixed", 9), anchor="ne")
-        if typ == "ind":
-            raw = {k: (v.get() if v is not None else "")
-                   for k, v in (self.geom_vars or {}).items()}
-            try:
-                lri_draw_sketch(c, raw)
-            except Exception as exc:
-                c.create_text(140, 100, text="预览失败: %s" % str(exc)[:40],
-                              fill="#a03030", font=("fixed", 8))
-        else:
-            c.create_text(140, 100, text="(no sketch)", fill="#888888",
-                          font=("fixed", 10))
+        if typ != "ind":
+            view.show_error("未知器件类型 %s（只剩 ind 对称差分电感）" % typ)
+            return
+        raw = {k: (v.get() if v is not None else "")
+               for k, v in (self.geom_vars or {}).items()}
+        try:
+            params = form_to_geom(typ, raw)
+            geo = lri_build_ind(params)
+        except Exception as exc:
+            view.show_error(str(exc))
+            return
+        view.show(geo, params)
 
     # ---- presets ----
     def _preset_dialog(self):

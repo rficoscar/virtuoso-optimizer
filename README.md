@@ -11,7 +11,8 @@ Cadence Virtuoso / spectre 电路参数优化工具：按目标自动改写原�
 ### 运行
 
 需要 Python 3.6+ 和图形桌面，本机可用 Virtuoso / spectre。收敛图需要
-matplotlib，版图截图需要 Pillow（可选）。
+matplotlib；电感版图预览是纯 tkinter 矢量绘制，零额外依赖，只有导出 PNG
+需要 Pillow（可选）。
 
 ```sh
 python3 optimizer.py
@@ -19,6 +20,18 @@ python3 optimizer.py
 
 在界面里按「环境 → 设计 → 变量 → 目标 → 迭代」填写后开始。没有 license 时可
 用界面里的 mock 模式走通流程。
+
+### 电感版图预览
+
+几何页右侧是电感版图预览：直接调用真实内核 `lri/layout.py` 算出几何再矢量绘制，
+不是示意图。滚轮以光标为中心缩放，拖拽平移，双击适应窗口；工具栏可切网格、
+端口标注，以及导出 PNG。
+
+- 层序按真实叠层由下往上：TM1 underpass → TM2 主金属 → via cut（一列奇数颗）。
+- 预览零额外依赖（纯 tkinter）；只有「导出 PNG」用 Pillow，缺 Pillow 时回退
+  Tk PostScript。
+- 六个预设与 `PRESETS` 一一对应：出厂默认、宽金属、多圈、中心抽头、扁宽、方形。
+  预设值都先过 `lri_validate`；参数不合法时状态栏直接显示内核的原始报错。
 
 ### AI skill：电感 PCell 几何守门（`.dsh/skills/virtuoso-pcell`）
 
@@ -64,7 +77,8 @@ device layouts and iterates them with EM.
 ### Run
 
 Python 3.6+, a graphical desktop, and a local Virtuoso / spectre installation.
-matplotlib (convergence plots) and Pillow (layout screenshots) are optional.
+matplotlib (convergence plots) is optional; the inductor layout preview is pure
+tkinter vector drawing, and only PNG export needs Pillow.
 
 ```sh
 python3 optimizer.py
@@ -72,6 +86,21 @@ python3 optimizer.py
 
 Fill in Environment, Design, Variables, Targets and Iteration in the GUI, then
 start. A mock mode is available when no license is present.
+
+### Inductor layout preview
+
+The geometry tab draws the inductor on the right by calling the real kernel
+(`lri/layout.py`) and rendering it with vector primitives — not a sketch. The
+wheel zooms around the cursor, dragging pans, double-click fits; the toolbar
+toggles the grid and port labels and exports PNG.
+
+- Layers stack in true order: TM1 underpass → TM2 main metal → via cuts (a
+  single column of an odd count).
+- The on-screen preview needs no extra dependency (pure tkinter); only PNG export
+  uses Pillow, falling back to Tk PostScript when it is missing.
+- The six presets mirror `PRESETS`: factory default, wide metal, many turns,
+  centre tap, flat-wide, square. Every preset goes through `lri_validate`; an
+  illegal edit reports the kernel's own error in the status bar.
 
 ### AI skill: inductor PCell geometry gate (`.dsh/skills/virtuoso-pcell`)
 

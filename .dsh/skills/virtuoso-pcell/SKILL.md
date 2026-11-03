@@ -101,7 +101,7 @@ python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py --selftest        # 
 
 | code | 判据 | 典型根因 |
 |---|---|---|
-| E01 | 零长度段/重复点 | 引线 `x_port == xj`（`lead_gap`/`lead_w` 取默认值时的**已知形态**，WARN 不是 bug） |
+| E01 | 零长度段/重复点 | v1.8.2 起引线改 2 点折线、起点取外圈内沿 `b0-w/2`，默认参数不再触发；再出现就是真有重复点 |
 | E02 | 中心线自交 | 环端 `xe` 外推量算错，斜段穿过本体 |
 | E03 | 段角不是 45° 整数倍 | 切角 `c` 没随圈号收缩；underpass y 偏移抄错 |
 | E04 | under_poly 自交/零面积 | 收尾 miter 顶点补错 |
@@ -119,8 +119,9 @@ python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py --selftest        # 
 
 - 先写断言（面积/bbox/不重叠/连通/对称/端口已知答案），再动代码。没有断言的改动算没做完。
 - 成对改：`data/librf.il` + `lri/layout.py` 同一次提交，提交信息写两端 `file:line`。
-- 硬约束先过一遍：`lead_gap>=s`、`lead_len>=w/2`、`x_port>=xj`、`x_port<=a0`、
-  `lmax >= via_edge+stub`、`dmax >= e`、桥两端等高；`ct` 另需 `b_last >= 1.5w+s`。
+- 硬约束先过一遍：`lead_gap>=s`、`lead_w>=w/2`、`lead_len>=w/2`、`x_port>=xj`、
+  `x_port<=a0`、`lmax >= via_edge+stub`、`dmax >= e`、桥两端等高；
+  `ct` 另需 `b_last >= 1.5w+s`。
 - 参数耦合：改 `w/s` 要跟着看 `lead_gap/lead_len`；改圈数要重算 `lmax` 是否还放得下 via 区。
 
 判据：改完重跑第 3 步 exit 0，且新参数组合的检查结果与旧参数在"该变的地方变了、不该变的没变"。
@@ -146,6 +147,10 @@ python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py --selftest        # 
   python .dsh/skills/virtuoso-pcell/scripts/draw_anatomy.py geo.json anatomy.png
   ```
 
+- 要在 GUI 里给用户看（或导出 PNG），走 `lri/ui/layout_view.py`——它调的是同一个内核，
+  `LayoutView.show(geo, params)` 上屏、`render_image(...)` 导出，两者共用一个
+  `LayoutTransform`，屏上与导出逐点一致。别另写一套坐标系（`references/visualization.md` §5）。
+
 - 判图先判数：图与数矛盾时信数。
 
 判据：用户能指着图说出"这个 X 的交点为什么在 x=0"、"这个 via 为什么落在这儿"。
@@ -164,7 +169,7 @@ python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py --selftest        # 
 - `references/geometry-model.md` —— 完整几何模型与公式（先读这个再动代码）
 - `references/skill-il.md` —— SKILL 语言陷阱、几何原语、sym 引擎、落库调用链
 - `references/failure-catalog.md` —— 真实事故：症状/根因/正确做法/验证方式
-- `references/visualization.md` —— 出图配方、层序、像素反算、`draw_anatomy.py` 三面板讲解图
+- `references/visualization.md` —— 出图配方、层序、像素反算、`draw_anatomy.py` 三面板讲解图、GUI 预览模块
 - `scripts/dump_geo.py` —— 从仓库内核倒 geo.json（带设计参数）
 - `scripts/check_geometry.py` —— 13 条不可变量检查器（零依赖，可直接跑）
 - `scripts/draw_anatomy.py` —— 按层序出解剖图

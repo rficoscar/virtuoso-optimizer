@@ -94,9 +94,9 @@ r=w/2-enc-cut/2，r<0 报错（librf.il:1963-1966）；dpitch=(cut+sp)√2（lib
 
 req 是扁平 key/value 表。默认 dout=160、rx=ry=dout/2、n=3、w=10、s=3.2、chamfer=2-√2、lead_len=20、lead_gap=s、lead_w=w、ct=0、stack=0；metal_main/aux 默认角色 spiral/underpass，空串回落、同名报错；ind_mark 归 librfRun（librf.il:2016-2027、librf.il:2053-2060、librf.il:869-870）。
 
-校验：lead_gap≥s、lead_len≥w/2；xPort=(lead_gap+lead_w)/2 满足 1e-9<xPort≤a0；s 与 lead_gap≥ws=max(wide(main),stack?wide(aux):0)；via 链 lriViaChain(aux,main)，无表非 stack 降级 via_sp 单跳，无链要 stack 报错；stack 要求相邻层（差 1）（librf.il:2028-2052、librf.il:2063-2092）。
+校验：lead_gap≥s、lead_w≥w/2、lead_len≥w/2；xPort=(lead_gap+lead_w)/2 满足 1e-9<xPort≤a0；s 与 lead_gap≥ws=max(wide(main),stack?wide(aux):0)；via 链 lriViaChain(aux,main)，无表非 stack 降级 via_sp 单跳，无链要 stack 报错；stack 要求相邻层（差 1）（librf.il:2028-2052、librf.il:2063-2092）。
 
-绘制：两臂 ±1，桥取两臂末点并查等高；顶层/桥用 PathSweepEx(...,nil,nil)，stack 时同扫 aux 并填 via；underpass 在 crossName/aux；宽端 via 列；3 点引线；p01/p02 由 TipLabel 从 (±xPort,yPort) 向内偏 1.5 打 pin/label（librf.il:464-475、librf.il:2167-2168）。ct>0.5 需 b_last≥1.5w+s，stem 到 origin、origin 放 w×w pad，再打 ct1 pin。收尾断言 bboxX/bboxY/角度，返回 t（librf.il:2120-2208）。
+绘制：两臂 ±1，桥取两臂末点并查等高；顶层/桥用 PathSweepEx(...,nil,nil)，stack 时同扫 aux 并填 via；underpass 在 crossName/aux；宽端 via 列；2 点引线（起点取外圈内沿 b0−w/2，避免端口根部缺口，librf.il:2167-2168）；p01/p02 由 TipLabel 从 (±xPort,yPort) 向内偏 1.5 打 pin/label（librf.il:464-475、librf.il:2167-2168）。ct>0.5 需 b_last≥1.5w+s，stem 到 origin、origin 放 w×w pad，再打 ct1 pin。收尾断言 bboxX/bboxY/角度，返回 t（librf.il:2120-2208）。
 
 ## §4 落库调用链
 

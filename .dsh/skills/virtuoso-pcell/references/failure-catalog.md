@@ -1,10 +1,10 @@
-# 电感 PCell 几何开发：失败案例库（sym 对称差分电感，v1.8.1）
+# 电感 PCell 几何开发：失败案例库（sym 对称差分电感，v1.8.2）
 
 > 服务对象：写/改电感 PCell 几何代码的 AI。案例全部来自本仓库的真实修复记录
 > （CHANGELOG 1.1.0–1.4.4、`lri/layout.py` 注释、`librf.il` 注释）与 2026-11-03 解剖会话。
 > 排序：按「出现频率 × 危害」。**前 4 条都是静默故障**——不报错、图形看起来对，只有量尺寸或对账才暴露。
 > 约定：`librf.il` = `src/virtuoso_optimizer/data/librf.il`（2251 行），
-> `layout.py` = `src/virtuoso_optimizer/lri/layout.py`（656 行）；坐标/面积都用 µm。
+> `layout.py` = `src/virtuoso_optimizer/lri/layout.py`（568 行，v1.8.2）；坐标/面积都用 µm。
 > v1.8.0 起只剩 sym 一种拓扑（se/diff/f8/变压器/balun/cpl 已删），旧案例里涉及这些拓扑的段落一并作废。
 
 **基线自证（改完必跑，缺一条就别声称改对了）**
@@ -16,7 +16,7 @@ python -m virtuoso_optimizer.netlist.create           # 20/20 tests passed
 python -m virtuoso_optimizer.netlist.params           # selftest: 125/125 passed
 python -m virtuoso_optimizer.em.align --selftest      # selftest: 108 passed, 0 failed
 python .dsh/skills/virtuoso-pcell/scripts/dump_geo.py -o /tmp/geo.json
-python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py /tmp/geo.json   # exit 0；默认参数允许 1 条 E01 WARN
+python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py /tmp/geo.json   # exit 0；13 条全 PASS
 ```
 
 几何断言的公共夹具就是 `check_geometry.py`（`polys_overlap` / `self_intersections` /
@@ -125,10 +125,36 @@ python .dsh/skills/virtuoso-pcell/scripts/check_geometry.py /tmp/geo.json   # ex
 
 ## 10. 参数域里的「合法输入」被内核拒掉（PRESETS 里 n=2.5/3.5）
 - **症状**：GUI 下拉选到某个预设，直接报「n=2.500 必须为整数（每臂圈数）」。
-- **根因**：`layout.py:600-613` 的 `PRESETS` 保留了上一代引擎的半整数匝（`n=2.5/3.5`），
+- **根因**：`layout.py` 的 `PRESETS` 保留了上一代引擎的半整数匝（`n=2.5/3.5`），
   而现内核 `lri_i3_rings:232-233` 与 SKILL `librf.il:1701` 都要求整数 —— 预设表没跟着更新。
 - **正确做法**：预设值先过 `lri_validate`；要么把半整数改成整数，要么在内核里显式支持。
-- **验证**：遍历 `PRESETS` 每个条目 `lri_validate(form_to_geom(...))` 全部 True（当前会红一条）。
+  **v1.8.2 已修**：`PRESETS` 换成与六组参数图一一对应的 6 条（出厂默认 / 宽金属 / 多圈 /
+  中心抽头 / 扁宽 / 方形），全整数 `n`、`rx/ry` 显式给出；`GEOM_FORM` 默认值同步 CDF
+  （`w=8, s=3, rx=80, ry=60, ct=0`），`GEOM_PRIMARY` 主表单含 `rx/ry`。
+- **验证**：遍历 `PRESETS` 每个条目 `lri_validate(form_to_geom(...))` 全部 True
+  （`work/shots/test_layout_tab.py` 已断言 6/6 通过）。
+
+## 11. 差分引线从外圈中心线起笔，端口根部各留一个 4×4 缺口（共 32 µm²，v1.8.2 已修）
+- **症状**：把端口放大看，引线与外圈之间各有一块 4×4 µm² 的方形空洞（用户截图红框圈出）。
+  整体「看着像电感」、DRC 不报、检查器 exit 0，只有量面积或数台阶才发现少了金属。
+- **根因**：引线折线原为 `[(xj,b0),(x_port,b0),(x_port,y_port)]` —— 从外圈**中心线** `y=b0`
+  起笔，而扫掠是平头（butt cap），外圈金属带在 `x=±xj` 处也是平头收口，
+  台阶正好吃掉 `w/2 × (x_port−xj)`。默认 `lead_gap=s, lead_w=w` → `x_port==xj`，
+  缺口 4×4 µm²，左右共 32 µm²；首两点还重合，触发 checker E01 WARN
+  （当时被当成「默认参数固有形态」放过，见本库旧版 E01 说明）。
+- **正确做法**：起点下探到外圈内沿 —— Python `lead_a=[(x_port, b0-w/2),(x_port, y_port)]`、
+  `lead_b` 取负镜像（`layout.py:417-418`）；SKILL
+  `leadA = list(list(xPort b0 - w / 2.0) list(xPort yPort))`、
+  `leadB = list(list(0.0 - xPort b0 - w / 2.0) list(0.0 - xPort yPort))`（`librf.il:2167-2168`）。
+  旧横段 `(xj,b0)→(x_port,b0)` 整段落在外圈带内，删掉不影响外形。
+  补守卫 `lead_w >= w/2`（`layout.py:386-389`、`librf.il:2043-2047`）：`lead_w` 更窄时
+  下探露出的残台补不上，必须直接报错。
+- **验证**：① 0.05 µm 中点采样扫窗口做并集差集 → 新增 32.00 µm²、移除 0.00 µm²，
+  两块 4×4 盒子 100% 由空变金属；② 逐点比对只有两条引线的 sweep 变（bbox y 56→52），
+  其余 5 条 metal 与 2 个 underpass 逐点相同；③ 点探 (3.5,54)(2.0,53)(1.6,55.5)(-3.5,54)
+  全部落在金属内、改动前全部落在空处；④ checker 13 条全 PASS，E01 的 WARN 消失。
+- **教训**：平头扫掠的折线起点要取**金属带内沿**而不是中心线；E01 的 WARN 不是「已知形态」，
+  它往往就是缺口/台阶的信号。差分端口的「对齐」判据是两侧内壁共线，不是中心线共线。
 
 ---
 
