@@ -20,7 +20,7 @@ from .skillio import (
 from .emx import (
     parse_freq_spec)
 from .snp import (
-    read_snp, write_snp, ensure_snp_header, _cpl_port_indices, extract_fingerprint,
+    read_snp, write_snp, ensure_snp_header, extract_fingerprint,
     fprint_summary)
 from .device import (
     geom_key, default_cell_name, _kind_of, write_device_meta, load_device_meta,
