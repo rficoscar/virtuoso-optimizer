@@ -20,6 +20,21 @@ python3 optimizer.py
 在界面里按「环境 → 设计 → 变量 → 目标 → 迭代」填写后开始。没有 license 时可
 用界面里的 mock 模式走通流程。
 
+### AI skill：电感 PCell 几何守门（`.dsh/skills/virtuoso-pcell`）
+
+仓库自带一个项目级 DeepSeek Harness skill，覆盖「读/改电感 PCell 的 `.il` 或
+`lri/layout.py`」「版图图形看着对但面积/DRC/连通性不对」「把绘制逻辑讲清楚并出图」
+这几类任务。它强制先判定真相源（SKILL `data/librf.il` 2251 行 vs Python 镜像），
+再用零依赖检查器挡错：
+
+```sh
+python3 .dsh/skills/virtuoso-pcell/scripts/dump_geo.py -o geo.json      # 内核 → 几何
+python3 .dsh/skills/virtuoso-pcell/scripts/check_geometry.py geo.json  # 13 条不变量
+python3 .dsh/skills/virtuoso-pcell/scripts/draw_anatomy.py geo.json anatomy.png
+```
+
+几何 JSON 也可以由别的工具导出；检查器的 `--json` 输出供脚本消费。
+
 ### 离线传输（release/）
 
 目标机不能拷贝文件、只能通过 VNC 剪贴板传文本时，`release/` 里的脚本把整个
@@ -57,6 +72,23 @@ python3 optimizer.py
 
 Fill in Environment, Design, Variables, Targets and Iteration in the GUI, then
 start. A mock mode is available when no license is present.
+
+### AI skill: inductor PCell geometry gate (`.dsh/skills/virtuoso-pcell`)
+
+The repo ships a project-level DeepSeek Harness skill for reading or changing the
+inductor PCell (`.il` or `lri/layout.py`), for "the layout looks right but the
+area / DRC / connectivity is wrong", and for explaining the drawing logic with
+figures. It forces a truth-source decision first (`data/librf.il`, 2251 lines,
+versus its Python mirror) and gates the change on a dependency-free checker:
+
+```sh
+python3 .dsh/skills/virtuoso-pcell/scripts/dump_geo.py -o geo.json
+python3 .dsh/skills/virtuoso-pcell/scripts/check_geometry.py geo.json
+python3 .dsh/skills/virtuoso-pcell/scripts/draw_anatomy.py geo.json anatomy.png
+```
+
+The geometry JSON may come from any producer; `--json` makes the checker
+script-friendly.
 
 ### Offline transfer (release/)
 
