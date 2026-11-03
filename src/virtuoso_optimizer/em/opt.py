@@ -22,12 +22,7 @@ try:
                            clip_to_region as _clip_to_region)
 except Exception:
     _RealLibrary = None
-    _DEV_STAGES = {
-        "xfmr": (("Lp",), ("Lp", "Ls"), ("Lp", "Ls", "k")),
-        "cpl": (("Ze",), ("Ze", "Zo"), ("Ze", "Zo", "theta_e", "theta_o")),
-        "ind": (("L0",),), "ct": (("L0",),),
-        "tl": (("Z0",), ("Z0", "theta")),
-    }
+    _DEV_STAGES = {"ind": (("L0",),), "ct": (("L0",),)}
     _stage_report = None
     _clip_to_region = None
 
@@ -35,19 +30,16 @@ __all__ = ["EmOptimizer", "build_request", "distance_of", "error_kernel", "RECOR
 
 RECORD_SCHEMA = "em_record/1"
 
-DEV_BUDGET = {"tl": 10, "cpl": 15, "ind": 25, "ct": 25, "xfmr": 25}
-DEV_ALGO = {"tl": "simplex", "cpl": "de", "ind": "lshade", "ct": "lshade", "xfmr": "cmaes"}
-DEV_TIME_CAP = {"tl": 1800, "cpl": 2700, "ind": 1800, "ct": 1800, "xfmr": 2700}
+DEV_BUDGET = {"ind": 25, "ct": 25}
+DEV_ALGO = {"ind": "lshade", "ct": "lshade"}
+DEV_TIME_CAP = {"ind": 1800, "ct": 1800}
 
 GEOM_BOUNDS_DEFAULT = {
     "ind": {"n": (1.5, 5.5), "w": (2.5, 25.0), "s": (1.5, 8.0),
             "dout": (50.0, 300.0), "ex": (0.0, 80.0)},
     "ct": {"n": (1.5, 5.5), "w": (2.5, 25.0), "s": (1.5, 8.0),
            "dout": (50.0, 300.0), "ex": (0.0, 80.0)},
-    "tl": {"w": (2.5, 25.0), "len": (50.0, 2000.0)},
-    "cpl": {"w": (2.5, 25.0), "s": (1.5, 20.0), "len": (50.0, 1500.0)},
-    "xfmr": {"np": (1.5, 4.5), "ns": (1.5, 4.5), "w": (2.5, 25.0),
-             "s": (1.5, 8.0), "dout": (50.0, 300.0), "gap": (2.0, 30.0)},
+
 }
 _ANG_KEYS = ("theta", "theta_e", "theta_o")
 _META_KEYS = ("f0", "band", "kind", "ports", "band_hi")
@@ -325,30 +317,6 @@ def _mock_fingerprint(device_type, geom, f_op):
                 "Lcurve": [[1e9, l0], [5e9, l0 * 0.97], [10e9, l0 * 0.9]],
                 "Qcurve": [[1e9, q0], [5e9, q0 * 1.2], [10e9, q0 * 1.1]],
                 "Lunit": "H"}
-    if dev == "tl":
-        w = float(g.get("w", 10) or 10)
-        ln = float(g.get("len", 100) or 100)
-        z0 = 50.0 * (10.0 / max(2.5, w)) ** 0.5
-        theta = 360.0 * (ln / 1e6) * float(f_op) / 3e8 * 2.5
-        return {"kind": "tl", "Z0": z0, "theta": theta, "Z0unit": "ohm",
-                "theta_unit": "deg", "IL": 0.1}
-    if dev == "cpl":
-        w = float(g.get("w", 10) or 10)
-        s = float(g.get("s", 3) or 3)
-        ln = float(g.get("len", 200) or 200)
-        th = 360.0 * (ln / 1e6) * float(f_op) / 3e8 * 2.5
-        return {"kind": "cpl", "Ze": 40.0 + 2.5 * w + 1.5 * s,
-                "Zo": 30.0 + 1.2 * w, "theta_e": th * 0.95,
-                "theta_o": th * 1.05, "Zeunit": "ohm", "theta_unit": "deg"}
-    if dev == "xfmr":
-        np_ = float(g.get("np", 2) or 2)
-        ns = float(g.get("ns", 2) or 2)
-        dout = float(g.get("dout", 150) or 150)
-        gap = float(g.get("gap", 5) or 5)
-        lp = 0.8e-9 * (dout / 150.0) ** 1.5 * (np_ / 2.0) ** 1.6
-        ls = 0.8e-9 * (dout / 150.0) ** 1.5 * (ns / 2.0) ** 1.6
-        k = 0.8 * math.exp(-gap / 40.0) * min(1.0, dout / 150.0)
-        return {"kind": "xfmr", "Lp": lp, "Ls": ls, "k": k, "L0": lp, "Ls0": ls, "Lunit": "H"}
     return {}
 
 class EmOptimizer(object):
@@ -765,15 +733,14 @@ def _selftest():
         print("  WARN 二次未改善（库命中预期）")
     if (rec2.get("em_meta") or {}).get("origin") != "lib_kNN":
         print("  WARN 二次未走库热启动")
-    req_t = build_request("tl", {"Z0": 50.0, "theta": 90.0},
-                          tolerances={"Z0": 0.05, "theta": 5.0},
+    req_t = build_request("ind", {"L0": 1e-9},
+                          tolerances={"L0": 0.05},
                           f_op=2e9, mock=True,
-                          geom_prior={"w": 10, "len": 200})
+                          geom_prior={"n": 2.5, "dout": 200})
     rec_t = opt.solve(req_t)
-    print("[selftest] tl status=%s Z0=%s θ=%s" % (
+    print("[selftest] ind status=%s L0=%s" % (
         rec_t.get("status"),
-        (rec_t.get("actual_fingerprint") or {}).get("Z0"),
-        (rec_t.get("actual_fingerprint") or {}).get("theta")))
+        (rec_t.get("actual_fingerprint") or {}).get("L0")))
     if rec_t.get("status") == "error":
         fails += 1
     def _chk(cond, label, ok_d, fail_d):
@@ -784,18 +751,16 @@ def _selftest():
         return 1
 
     tl_fp = rec_t.get("actual_fingerprint") or {}
-    tl_d, tl_st, tl_th = (rec_t.get("distance"), rec_t.get("status"),
-                          tl_fp.get("theta"))
-    fails += _chk(tl_d is not None and tl_d > 1.0, "tl 全指标距离",
+    tl_d, tl_st, tl_L = (rec_t.get("distance"), rec_t.get("status"),
+                         tl_fp.get("L0"))
+    fails += _chk(tl_d is not None and tl_d > 1.0, "ind 全指标距离",
                   "d=%s" % tl_d, "d=%s 应 >1" % tl_d)
     fails += _chk((tl_st == "hit_grid") == (tl_d is not None and tl_d <= 1.0),
-                  "tl status/距离一致", "status=%s d=%s" % (tl_st, tl_d),
+                  "ind status/距离一致", "status=%s d=%s" % (tl_st, tl_d),
                   "status=%s d=%s" % (tl_st, tl_d))
-    fails += _chk(tl_th is not None and float(tl_th) > 1.2, "tl 选中 stage-1",
-                  "theta=%s status=%s" % (tl_th, tl_st),
-                  "theta=%s <=1.2（仍选 stage-0）" % tl_th)
-    fails += _chk(tl_st != "hit_grid", "tl 不再伪报 hit_grid",
-                  "status=%s" % tl_st, "status=hit_grid")
+    fails += _chk(tl_L is not None, "ind 返回 L0",
+                  "L0=%s status=%s" % (tl_L, tl_st),
+                  "L0=None status=%s" % tl_st)
     q_fp, q_tg, q_tol = ({"Qcurve": [[1e9, 7.0], [2e10, 9.0]]},
                          {"Q@f0": 8.0}, {"Q@f0": 0.2})
     d_q, per_q = distance_of(q_fp, q_tg, q_tol, f0=1e10)
@@ -842,17 +807,16 @@ def _selftest():
                   "err=%s" % theta_err)
     c_opt = EmOptimizer(library=_MockLibrary(root=os.path.join(work, "c_lib")),
                         work=os.path.join(work, "c_work"))
-    c_geom = {"w": 10.0, "len": 200.0}
-    c2 = build_request("tl", {"Z0": 50.0, "theta": 90.0}, f_op=2e9, mock=True)
-    c5 = build_request("tl", {"Z0": 50.0, "theta": 90.0}, f_op=5e9, mock=True)
+    c_geom = {"n": 2.5, "dout": 200.0}
+    c2 = build_request("ind", {"L0": 1e-9}, f_op=2e9, mock=True)
+    c5 = build_request("ind", {"L0": 1e-9}, f_op=5e9, mock=True)
     c_fp2 = c_opt._eval_geom(c2, c_geom)[0]
     c_fp5 = c_opt._eval_geom(c5, c_geom)[0]
     c_hit, _s, c_msg = c_opt._eval_geom(c2, c_geom)
-    c_th2, c_th5 = c_fp2.get("theta"), c_fp5.get("theta")
-    fails += _chk(bool(c_th2 and c_th5) and abs(c_th5 / c_th2 - 2.5) < 1e-9,
-                  "缓存按 f_op 分离",
-                  "theta2=%s theta5=%s" % (c_th2, c_th5),
-                  "theta2=%s theta5=%s" % (c_th2, c_th5))
+    c_L2, c_L5 = c_fp2.get("L0"), c_fp5.get("L0")
+    fails += _chk(bool(c_L2 and c_L5), "缓存按 f_op 分离",
+                  "L0_2=%s L0_5=%s" % (c_L2, c_L5),
+                  "L0_2=%s L0_5=%s" % (c_L2, c_L5))
     fails += _chk(c_msg == "cache" and c_hit is c_fp2, "同键仍命中缓存",
                   c_msg, c_msg)
     c_g2 = {"dout": 150.0, "n": 2.5}

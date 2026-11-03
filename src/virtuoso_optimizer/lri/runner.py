@@ -56,7 +56,11 @@ class GeomRunner(object):
             cds_lib=cfg.get("cds_lib"))
         self.geom_names = list(le.get("geom_vars") or [])
         self.fixed = dict(le.get("fixed_geom") or {})
-        self.type = le.get("type") or "ind"
+        _typ = (le.get("type") or "ind").lower()
+        if _typ not in ("ind", "sym"):
+            raise LibrfError(
+                "layout_em.type=%r 已删除（只剩 ind/sym 对称差分电感）" % _typ)
+        self.type = "ind"
         self.cell = le.get("cell") or ("opt_%s" % self.type)
         self.work = le.get("work")
         self.lib = le.get("lib")
@@ -193,7 +197,7 @@ class GeomRunner(object):
         except Exception:
             key_id = "%08x" % (abs(hash(key)) % (10 ** 8))
         snp_saved = os.path.join(os.path.dirname(self.snp_path), "%s_%s.s%dp" % ( self.cell, key_id,
-                                     result.get("kind") in ("ct", "xfmr") and 4 or 2))
+                                     result.get("kind") == "ct" and 4 or 2))
         try:
             _assert_writable(snp_saved, "缓存 sNp")
             shutil.copyfile(result["snp"], snp_saved)

@@ -91,57 +91,31 @@ def _selftest():
         _den = _a + _b / _z0 + _c * _z0 + _d
         return [[(_a + _b / _z0 - _c * _z0 - _d) / _den, 2 * (_a * _d - _b * _c) / _den],
                 [2 / _den, (-_a + _b / _z0 - _c * _z0 + _d) / _den]]
-    _se = _tl_s2(60.0, math.radians(60.0))
-    _so = _tl_s2(35.0, math.radians(80.0))
-    _s11 = (_se[0][0] + _so[0][0]) / 2.0
-    _st = (_se[1][0] + _so[1][0]) / 2.0
-    _sc = (_se[0][0] - _so[0][0]) / 2.0
-    _si = (_se[1][0] - _so[1][0]) / 2.0
-    _s4 = [[0j, _st, _si, _sc],
-           [_st, 0j, _sc, _si],
-           [_si, _sc, 0j, _st],
-           [_sc, _si, _st, 0j]]
-    for _i in range(4):
-        _s4[_i][_i] = _s11
-    _fpr4 = extract_fingerprint("cpl", ["p01", "p02", "p03", "p04"],
-                                [1e9], [_s4], freq_of_interest=1e9)
-    check("cpl 端口映射 Ze/Zo", abs(_fpr4.get("Ze", 0) - 60.0) < 1e-3
-          and abs(_fpr4.get("Zo", 0) - 35.0) < 1e-3,
-          "Ze=%s Zo=%s" % (_fpr4.get("Ze"), _fpr4.get("Zo")))
-    check("cpl 端口映射 θe/θo", abs(_fpr4.get("theta_e", 0) - 60.0) < 1e-3
-          and abs(_fpr4.get("theta_o", 0) - 80.0) < 1e-3,
-          "θe=%s θo=%s" % (_fpr4.get("theta_e"), _fpr4.get("theta_o")))
-    check("cpl 端口映射 a1/b1 同端", _cpl_port_indices(["p01", "p02", "p03", "p04"], 4)
-          == (0, 1, 3, 2))
-    check("cpl 端口映射随 Port order 重排",
-          _cpl_port_indices(["p03", "p01", "p04", "p02"], 4) == (1, 3, 2, 0))
-    _mp = write_device_meta(tmp, "dev1", {"type": "xfmr", "kind": "xfmr",
-                                          "ports": ["p01", "p02", "p03", "p04"]})
+    _mp = write_device_meta(tmp, "dev1", {"type": "ind", "kind": "ind",
+                                          "ports": ["p01", "p02"]})
     _m = load_device_meta(tmp, "dev1")
-    check("device meta roundtrip", bool(_mp) and _m.get("kind") == "xfmr"
-          and _m.get("ports") == ["p01", "p02", "p03", "p04"], str(_m))
+    check("device meta roundtrip", bool(_mp) and _m.get("kind") == "ind"
+          and _m.get("ports") == ["p01", "p02"], str(_m))
     check("device meta missing", load_device_meta(tmp, "nope") == {})
-    check("fingerprint kind 由元数据决定", fingerprint_kind_for_device({"kind": "cpl"}, 4) == "cpl")
+    check("fingerprint kind 由元数据决定",
+          fingerprint_kind_for_device({"kind": "ind"}, 2) == "ind")
     check("fingerprint kind 无元数据兜底", fingerprint_kind_for_device({}, 2) == "ind"
           and fingerprint_kind_for_device({}, 3) == "ct"
           and fingerprint_kind_for_device({}, 4) is None)
-    check("kind_of tl/cpl", _kind_of("tl", {}, ["p01", "p02"]) == "tl"
-          and _kind_of("cpl", {}, ["p01", "p02", "p03", "p04"]) == "cpl")
-    check("指纹摘要按器件类型", "Z0=" in fprint_summary(
-        {"kind": "tl", "Z0": 50, "theta": 90, "IL": 0.2})
-          and "Ze=" in fprint_summary(
-              {"kind": "cpl", "Ze": 60, "Zo": 35, "theta_e": 60, "theta_o": 80})
-          and "L0=" in fprint_summary({"kind": "ind", "L0": 1e-9, "SRF": 1e10}))
-    _vd = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 4, "s": 1.5})
+    check("kind_of ind/ct", _kind_of("ind", {}, ["p01", "p02"]) == "ind"
+          and _kind_of("ct", {}, ["p01", "p02", "p03"]) == "ct")
+    check("指纹摘要按器件类型", "L0=" in fprint_summary(
+        {"kind": "ind", "L0": 1e-9, "SRF": 1e10}))
+    _vd = lri_norm_geom({"kind": "sym", "dout": 200, "n": 3, "w": 4, "s": 1.5})
     _vd_ok, _vd_msg = lri_validate(_vd)
     check("DRC 电感区间距 s<2*min_s 拒绝", not _vd_ok, _vd_msg)
-    _vo = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 4, "s": 2.0})
+    _vo = lri_norm_geom({"kind": "sym", "dout": 200, "n": 3, "w": 4, "s": 2.0})
     _vo_ok, _vo_msg = lri_validate(_vo)
     check("DRC 边界 s=2*min_s 放行", _vo_ok, _vo_msg)
-    _vm = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 0.5, "s": 3.0})
+    _vm = lri_norm_geom({"kind": "sym", "dout": 200, "n": 2.5, "w": 0.5, "s": 3.0})
     _vm_ok, _vm_msg = lri_validate(_vm)
     check("DRC min_w 拒绝", not _vm_ok, _vm_msg)
-    _vx = lri_norm_geom({"kind": "se", "dout": 200, "n": 2.5, "w": 31, "s": 5.0})
+    _vx = lri_norm_geom({"kind": "sym", "dout": 200, "n": 2.5, "w": 31, "s": 5.0})
     _vx_ok, _vx_msg = lri_validate(_vx)
     check("DRC max_w 拒绝", not _vx_ok, _vx_msg)
     _vs = lri_norm_geom({"kind": "sym", "dout": 200, "n": 2.5, "w": 4, "s": 1.5})
@@ -166,22 +140,14 @@ def _selftest():
     snp_p = os.path.join(tmp, "a.s2p")
     cmd = emx_cmd_preview(st, gds=gds_p, struct="c", out_snp=snp_p)
     check("emx preview order", cmd.index("--format") < cmd.index("--s-file") < cmd.index(gds_p))
-    g = form_to_geom("ind", {"kind": "se", "shape": "octagon", "n": "2.5",
-                             "w": "10", "s": "2.6", "dout": "150", "ct": "0",
-                             "seam": "S", "tangle": "180", "underpass": "direct",
-                             "din": ""})
-    check("form_to_geom", g.get("shape") == "oct" and g.get("n") == 2.5 and "din" not in g)
-    check("lri norm W/H/seam", g.get("W") == 150.0 and g.get("H") == 150.0
-          and g.get("seam") == "bottom" and g.get("corner") > 0)
-    gn = lri_norm_geom({"kind": "se", "seam": "N", "dout": 160, "n": 3,
-                        "w": 10, "s": 3.2})
-    check("lri seam map N->top", gn.get("seam") == "top")
-    for _kind in ("se", "diff", "sym"):
-        _n = 3 if _kind == "sym" else 2.5
-        # diff 是两组同心绕线，内圈整套缩在内圈里，占地约两倍
-        _dout = 320 if _kind == "diff" else 220
-        _g = lri_norm_geom({"kind": _kind, "shape": "oct", "dout": _dout,
-                            "n": _n, "w": 10, "s": 2.6})
+    g = form_to_geom("ind", {"kind": "sym", "n": "3", "w": "10", "s": "2.6",
+                             "dout": "150", "ct": "0"})
+    check("form_to_geom", g.get("kind") == "sym" and g.get("n") == 3.0)
+    check("lri norm sym W/H", g.get("W") == 150.0 and g.get("H") == 150.0
+          and g.get("chamfer") > 0)
+    for _kind in ("sym",):
+        _g = lri_norm_geom({"kind": _kind, "dout": 220.0, "n": 3, "w": 10,
+                            "s": 2.6})
         _ok, _msg = lri_validate(_g)
         check("lri validate %s" % _kind, _ok, _msg)
         if _ok:
@@ -192,14 +158,13 @@ def _selftest():
                            "w": 10, "s": 2.6})
     _ok, _msg = lri_validate(_half)
     check("lri sym 半圈拒绝", (not _ok) and "整数" in (_msg or ""), _msg)
-    _bad = lri_norm_geom({"kind": "se", "dout": 30, "n": 9, "w": 10, "s": 3.2})
+    _bad = lri_norm_geom({"kind": "sym", "dout": 30, "n": 9, "w": 10, "s": 3.2})
     _ok, _msg = lri_validate(_bad)
     check("lri validate rejects", (not _ok) and bool(_msg), _msg)
-    _d = gen_driver_il({"type": "ind", "kind": "se", "seam": "bottom",
-                        "tangle": 180, "W": 160.0, "H": 160.0, "corner": 10.0,
+    _d = gen_driver_il({"type": "ind", "kind": "sym", "W": 160.0, "H": 160.0,
                         "cell": "c1", "n": 3, "w": 10, "result": "/tmp/r.txt"})
-    check("driver carries kind/seam", "'kind \"se\"" in _d and "'seam \"bottom\"" in _d)
-    check("driver carries W/H numeric", "'W 160.0" in _d and "'tangle 180.0" in _d)
+    check("driver carries kind sym", "'kind \"sym\"" in _d)
+    check("driver carries W/H numeric", "'W 160.0" in _d)
     _fx = os.path.join(tmp, "fixtures")
     if not os.path.isdir(_fx):
         os.makedirs(_fx)

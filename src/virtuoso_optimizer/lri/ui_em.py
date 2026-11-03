@@ -280,7 +280,7 @@ class _LayoutTab(_TabBase):
         setattr(lab, "_lri_form_label", True)
         self.a_type = self.tk.StringVar(value="ind")
         cb = self.ttk.Combobox(r, textvariable=self.a_type, width=12,
-                               values=("ind", "tl", "xfmr", "cpl"),
+                               values=("ind", "sym"),
                                state="readonly")
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda _e: self._rebuild_geom())
@@ -467,6 +467,148 @@ class _LayoutTab(_TabBase):
                 win.destroy()
             except Exception:
                 pass
+    def _browse_cdslib(self):
+        try:
+            from tkinter import filedialog
+        except Exception:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title="选择 cds.lib",
+            filetypes=[("cds.lib", "cds.lib"), ("所有文件", "*")])
+        if path:
+            self.a_cdslib.set(path)
+    def _on_cdslib_manual(self, *_a):
+        if self._cdslib_loading:
+            return
+        cur = self.a_cdslib.get().strip()
+        self._cdslib_dirty = bool(cur and cur != self._cdslib_auto_last)
+    def _design_workdir(self):
+        try:
+            return self.gui.fields["work_dir"].get().strip()
+        except Exception:
+            return ""
+    def _sync_cdslib_from_design(self):
+        """cds.lib default = design-page work dir / cds.lib; never overwrite after a manual edit."""
+        if self._cdslib_dirty:
+            return
+        wd = self._design_workdir()
+        if not wd:
+            return
+        val = os.path.join(os.path.expanduser(wd), "cds.lib")
+        if self.a_cdslib.get() == val:
+            return
+        cur = self.a_cdslib.get().strip()
+        if cur and cur != self._cdslib_auto_last:
+            # Custom values loaded from a config are kept and never overwritten automatically.
+            self._cdslib_dirty = True
+            return
+        self._cdslib_auto_last = val
+        self._cdslib_loading = True
+        try:
+            self.a_cdslib.set(val)
+        finally:
+            self._cdslib_loading = False
+
+    # ---- geometry form / sketch ----
+    def _rebuild_geom(self):
+        for child in self.geom_frame.winfo_children():
+            child.destroy()
+        if getattr(self, "_adv_win", None) is not None:
+            try:
+                self._adv_win.destroy()
+            except Exception:
+                pass
+            self._adv_win = None
+        self.geom_vars = {}
+        typ = self.a_type.get()
+        primary = GEOM_PRIMARY.get(typ)
+        adv = []
+        row = 0
+        for key, lab, default, _num in GEOM_FORM.get(typ, []):
+            var = self.tk.StringVar(value=default)
+            self.geom_vars[key] = var
+            if primary is not None and key not in primary:
+                adv.append((key, lab))
+                continue
+            label = self.ttk.Label(self.geom_frame, text=lab, anchor="w")
+            label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=1)
+            if key in GEOM_CHOICES:
+                ent = self.ttk.Combobox(self.geom_frame, textvariable=var,
+                                        width=10, values=GEOM_CHOICES[key],
+                                        state="readonly")
+                ent.grid(row=row, column=1, sticky="w", pady=1)
+                ent.bind("<<ComboboxSelected>>",
+                         lambda _e: lri_sketch_after(self))
+            else:
+                ent = self.ttk.Entry(self.geom_frame, textvariable=var,
+                                     width=14)
+                ent.grid(row=row, column=1, sticky="w", pady=1)
+                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
+            row += 1
+        self._geom_adv = adv
+        if adv:
+            self.ttk.Button(self.geom_frame, text="高级…（%d 项，通常不用改）"
+                            % len(adv), command=self._geom_advanced).grid(
+                                row=row, column=0, columnspan=2,
+                                sticky="w", pady=(6, 0))
+        self._draw_geom_sketch(typ)
+        self._fit_form_labels()
+
+    def _geom_advanced(self):
+        """Advanced geometry parameters: less common fields go into a separate window to keep the form compact."""
+        win = getattr(self, "_adv_win", None)
+        if win is not None:
+            try:
+                win.deiconify()
+                win.lift()
+                return
+            except Exception:
+                self._adv_win = None
+        if not self._geom_adv:
+            return
+        typ = self.a_type.get()
+        win = self.tk.Toplevel(self.root)
+        self._adv_win = win
+        win.title("高级几何参数（%s）" % typ)
+        win.transient(self.root)
+        win.geometry("620x560")
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_adv())
+        self.ttk.Label(
+            win, anchor="w", justify="left", foreground="#555555",
+            wraplength=580,
+            text="这些参数通常留空即可（自动推导或沿用工艺档）。\n"
+                 "改动会立即反映到示意图与出图几何。"
+        ).pack(fill="x", padx=10, pady=(8, 4))
+        body, outer = self._scrollable(win)
+        outer.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        for r, (key, lab) in enumerate(self._geom_adv):
+            var = self.geom_vars[key]
+            label = self.ttk.Label(body, text=lab, anchor="w")
+            label.grid(row=r, column=0, sticky="w", padx=(0, 8), pady=2)
+            if key in GEOM_CHOICES:
+                ent = self.ttk.Combobox(body, textvariable=var, width=12,
+                                        values=GEOM_CHOICES[key],
+                                        state="readonly")
+                ent.grid(row=r, column=1, sticky="w", pady=2)
+                ent.bind("<<ComboboxSelected>>",
+                         lambda _e: lri_sketch_after(self))
+            else:
+                ent = self.ttk.Entry(body, textvariable=var, width=16)
+                ent.grid(row=r, column=1, sticky="w", pady=2)
+                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
+        bar = self.ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(0, 8))
+        self.ttk.Button(bar, text="关闭", command=self._close_adv).pack(
+            side="right")
+
+    def _close_adv(self):
+        win = getattr(self, "_adv_win", None)
+        self._adv_win = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
     def _draw_geom_sketch(self, typ):
         """Device geometry sketch with parameter labels (tl/xfmr/cpl)."""
         c = getattr(self, "sketch", None)
@@ -487,49 +629,6 @@ class _LayoutTab(_TabBase):
             except Exception as exc:
                 c.create_text(140, 100, text="预览失败: %s" % str(exc)[:40],
                               fill="#a03030", font=("fixed", 8))
-        elif typ == "tl":
-            c.create_rectangle(40, 80, 240, 110, outline="#2060a0", width=2)
-            c.create_text(140, 95, text="signal", fill="#2060a0",
-                          font=("fixed", 9))
-            c.create_line(40, 70, 240, 70, fill="#a03030", arrow="both")
-            c.create_text(140, 58, text="len", fill="#a03030",
-                          font=("fixed", 9))
-            c.create_line(30, 80, 30, 110, fill="#0a7d33", arrow="both")
-            c.create_text(18, 95, text="w", fill="#0a7d33",
-                          font=("fixed", 9))
-            c.create_line(40, 130, 240, 130, fill="#888888", width=3)
-            c.create_text(140, 145, text="gnd (M1)", fill="#888888",
-                          font=("fixed", 9))
-            c.create_text(140, 175, text="cpw gap (each side)",
-                          fill="#555555", font=("fixed", 9))
-        elif typ == "xfmr":
-            c.create_rectangle(30, 50, 120, 160, outline="#2060a0", width=2)
-            c.create_rectangle(160, 50, 250, 160, outline="#a03030", width=2)
-            c.create_text(75, 40, text="primary np", fill="#2060a0",
-                          font=("fixed", 9))
-            c.create_text(205, 40, text="secondary ns", fill="#a03030",
-                          font=("fixed", 9))
-            c.create_line(120, 105, 160, 105, fill="#0a7d33", arrow="both")
-            c.create_text(140, 92, text="gap", fill="#0a7d33",
-                          font=("fixed", 9))
-            c.create_line(30, 175, 120, 175, fill="#a03030", arrow="both")
-            c.create_text(75, 188, text="dout / w / s", fill="#a03030",
-                          font=("fixed", 9))
-        elif typ == "cpl":
-            c.create_rectangle(40, 60, 240, 85, outline="#2060a0", width=2)
-            c.create_rectangle(40, 115, 240, 140, outline="#a03030", width=2)
-            c.create_text(140, 72, text="line1", fill="#2060a0",
-                          font=("fixed", 9))
-            c.create_text(140, 127, text="line2", fill="#a03030",
-                          font=("fixed", 9))
-            c.create_line(250, 85, 250, 115, fill="#0a7d33", arrow="both")
-            c.create_text(265, 100, text="gap", fill="#0a7d33",
-                          font=("fixed", 9))
-            c.create_line(30, 60, 30, 85, fill="#555555", arrow="both")
-            c.create_text(18, 72, text="w", fill="#555555",
-                          font=("fixed", 9))
-            c.create_text(140, 170, text="len (horizontal)", fill="#555555",
-                          font=("fixed", 9))
         else:
             c.create_text(140, 100, text="(no sketch)", fill="#888888",
                           font=("fixed", 10))
@@ -876,22 +975,8 @@ class _EmOptTab(_TabBase):
                 series.append((label, ([p[0] for p in pts], [p[1] for p in pts]), color))
 
         kind = fpr.get("kind") or "ind"
-        if kind == "tl":
-            _curve("Z0curve", "Z0(f) Ω", "#2266cc")
-            _curve("thetacurve", "θ(f)°", "#22aa44")
-            _curve("ILcurve", "IL(f) dB", "#c05a00")
-        elif kind == "xfmr":
-            _curve("Lpcurve", "Lp(f) H", "#2266cc")
-            _curve("Lscurve", "Ls(f) H", "#22aa44")
-            _curve("kcurve", "k(f)", "#c05a00")
-        elif kind == "cpl":
-            _curve("Zecurve", "Ze(f) Ω", "#2266cc")
-            _curve("Zocurve", "Zo(f) Ω", "#22aa44")
-            _curve("theta_e_curve", "θe(f)°", "#c05a00")
-            _curve("theta_o_curve", "θo(f)°", "#7a3cb0")
-        else:
-            _curve("Lcurve", "L(f) H", "#2266cc")
-            _curve("Qcurve", "Q(f)", "#22aa44")
+        _curve("Lcurve", "L(f) H", "#2266cc")
+        _curve("Qcurve", "Q(f)", "#22aa44")
         srf = fpr.get("SRF")
         try:
             self.curve.set_series(series, srf=srf)

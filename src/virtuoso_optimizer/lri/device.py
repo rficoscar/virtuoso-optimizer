@@ -55,12 +55,8 @@ def _kind_of(typ, geom, port_names):
         return "ind"
     if t in ("ct", "ind_ct"):
         return "ct"
-    if t in ("xfmr", "transformer"):
-        return "xfmr"
-    if t in ("tl", "line"):
-        return "tl"
-    if t in ("cpl", "coupler"):
-        return "cpl"
+    # only the sym (differential symmetric) inductor remains; every other
+    # passive device type (tl / xfmr / cpl / se / diff / f8) was removed
     return "ind"
 
 def device_meta_path(work, cell):

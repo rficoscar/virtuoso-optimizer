@@ -2540,7 +2540,7 @@ class Best:
         return True
 _EM_BRIDGE_MODES = ("once", "precover", "track")
 _EM_BRIDGE_FALLBACKS = ("actual", "clip", "penalty")
-_EM_DEVICE_TYPES = ("ind", "ct", "xfmr", "tl", "cpl")
+_EM_DEVICE_TYPES = ("ind", "ct")
 
 def parse_em_bridge_cfg(cfg):
     raw = (cfg or {}).get("em_bridge")

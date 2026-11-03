@@ -21,11 +21,7 @@ RECORD_SCHEMA = "em_record/1"
 REQUEST_SCHEMA = "em_request/1"
 
 _ANG_KEYS = ("theta", "theta_e", "theta_o")
-_DELIVERED_KEYS = {
-    "ind": ("L0",), "ct": ("L0",),
-    "tl": ("Z0",), "xfmr": ("Lp", "Ls", "k"),
-    "cpl": ("Ze", "Zo", "theta_e", "theta_o"),
-}
+_DELIVERED_KEYS = {"ind": ("L0",), "ct": ("L0",)}
 
 DEFAULT_GRID_SPEC = {"step_rel": 0.01, "step_abs_deg": 2.0}
 DEFAULT_TOL = {"L0": 0.01, "Q@f0": 0.15, "SRF": 0.25, "theta_tol_deg": 2.0}
@@ -284,11 +280,8 @@ def distance_of(actual_fp, target_fp, tolerances=None, f0=None):
     return float(dmax), per
 
 DEVICE_STAGES = {
-    "xfmr": (("Lp",), ("Lp", "Ls"), ("Lp", "Ls", "k")),
-    "cpl":  (("Ze",), ("Ze", "Zo"), ("Ze", "Zo", "theta_e", "theta_o")),
     "ind":  (("L0",),),
     "ct":   (("L0",),),
-    "tl":   (("Z0",), ("Z0", "theta")),
 }
 
 def stage_keys_of(device_type, stage=None):

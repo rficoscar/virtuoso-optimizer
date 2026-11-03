@@ -253,18 +253,6 @@ def _s_to_abcd2(s, z0=50.0):
     d = ((1 - s11) * (1 + s22) + s12 * s21) / den
     return a, b, c, d
 
-def _tl_z0_theta_abcd(s2, z0=50.0):
-    a, b, c, _d = _s_to_abcd2(s2, z0)
-    if c == 0:
-        raise LibrfError("extract: C=0，不是传输线")
-    import cmath
-    z0c = cmath.sqrt(b / c)
-    sin_t = b / (1j * z0c) if z0c != 0 else 0j
-    th = math.atan2(sin_t.real, a.real)
-    if th < 0:
-        th += math.pi
-    return z0c, th
-
 def _l0_extrapolate(lc_v, f_max):
     pts = [(f, v) for f, v in lc_v if f_max is None or f <= f_max]
     if not pts:
@@ -285,26 +273,6 @@ def _l0_extrapolate(lc_v, f_max):
     b = (sy - a * sx) / n
     return b
 
-def _cpl_port_indices(ports, n):
-    names = list(ports) if ports else ["p%02d" % (i + 1) for i in range(n)]
-    if len(names) > n:
-        names = names[:n]
-    if n < 4 or len(names) < 4:
-        raise LibrfError( "extract_fingerprint: cpl 需要 4 个端口名，收到 n=%d ports=%s" % (n, names))
-    low = [str(x).lower() for x in names]
-    role = {}
-    for key in ("a1", "a2", "b1", "b2"):
-        if key in low:
-            role[key] = low.index(key)
-    if len(role) == 4:
-        return role["a1"], role["a2"], role["b1"], role["b2"]
-    if n >= 4 and all(k in low for k in ("p01", "p02", "p03", "p04")):
-        return (low.index("p01"), low.index("p02"),
-                low.index("p04"), low.index("p03"))
-    order = sorted(range(n), key=lambda i: str(names[i]))
-    a1, a2, b1, b2 = order[0], order[1], order[2], order[3]
-    return a1, a2, b1, b2
-
 def extract_fingerprint(kind, ports, freqs, S, freq_of_interest=None):
     if not freqs or not S:
         raise LibrfError("extract_fingerprint: 空数据（kind=%s n_freq=%d）" % (kind, len(freqs or [])))
@@ -312,15 +280,15 @@ def extract_fingerprint(kind, ports, freqs, S, freq_of_interest=None):
     if len(freqs) != len(S):
         raise LibrfError( "extract_fingerprint: freqs/S 长度不一致 (%d vs %d, kind=%s)"
             % (len(freqs), len(S), kind))
-    canon = {"inductor": "ind", "ind2": "ind", "ind_ct": "ct", "center_tap": "ct",
-             "transformer": "xfmr", "coupler": "cpl", "coupled": "cpl",
-             "line": "tl", "transmission_line": "tl"}
+    canon = {"inductor": "ind", "ind2": "ind", "ind_ct": "ct",
+             "center_tap": "ct", "sym": "ind", "symmetric": "ind"}
     raw_kind = (kind or "ind").lower()
     kind_l = canon.get(raw_kind, raw_kind)
+    if kind_l not in ("ind", "ct"):
+        raise LibrfError(
+            "extract_fingerprint: 未知/已删除 kind %r（只剩 ind/sym/ct）" % kind)
     req = {"ind": (2, 2, "kind=ind 需要 2 端口，收到 %d 个——3 端口（含中心抽头）请用 kind=ct"),
-           "ct": (3, 99, "kind=ct 需要 >=3 端口，收到 %d 个"),
-           "xfmr": (2, 99, "kind=xfmr 需要 >=2 端口，收到 %d 个"),
-           "cpl": (4, 99, "kind=cpl 需要 >=4 端口，收到 %d 个"), "tl": (2, 99, "kind=tl 需要 >=2 端口，收到 %d 个")}
+           "ct": (3, 99, "kind=ct 需要 >=3 端口，收到 %d 个")}
     if kind_l in req:
         lo, hi, msg = req[kind_l]
         if not lo <= n <= hi:
@@ -386,120 +354,6 @@ def extract_fingerprint(kind, ports, freqs, S, freq_of_interest=None):
         lc, qc = _le_q_curves(ys, sigs[0])
         out.update(_pack(lc, qc, {"ct_ports": [out["ports"][i] for i in cts]}))
         return out
-    if kind_l == "xfmr":
-        cts, sigs = _port_idx_map(out["ports"])
-        if len(sigs) < 2:
-            raise LibrfError("extract_fingerprint: xfmr 信号端口不足")
-        i1, i2 = sigs[0], (sigs[2] if len(sigs) > 2 else sigs[1])
-        lps, lss, ks = [], [], []
-        for k, f in enumerate(freqs):
-            if f <= 0:
-                continue
-            try:
-                z = s_to_z(S[k], 50.0)
-            except Exception:
-                continue
-            w = 2.0 * math.pi * f
-            lp = z[i1][i1].imag / w
-            ls = z[i2][i2].imag / w
-            m = z[i1][i2].imag / w
-            lps.append([f, lp])
-            lss.append([f, ls])
-            if lp > 0 and ls > 0:
-                kk = m / math.sqrt(lp * ls)
-                if kk > 1.0:
-                    kk = 1.0
-                elif kk < -1.0:
-                    kk = -1.0
-                ks.append([f, kk])
-        l0 = None
-        if lps:
-            f_max = min(1e9, 0.05 * freqs[-1]) if freqs[-1] > 0 else 1e9
-            l0 = _l0_extrapolate(lps, f_max)
-            if l0 is None:
-                l0 = lps[0][1]
-        ls0 = _l0_extrapolate(lss, 1e9) if lss else None
-        k0 = None
-        if ks:
-            k0 = ks[0][1] if f0 is None else _interp_at( [p[0] for p in ks], [p[1] for p in ks], f0)
-        out.update({ "Lp": l0, "Ls": ls0, "k": k0, "L0": l0, "Ls0": ls0,
-            "Lpcurve": lps, "Lscurve": lss, "kcurve": ks,
-            "Lunit": "H", "k_unit": "1", "extract_window": {"f0": f0}, })
-        return out
-    if kind_l == "tl":
-        if n < 2:
-            raise LibrfError("extract_fingerprint: tl 需要 2 端口")
-        z0c, thc, alpha = [], [], []
-        for k, f in enumerate(freqs):
-            if f <= 0:
-                continue
-            s2 = S[k] if n == 2 else [ [S[k][0][0], S[k][0][1]], [S[k][1][0], S[k][1][1]]]
-            try:
-                zc, th = _tl_z0_theta_abcd(s2, 50.0)
-            except LibrfError:
-                continue
-            z0c.append([f, zc.real])
-            thc.append([f, math.degrees(th)])
-            s21 = S[k][1][0]
-            mag = abs(s21)
-            if mag > 0:
-                alpha.append([f, -20.0 * math.log10(mag)])
-        z0 = None
-        th_deg = None
-        if z0c:
-            z0 = z0c[0][1] if f0 is None else _interp_at(
-                [p[0] for p in z0c], [p[1] for p in z0c], f0)
-        if thc:
-            th_deg = thc[0][1] if f0 is None else _interp_at(
-                [p[0] for p in thc], [p[1] for p in thc], f0)
-        il = None
-        if alpha:
-            il = alpha[0][1] if f0 is None else _interp_at(
-                [p[0] for p in alpha], [p[1] for p in alpha], f0)
-        out.update({ "Z0": z0, "theta": th_deg, "IL": il,
-            "Z0unit": "ohm", "theta_unit": "deg", "ILunit": "dB",
-            "Z0curve": z0c, "thetacurve": thc, "ILcurve": alpha, "extract_window": {"f0": f0}, })
-        return out
-    if kind_l == "cpl":
-        if n < 4:
-            raise LibrfError( "extract_fingerprint: cpl 需要 4 端口，收到 %d（ports=%s）"
-                % (n, out["ports"]))
-        try:
-            a1, a2, b1, b2 = _cpl_port_indices(out["ports"], n)
-        except LibrfError:
-            raise
-        except Exception as e:
-            raise LibrfError( "extract_fingerprint: cpl 端口映射失败 ports=%s: %s" % (out["ports"], e))
-        zes, zos, thes, thos = [], [], [], []
-        for k, f in enumerate(freqs):
-            if f <= 0:
-                continue
-            s4 = S[k]
-            s11 = s4[a1][a1]
-            s13 = s4[a1][b1]
-            s21 = s4[a2][a1]
-            s41 = s4[b2][a1]
-            se = [[s11 + s13, s21 + s41], [s21 + s41, s11 + s13]]
-            so = [[s11 - s13, s21 - s41], [s21 - s41, s11 - s13]]
-            try:
-                ze, the = _tl_z0_theta_abcd(se, 50.0)
-                zo, tho = _tl_z0_theta_abcd(so, 50.0)
-            except LibrfError:
-                continue
-            zes.append([f, ze.real])
-            zos.append([f, zo.real])
-            thes.append([f, math.degrees(the)])
-            thos.append([f, math.degrees(tho)])
-        def _at(curve):
-            if not curve:
-                return None
-            return curve[0][1] if f0 is None else _interp_at(
-                [p[0] for p in curve], [p[1] for p in curve], f0)
-        out.update({ "Ze": _at(zes), "Zo": _at(zos), "theta_e": _at(thes), "theta_o": _at(thos),
-            "Zeunit": "ohm", "Zo_unit": "ohm", "theta_unit": "deg", "Zecurve": zes, "Zocurve": zos,
-            "theta_e_curve": thes, "theta_o_curve": thos, "extract_window": {"f0": f0,
-                               "port_map": {"a1": a1, "a2": a2, "b1": b1, "b2": b2}}, })
-        return out
     raise LibrfError("extract_fingerprint: 未知 kind %r" % kind)
 
 def fingerprint_from_snp(snp_path, kind, ports=None, f0=None):
@@ -509,17 +363,4 @@ def fingerprint_from_snp(snp_path, kind, ports=None, f0=None):
 
 def fprint_summary(fpr):
     fpr = fpr or {}
-    kind = fpr.get("kind")
-    if kind == "tl":
-        return "Z0=%sΩ  θ=%s°  IL=%s dB" % (
-            fmt_eng(fpr.get("Z0")), fmt_eng(fpr.get("theta")),
-            fmt_eng(fpr.get("IL")))
-    if kind == "xfmr":
-        return "Lp=%sH  Ls=%sH  k=%s" % (
-            fmt_eng(fpr.get("Lp")), fmt_eng(fpr.get("Ls")),
-            fmt_eng(fpr.get("k")))
-    if kind == "cpl":
-        return "Ze=%sΩ  Zo=%sΩ  θe=%s°  θo=%s°" % (
-            fmt_eng(fpr.get("Ze")), fmt_eng(fpr.get("Zo")),
-            fmt_eng(fpr.get("theta_e")), fmt_eng(fpr.get("theta_o")))
     return "L0=%sH  SRF=%s" % (fmt_eng(fpr.get("L0")), fmt_eng(fpr.get("SRF")))

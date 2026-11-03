@@ -19,15 +19,6 @@ def lri_dedup(pts):
             out.append(p)
     return out
 
-def lri_shift(pts, dx, dy):
-    return [(x + dx, y + dy) for x, y in pts]
-
-def lri_mirrorx(pts):
-    return [(-x, y) for x, y in pts]
-
-def lri_mirrory(pts):
-    return [(x, -y) for x, y in pts]
-
 def lri_plen(pts):
     return sum(lri_seglen(a, b) for a, b in zip(pts[:-1], pts[1:]))
 
@@ -40,151 +31,6 @@ def lri_inter(p1, p2, q1, q2):
     rx, ry = q1[0] - p1[0], q1[1] - p1[1]
     t = (rx * (-d2[1]) - ry * (-d2[0])) / det
     return (p1[0] + t * d1[0], p1[1] + t * d1[1])
-
-def lri_ring(a, b, c, seam="bottom"):
-    c = max(0.0, min(c, 0.999 * min(a, b)))
-    if seam == "top":
-        r = [(0, b), (c - a, b), (-a, b - c), (-a, c - b)]
-        r += [(c - a, -b), (a - c, -b), (a, c - b), (a, b - c)]
-        r.append((a - c, b))
-    elif seam == "left":
-        r = [(-a, 0), (-a, c - b), (c - a, -b), (a - c, -b)]
-        r += [(a, c - b), (a, b - c), (a - c, b), (c - a, b)]
-        r.append((-a, b - c))
-    elif seam == "right":
-        r = [(a, 0), (a, b - c), (a - c, b), (c - a, b)]
-        r += [(-a, b - c), (-a, c - b), (c - a, -b), (a - c, -b)]
-        r.append((a, c - b))
-    else:
-        r = [(0, -b), (a - c, -b), (a, c - b), (a, b - c)]
-        r += [(a - c, b), (c - a, b), (-a, b - c), (-a, c - b)]
-        r.append((c - a, -b))
-    return lri_dedup(r)
-
-def lri_rings(W, H, w, s, n, corner, seam="bottom", pitch=None):
-    p = pitch if pitch else (w + s)
-    a0 = (W - w) / 2.0
-    b0 = (H - w) / 2.0
-    ratio = corner / min(a0, b0) if min(a0, b0) > 0 else 0.0
-    nring = int(math.ceil(n)) + 2
-    rs = [lri_ring(a0, b0, ratio * min(a0, b0), seam)]
-    for k in range(1, nring):
-        a, b = a0 - k * p, b0 - k * p
-        if min(a, b) <= w / 2.0:
-            break
-        rs.append(lri_ring(a, b, ratio * min(a, b), seam))
-    return rs, p
-
-def lri_cut_open(pts, frac):
-    if frac >= 0.9999:
-        return list(pts)
-    tot = lri_plen(pts)
-    if tot < 1e-9:
-        return list(pts)
-    want, acc = tot * frac, 0.0
-    out = [pts[0]]
-    for i in range(len(pts) - 1):
-        a, b = pts[i], pts[i + 1]
-        L = lri_seglen(a, b)
-        if L < 1e-9:
-            continue
-        if acc + L >= want - 1e-9:
-            t = (want - acc) / L
-            out.append((a[0] + (b[0] - a[0]) * t,
-                        a[1] + (b[1] - a[1]) * t))
-            return out
-        out.append(b)
-        acc += L
-    return out
-
-def lri_rot_list(l, i):
-    n = len(l)
-    k = i % n
-    return [l[(k + j) % n] for j in range(n)]
-
-def lri_step_edge(r):
-    m = len(r)
-    for i in range(m):
-        a, b = r[i], r[(i + 1) % m]
-        if (abs(b[0] - a[0]) < 1e-9 and abs(b[1] - a[1]) > 1e-9
-                and a[0] < 0.0 and b[1] < a[1]):
-            return i
-    raise ValueError("lri: 环上没有可用的左侧竖直边，无法构造螺旋")
-
-def lri_rot_exact(pts, ang):
-    if ang == 90:
-        return [(-y, x) for x, y in pts]
-    if ang == 180:
-        return [(-x, -y) for x, y in pts]
-    if ang == 270:
-        return [(y, -x) for x, y in pts]
-    return list(pts)
-
-def _lri_spiral_bottom(W, H, w, s, n, corner, pitch=None):
-    rs, p = lri_rings(W, H, w, s, n, corner, "bottom", pitch)
-    r0 = rs[0]
-    i = lri_step_edge(r0)
-    m = len(r0)
-    b_idx = (i + 1) % m
-    nfull = int(n + 1e-7)
-    frac = n - nfull
-    if len(rs) < nfull + 1:
-        raise ValueError(
-            "lri: 内孔已闭合，只能容纳 %.2f 圈 < 请求 %.2f 圈；"
-            "请减小 n 或 s/w" % (max(0, len(rs) - 1), n))
-
-    def on_left(k, y):
-        r = rs[k]
-        a, b = r[i], r[(i + 1) % m]
-        t = (y - a[1]) / (b[1] - a[1])
-        if t < -1e-9 or t > 1.0 + 1e-9:
-            raise ValueError(
-                "lri: 第 %d 圈左侧边长度不足，无法容纳螺旋台阶 "
-                "(需要 y=%.3f, 边范围 %.3f..%.3f)；请减小 n 或 s/w"
-                % (k, y, min(a[1], b[1]), max(a[1], b[1])))
-        return (a[0], y)
-
-    if nfull == 0:
-        closed = lri_rot_list(r0, 0) + [r0[0]]
-        return lri_dedup(lri_cut_open(closed, frac)), p
-
-    l1 = rs[1][b_idx]
-    d0 = on_left(0, l1[1])
-    pts = lri_rot_list(r0, 0)[:i + 1] + [d0]
-
-    lk = l1
-    pts.append(lk)
-    for k in range(1, nfull):
-        r = rs[k]
-        rot = lri_rot_list(r, b_idx)
-        pts.append(r[b_idx])
-        pts += rot[1:]
-        if k + 1 < len(rs):
-            dk = on_left(k, lk[1] + p)
-            pts.append(dk)
-            if k < nfull - 1 or frac > 1e-9:
-                nxt = (rs[k + 1][i][0], dk[1])
-                pts.append(nxt)
-                lk = nxt
-    if frac > 1e-9 and nfull < len(rs):
-        r = rs[nfull]
-        closed = lri_dedup([lk] + lri_rot_list(r, b_idx) + [lk])
-        pts += lri_cut_open(closed, frac)[1:]
-    return lri_dedup(pts), p
-
-def lri_spiral(W, H, w, s, n, corner, seam="bottom", pitch=None):
-    if seam == "bottom":
-        return _lri_spiral_bottom(W, H, w, s, n, corner, pitch)[0]
-    if seam == "top":
-        return lri_rot_exact(_lri_spiral_bottom(W, H, w, s, n, corner,
-                                                pitch)[0], 180)
-    if seam == "right":
-        return lri_rot_exact(_lri_spiral_bottom(H, W, w, s, n, corner,
-                                                pitch)[0], 90)
-    if seam == "left":
-        return lri_rot_exact(_lri_spiral_bottom(H, W, w, s, n, corner,
-                                                pitch)[0], 270)
-    return _lri_spiral_bottom(W, H, w, s, n, corner, pitch)[0]
 
 def lri_point_at(pts, frac):
     tot = lri_plen(pts)
@@ -232,89 +78,47 @@ def lri_sweep(pts, w):
 
     return bound(1) + bound(-1)[::-1]
 
-SEAM_MAP = {"N": "top", "S": "bottom", "E": "right", "W": "left",
-            "TOP": "top", "BOTTOM": "bottom", "LEFT": "left",
-            "RIGHT": "right", "T": "top", "B": "bottom"}
-
 def lri_norm_geom(g):
+    """Normalise a sym (differential symmetric) inductor geometry dict.
+
+    The only inductor topology left is ``sym``: the two-arm octagonal
+    symmetric coil.  ``ind`` / empty / auto are treated as sym; any other
+    kind name is left untouched so ``lri_validate`` can reject it
+    explicitly instead of silently coercing.
+    """
     g = dict(g)
     raw_kind = str(g.get("kind", "")).strip().lower()
-    if raw_kind in ("sym", "symmetric", "wiki", "rfw"):
-        is_sym = True
-    elif (raw_kind in ("", "auto")
-          and "dout" in g and "W" not in g and "H" not in g):
+    if raw_kind in ("sym", "symmetric", "wiki", "rfw", "ind", "", "auto"):
         is_sym = True
     else:
         is_sym = False
-    if is_sym:
-        # Parameter set: rx/ry (defaults derived from dout), n/w/s, chamfer, lead_*.
-        dout = float(g.get("dout", g.get("W", 160.0)))
-        rx = float(g.get("rx") or dout / 2.0)
-        ry = float(g.get("ry") or dout / 2.0)
-        w = float(g.get("w", 10.0))
-        s = float(g.get("s", 3.2))
-
-        def _f(key, dflt):
-            v = g.get(key)
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return dflt
-        chamfer = _f("chamfer", 2.0 - math.sqrt(2.0))
-        lead_len = _f("lead_len", 20.0)
-        lead_gap = _f("lead_gap", s)
-        lead_w = _f("lead_w", w)
-        g.update(kind="sym", dout=2.0 * rx, rx=rx, ry=ry,
-                 W=2.0 * rx, H=2.0 * ry, w=w, s=s, n=float(g.get("n", 3.0)),
-                 chamfer=chamfer, lead_len=lead_len, lead_gap=lead_gap,
-                 lead_w=lead_w)
-        g["ct"] = int(float(g.get("ct", 0) or 0))
-        g["shape"] = "oct" if chamfer > 0.0 else "rect"
-        g["corner"] = chamfer
-        g["seam"] = "bottom"
-        g["tangle"] = 180
+    if not is_sym:
+        g["kind"] = raw_kind or "sym"
         return g
-    W = float(g.get("W", g.get("dout", 150.0)))
-    H = float(g.get("H", W))
+    # Parameter set: rx/ry (defaults derived from dout), n/w/s, chamfer, lead_*.
+    dout = float(g.get("dout", g.get("W", 160.0)))
+    rx = float(g.get("rx") or dout / 2.0)
+    ry = float(g.get("ry") or dout / 2.0)
     w = float(g.get("w", 10.0))
-    shape = str(g.get("shape", "rect")).strip().lower() or "rect"
-    kind = str(g.get("kind", "se")).strip().lower() or "se"
-    if kind in ("figure8", "fig8", "f8"):
-        # 8 字拓扑已删除：保留原值让 lri_validate 明确拒绝，不能悄悄换成 se
-        kind = "f8"
-    elif kind not in ("se", "diff"):
-        kind = "se"
-    if shape in ("octagon", "oct"):
-        shape = "oct"
-    elif shape in ("square", "sq", "rect", "rectangle"):
-        shape = "rect"
-    else:
-        shape = "rect"
-    g["kind"] = kind
-    g["shape"] = shape
-    g["W"] = W
-    g["H"] = H
-    g["w"] = w
-    g["s"] = float(g.get("s", 2.6))
-    g["n"] = float(g.get("n", 2.5))
+    s = float(g.get("s", 3.2))
+
+    def _f(key, dflt):
+        v = g.get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return dflt
+    chamfer = _f("chamfer", 2.0 - math.sqrt(2.0))
+    lead_len = _f("lead_len", 20.0)
+    lead_gap = _f("lead_gap", s)
+    lead_w = _f("lead_w", w)
+    g.update(kind="sym", dout=2.0 * rx, rx=rx, ry=ry,
+             W=2.0 * rx, H=2.0 * ry, w=w, s=s, n=float(g.get("n", 3.0)),
+             chamfer=chamfer, lead_len=lead_len, lead_gap=lead_gap,
+             lead_w=lead_w)
     g["ct"] = int(float(g.get("ct", 0) or 0))
-    sm = str(g.get("seam", "S")).strip().upper()
-    g["seam"] = SEAM_MAP.get(sm, "bottom")
-    try:
-        _tv = g.get("tangle", 180)
-        g["tangle"] = int(float(180 if _tv in (None, "") else _tv))
-    except (TypeError, ValueError):
-        g["tangle"] = 180
-    if g["tangle"] not in (0, 90, 180):
-        g["tangle"] = 180
-    if g.get("corner") in ("", None):
-        if shape == "oct":
-            g["corner"] = ((2.0 - math.sqrt(2.0))
-                           * min((W - w) / 2.0, (H - w) / 2.0))
-        else:
-            g["corner"] = 0.0
-    else:
-        g["corner"] = float(g["corner"])
+    g["shape"] = "oct" if chamfer > 0.0 else "rect"
+    g["corner"] = chamfer
     return g
 
 def _drc_limits(tech=None):
@@ -368,7 +172,7 @@ def _wide_space_veto(s, lead_gap, tech=None):
     return None
 
 def lri_validate(g, tech=None):
-    kind0 = str(g.get("kind", "se")).strip().lower()
+    kind0 = str(g.get("kind", "sym")).strip().lower()
     if kind0 == "sym":
         dout = float(g.get("dout", g.get("W", 160.0)))
         rx = float(g.get("rx") or dout / 2.0)
@@ -396,87 +200,8 @@ def lri_validate(g, tech=None):
         except (TypeError, ValueError) as exc:
             return False, str(exc)
         return True, ""
-    W = float(g.get("W", 150.0))
-    H = float(g.get("H", W))
-    w = float(g.get("w", 10.0))
-    s = float(g.get("s", 2.6))
-    n = float(g.get("n", 2.5))
-    kind = g.get("kind", "se")
-    if kind == "f8":
-        return False, "8 字电感 (f8) 拓扑已删除，请改用 se/diff/sym"
-    if min(W, H) <= 0.0 or w <= 0.0 or s <= 0.0:
-        return False, "W/H/w/s 必须 > 0"
-    if w >= min(W, H):
-        return False, "线宽 w=%g 不小于外径" % w
-    msg = _drc_veto(w, s, tech)
-    if msg:
-        return False, msg
-    p = w + s
-    a0, b0 = (W - w) / 2.0, (H - w) / 2.0
-    units = 1.0 if kind != "diff" else 2.0
-    n_max = (min(a0, b0) - w / 2.0) / (p * units)
-    if n > n_max + 1e-9:
-        return False, ("匝数 n=%.2f 超出可行域: W=%g H=%g w=%g s=%g "
-                       "最多 %.2f 圈" % (n, W, H, w, s, n_max))
-    if n < 1.0:
-        return False, "匝数 n 至少 1 圈（不足一圈无法形成螺旋）"
-    try:
-        corner = float(g.get("corner") or 0.0)
-        if kind == "diff":
-            p2 = w + s
-            lri_spiral(W, H, w, s, n, corner, "bottom", 2.0 * p2)
-            lri_spiral(W - 2.0 * p2, H - 2.0 * p2, w, s, n, corner,
-                       "bottom", 2.0 * p2)
-        else:
-            lri_spiral(W, H, w, s, n, corner, g.get("seam", "bottom"))
-    except ValueError as exc:
-        return False, str(exc)
-    return True, ""
-
-_DIRS = {"N": (0.0, 1.0), "S": (0.0, -1.0), "E": (1.0, 0.0), "W": (-1.0, 0.0)}
-
-def lri_dir_key(v):
-    x, y = v
-    if abs(x) >= abs(y):
-        return "E" if x >= 0.0 else "W"
-    return "N" if y >= 0.0 else "S"
-
-def lri_angle_deg(k1, k2):
-    v1, v2 = _DIRS[k1], _DIRS[k2]
-    dot = v1[0] * v2[0] + v1[1] * v2[1]
-    if dot > 0.5:
-        return 0
-    if dot < -0.5:
-        return 180
-    return 90
-
-def lri_pick_dirs(tangle, nat1, nat2):
-    best = None
-    for k1 in ("N", "S", "E", "W"):
-        for k2 in ("N", "S", "E", "W"):
-            if lri_angle_deg(k1, k2) != tangle:
-                continue
-            cost = (0 if k1 == nat1 else 1, 0 if k2 == nat2 else 1)
-            if best is None or cost < best[0]:
-                best = (cost, k1, k2)
-    return best[1], best[2]
-
-def _lri_lead(pt, k, length):
-    dx, dy = _DIRS[k]
-    return [(pt[0], pt[1]), (pt[0] + dx * length, pt[1] + dy * length)]
-
-def _lri_exit_pad(pt, k, bbox_w, bbox_h, length):
-    dx, dy = _DIRS[k]
-    reach = max(bbox_w, bbox_h) + length
-    return (pt[0] + dx * reach, pt[1] + dy * reach)
-
-def lri_half_right(R, xj):
-    c = (2.0 - math.sqrt(2.0)) * R
-    return [(xj, R), (R - c, R), (R, R - c),
-            (R, -(R - c)), (R - c, -R), (xj, -R)]
-
-def lri_half_left(R, xj):
-    return [(-x, y) for x, y in reversed(lri_half_right(R, xj))]
+    # only the sym (differential symmetric) topology remains
+    return False, "未知/已删除拓扑 kind=%s（只剩 sym 对称差分电感）" % kind0
 
 SYM_VIA_CUT = float(DEFAULT_TECH["drc"]["via"]["cut"])
 
@@ -519,29 +244,6 @@ def lri_sym_under_poly(pts, w):
         # sticks out (G4b floating vias).  Symmetric in x by construction.
         (x0, y0 + sg * (h + back + abs(x1 - x0))),
     ]
-
-def lri_sym_delta_window(w, s, R, p):
-    a = math.sqrt(2.0) * (w / 2.0 + SYM_IND_S)
-    dmin = a - p + w / 2.0
-    dmax = (math.sqrt(2.0) - 1.0) * R + p / 2.0 - w / 2.0 - a
-    return dmin, dmax
-
-def lri_sym_min_dout(n, w, s):
-    p = w + s
-    xj = p / 2.0
-    rt2 = math.sqrt(2.0)
-    N = 2 * int(math.floor(float(n) / 2.0)) + 1
-    if N < 1:
-        N = 1
-    if N == 1:
-        return 2.0 * (xj / (rt2 - 1.0) + w / 2.0)
-    a = rt2 * (w / 2.0 + SYM_IND_S)
-    dmin = a - p + w / 2.0
-    r1 = (dmin + p / 2.0) / (rt2 - 1.0) + w / 2.0
-    r2 = (2.0 * a + w - p * (0.5 + rt2)) / (rt2 - 1.0)
-    r3 = xj / (rt2 - 1.0)
-    Rlast = max(r1, r2, r3, 0.0)
-    return 2.0 * (Rlast + (N - 1) * p + w / 2.0)
 
 # ---------------------------------------------------------------- i3 kernel
 # Second-generation symmetric inductor: independent rx/ry, any integer turns,
@@ -602,16 +304,6 @@ def lri_i3_half_xy(a, b, c, x_top, x_bot, sg):
     if sg < 0:
         pts = [(-x, y) for x, y in pts]
     return lri_dedup(pts)
-
-def lri_i3_window(w, s_req, ring_k, ring_k1, xj, via_edge, stub):
-    a, b, c = ring_k
-    a1, b1, c1 = ring_k1
-    rt2 = math.sqrt(2.0)
-    dmin = (rt2 - 1.0) * (s_req + w / 2.0)
-    dm1 = (a - c) - xj - (via_edge + stub)
-    dm2 = (a1 - c1) - w * (rt2 - 1.0) / 2.0 - xj
-    dm3 = (a - c) + s_req / 2.0 - rt2 * (w / 2.0 + s_req)
-    return dmin, min(dm1, dm2, dm3)
 
 def lri_i3_via_span(w, cut, sp, encl):
     sm = w - 2.0 * encl
@@ -766,424 +458,35 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
         "bbox": (-rx, -ry, rx, y_port),
     }
 
-def lri_i3_step_run(rings, p, arm, n_half=None):
-    """One inward spiral on a SINGLE layer, stepped turn change -> point list.
-
-    Counterpart of rfgeom.spiral_step and SKILL lriI3StepRun.  Every ring is
-    a closed concentric octagon; on the left edge the winding steps inward
-    one pitch per turn on a climbing staircase, so no left-edge portion is
-    retraced and a single winding never crosses itself -- no underpass is
-    needed.  ``n_half`` counts half-turns (default 2 per ring); an odd
-    value ends on the last ring's right edge at the mirror of its entry
-    height.  ``arm = -1`` mirrors left/right so a transformer secondary
-    sits opposite its primary.
-    """
-    n_half = (2 * len(rings)) if n_half is None else int(n_half)
-    nt = len(rings)
-    a0, b0, c0 = rings[0]
-    pts = [(0.0, -b0), (a0 - c0, -b0), (a0, c0 - b0), (a0, b0 - c0),
-           (a0 - c0, b0), (c0 - a0, b0), (-a0, b0 - c0)]
-    if nt == 1:
-        pts += [(-a0, c0 - b0), (c0 - a0, -b0), (0.0, -b0)]
-    else:
-        y_in = rings[1][2] - rings[1][1]
-        pts += [(-a0, y_in), (-rings[1][0], y_in)]
-        for k in range(1, nt):
-            a, b, c = rings[k]
-            last = (k == nt - 1)
-            if 2 * k + 1 >= n_half:
-                # half ring: bottom half only, ending on the right edge at
-                # the mirror of the entry height
-                pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
-                        (a, -y_in)]
-                break
-            pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
-                    (a, b - c), (a - c, b), (c - a, b), (-a, b - c)]
-            if last:
-                pts += [(-a, y_in + p)]
-                break
-            y_in = y_in + p
-            pts += [(-a, y_in), (-rings[k + 1][0], y_in)]
-    if arm < 0:
-        pts = [(-x, y) for (x, y) in pts]
-    return lri_dedup(pts)
-
-
-def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
-                      gap=None, chamfer=None, ct=0, shrink=1,
-                      lead_len=20.0):
-    """Interleaved / stacked transformer -> dict.
-
-    Line-by-line counterpart of SKILL lriI3BuildXfmr and rfgeom.build_xfmr:
-    two concentric octagonal spirals, primary on the main metal (``tops``) and
-    secondary on the under metal (``under``) rotated 180 deg, so the layer
-    change does the crossing work and neither winding needs an underpass.
-    ``shrink`` pulls the secondary outer radius in by that many primary
-    pitches -- the interleaving knob; 0 degenerates to a plain stack.
-    """
-    if chamfer is None:
-        chamfer = 2.0 - math.sqrt(2.0)
-    gap = s if gap is None else float(gap)
-    if gap < s - 1e-9:
-        raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
-    # np/ns count FULL turns of each winding (same convention as
-    # lri_i3_build_se): one winding covers the whole coil, so two half-rings
-    # per turn
-    for _t in (np_turns, ns_turns):
-        if abs(2.0 * float(_t) - round(2.0 * float(_t))) > 1e-6:
-            raise ValueError("np/ns=%.3f 必须是 0.5 的整数倍（半圈）" % float(_t))
-    nh_p = int(round(2.0 * float(np_turns)))
-    nh_s = int(round(2.0 * float(ns_turns)))
-    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, (nh_p + 1) // 2, chamfer)
-    rs = max(0, int(round(float(shrink))))
-    rings_s, p_s, nS = lri_i3_rings(max(0.0, rx - rs * p),
-                                    max(0.0, ry - rs * p),
-                                    w, s, (nh_s + 1) // 2, chamfer)
-    if abs(p_s - p) > 1e-9:
-        raise ValueError("primary/secondary pitch mismatch")
-    xj = p / 2.0
-    p_pts = lri_i3_step_run(rings_p, p, +1, n_half=nh_p)
-    s_pts = lri_i3_step_run(rings_s, p, -1, n_half=nh_s)
-    p_out, s_out = p_pts[0], s_pts[0]
-    p_in, s_in = p_pts[-1], s_pts[-1]
-    # outer ends sit at the bottom edge centre of each coil; the leads run
-    # straight down out of the coil
-    p_lead = [p_out, (p_out[0], p_out[1] - lead_len)]
-    s_lead = [s_out, (s_out[0], s_out[1] - lead_len)]
-    tops = [p_pts, p_lead]
-    under = [s_pts, s_lead]
-    ports = [("p01", p_lead[-1]), ("p02", p_in),
-             ("p03", s_lead[-1]), ("p04", s_in)]
-    ct_geom = None
-    if ct:
-        # the stub starts at s_in itself, not on the axis -- an axis-only
-        # start would leave it detached from the winding by |s_in.x|
-        y_tip = s_in[1] + (lead_len if s_in[1] >= 0.0 else -lead_len)
-        ct_geom = {"stem": [s_in, (0.0, s_in[1]), (0.0, y_tip)]}
-        under.append(ct_geom["stem"])
-        ports.append(("ct1", (0.0, y_tip)))
-    ymax = max(p_lead[-1][1], s_lead[-1][1])
-    ymin = min(p_in[1], s_in[1], p_lead[-1][1], s_lead[-1][1])
-    return {
-        "tops": tops, "under": under, "under_poly": [], "vias": [],
-        "ports": ports, "ct": ct_geom, "kind": "xfmr",
-        "rings_p": rings_p, "rings_s": rings_s,
-        "nP": nP, "nS": nS, "p": p, "xj": xj,
-        "bx": 2.0 * rx, "by": 2.0 * ry,
-        "bbox": (-rx, ymin, rx, ymax),
-    }
-
-
-def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
-                    lead_len=20.0, ct=0, ct_len=20.0):
-    """Single-ended octagonal inductor -> dict.
-
-    Line-by-line counterpart of SKILL lriI3BuildSe and rfgeom.build_se: one
-    inward spiral on a single layer -- a single winding never crosses
-    itself, so no underpass is needed -- with straight axis-aligned leads.
-    p02 leaves the inner end along that end's own y sign so the two leads
-    never collide whatever the turn count.  ``n`` counts FULL turns, as the
-    legacy lriSpiral did: one winding covers the whole coil, so the ring
-    family holds ``2*n`` half-rings.  Half turns are legal, quarter turns
-    are not.
-    """
-    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
-        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    nh = int(round(2.0 * float(n)))
-    rings, p, N = lri_i3_rings(rx, ry, w, s, (nh + 1) // 2, chamfer)
-    a0, b0, _c0 = rings[0]
-    xj = p / 2.0
-    pts = lri_i3_step_run(rings, p, +1, n_half=nh)
-    p_out, p_in = pts[0], pts[-1]
-    # outer end sits at the bottom edge centre -- lead straight down
-    out_lead = [p_out, (p_out[0], p_out[1] - lead_len)]
-    # inner end sits on the innermost ring's left (half turn: right) edge,
-    # buried in the turns -> escape straight out through x = +-rx on the
-    # under layer, joined by a via pad at the winding's inner end
-    sgn = -1.0 if p_in[0] < 0.0 else 1.0
-    in_tip = (sgn * (rx + float(lead_len)), p_in[1])
-    in_lead = [p_in, in_tip]
-    tops = [pts, out_lead]
-    ports = [("p01", out_lead[-1]), ("p02", in_lead[-1])]
-    under = [in_lead]
-    vias = [(p_in[0], p_in[1], w)]
-    ct_geom = None
-    if ct:
-        # the tap leaves on the under metal so it may cross the winding it
-        # taps; the via pad at `mid` joins the two
-        mid = lri_point_at(pts, 0.5)
-        sgc = 1.0 if mid[1] >= 0.0 else -1.0
-        y_tip = sgc * (ry + float(ct_len))
-        ct_geom = {"tap": mid, "stem": [mid, (mid[0], y_tip)],
-                   "pad": (mid[0], mid[1], w)}
-        under.append(ct_geom["stem"])
-        ports.append(("ct1", (mid[0], y_tip)))
-    ys = [q[1] for q in pts] + [out_lead[-1][1], in_tip[1], -ry, ry]
-    xs = [q[0] for q in pts] + [in_tip[0], -rx, rx]
-    ymax, ymin = max(ys), min(ys)
-    xmin, xmax = min(xs), max(xs)
-    return {
-        "tops": tops, "under": under, "under_poly": [], "vias": vias,
-        "ports": ports, "ct": ct_geom, "kind": "se",
-        "rings": rings, "N": N, "p": p, "xj": xj,
-        "bx": 2.0 * rx, "by": 2.0 * ry,
-        "bbox": (xmin, ymin, xmax, ymax),
-    }
-
-
-def lri_i3_build_diff(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
-                      lead_len=20.0, ct=0, ct_len=20.0):
-    """Centre-tapped inductor -> dict.
-
-    Counterpart of SKILL lriI3BuildDiff and rfgeom.build_diff: two
-    concentric counter-wound spirals, the inner one a whole ring family
-    inside the outer and y-mirrored.  The two occupy disjoint radial
-    ranges, so no turn change needs an underpass; only the series join of
-    the two inner ends lives on the under metal.  ``n`` counts the turns
-    of EACH coil (full turns; half turns legal).
-    """
-    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
-        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    nh = int(round(2.0 * float(n)))
-    nt = (nh + 1) // 2
-    rings_a, p, N = lri_i3_rings(rx, ry, w, s, nt, chamfer)
-    rings_b, _pb, _nb = lri_i3_rings(rx - N * p, ry - N * p, w, s, nt,
-                                     chamfer)
-    xj = p / 2.0
-    pts_a = lri_i3_step_run(rings_a, p, +1, n_half=nh)
-    pts_b = lri_mirrory(lri_i3_step_run(rings_b, p, +1, n_half=nh))
-    a_in, b_in = pts_a[-1], pts_b[-1]
-    bridge = lri_dedup([a_in, (b_in[0], a_in[1]), b_in])
-    a_out, b_out = pts_a[0], pts_b[0]
-    # a_out sits at the bottom edge centre, b_out (y-mirror) at the top;
-    # each lead runs straight AWAY from its coil.  Coil B is inside coil
-    # A's footprint, so b_out's lead crosses A's windings -- put it on the
-    # under metal with a via pad at b_out.
-    a_lead = [a_out, (a_out[0], a_out[1] - lead_len)]
-    b_lead = [b_out, (b_out[0], b_out[1] + lead_len)]
-    tops = [pts_a, pts_b, a_lead]
-    under = [bridge, b_lead]
-    vias = [(b_out[0], b_out[1], w),
-            (a_in[0], a_in[1], w), (b_in[0], b_in[1], w)]
-    ports = [("p01", a_lead[-1]), ("p02", b_lead[-1])]
-    ct_geom = None
-    if ct:
-        jx, jy = b_in[0], a_in[1]
-        sgn = 1.0 if jy >= 0.0 else -1.0
-        y_tip = sgn * (ry + float(ct_len))
-        ct_geom = {"stem": [(jx, jy), (jx, y_tip)],
-                   "pad": (jx, jy, w)}
-        under.append(ct_geom["stem"])
-        ports.append(("ct1", (jx, y_tip)))
-    ys = [q[1] for q in pts_a + pts_b] + [a_lead[-1][1], b_lead[-1][1]]
-    return {
-        "tops": tops, "under": under, "under_poly": [], "vias": vias,
-        "ports": ports, "ct": ct_geom, "kind": "diff",
-        "rings": (rings_a, rings_b), "N": N, "p": p, "xj": xj,
-        "bx": 2.0 * rx, "by": 2.0 * ry,
-        "bbox": (-rx, min(ys), rx, max(ys)),
-    }
-
-
-def lri_sym_arm(dout, n, w, s, side=1):
-    if dout <= 0.0 or w <= 0.0 or s <= 0.0:
-        raise ValueError("dout/w/s 必须 > 0")
-    p = w + s
-    xj = p / 2.0
-    R0 = dout / 2.0 - w / 2.0
-    if R0 <= 0.0:
-        raise ValueError("dout=%.3f 太小（需 > w=%.3f）" % (dout, w))
-    N = 2 * int(math.floor(float(n) / 2.0)) + 1
-    if N < 1:
-        N = 1
-    Rlast = R0 - (N - 1) * p
-    if Rlast <= 0.0:
-        raise ValueError(
-            "dout=%.3f 放不下 %d 圈；请把 dout 增大到 >= %.1f 或减小 n/w/s"
-            % (dout, N, lri_sym_min_dout(n, w, s)))
-    if Rlast * (math.sqrt(2.0) - 1.0) < xj - 1e-9:
-        raise ValueError(
-            "最内半圈 R=%.3f 的直边太短，放不下 xj=%.3f；"
-            "请把 dout 增大到 >= %.1f 或减小 w/s"
-            % (Rlast, xj, lri_sym_min_dout(n, w, s)))
-    halfs = []
-    for k in range(N):
-        R = R0 - k * p
-        seg = (lri_half_right(R, xj) if k % 2 == 0
-               else lri_half_left(R, xj))
-        if side < 0:
-            seg = [(-x, y) for x, y in seg]
-        halfs.append(seg)
-    unders = []
-    vias = []
-    trim_pts = []
-    via_w = lri_sym_via_width(w)
-    stub = lri_sym_stub(w)
-    for k in range(N - 1):
-        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
-        if not under_here:
-            continue
-        R = R0 - k * p
-        dmin, dmax = lri_sym_delta_window(w, s, R, p)
-        Rin = R - p
-        chord_max = (math.sqrt(2.0) - 1.0) * (Rin - w / 2.0) - xj
-        tm_max = ((math.sqrt(2.0) - 1.0) * R - xj
-                  - (SYM_VIA_EDGE + stub))
-        upper = min(dmax, chord_max, tm_max)
-        if upper < dmin - 1e-9:
-            raise ValueError(
-                "换圈半径 R=%.3f（内圈 %.3f）的 45° 夹缝放不下 w=%.2f 端头"
-                "（下界 %.2f，上界 min(%.2f,直边 %.2f,TM端 %.2f)=%.2f）；"
-                "请把 dout 增大到 >= %.1f 或减小 w/s"
-                % (R, Rin, w, dmin, dmax, chord_max, tm_max, upper,
-                   lri_sym_min_dout(n, w, s)))
-        delta = max(0.0, 0.5 * (dmin + upper))
-        a = halfs[k][-1]
-        b = halfs[k + 1][0]
-        sa = 1.0 if a[0] >= 0.0 else -1.0
-        sb = 1.0 if b[0] >= 0.0 else -1.0
-        at = (a[0] + sa * delta, a[1])
-        bt = (b[0] + sb * delta, b[1])
-        halfs[k][-1] = at
-        halfs[k + 1][0] = bt
-        av = (at[0] + sa * SYM_VIA_EDGE, at[1])
-        bv = (bt[0] + sb * SYM_VIA_EDGE, bt[1])
-        ae = (av[0] + sa * stub, av[1])
-        be = (bv[0] + sb * stub, bv[1])
-        c = (av[0] - sa * p, bv[1])
-        unders.append([ae, av, c, bv, be])
-        vias.append([av[0], av[1], via_w])
-        vias.append([bv[0], bv[1], via_w])
-        trim_pts.extend([at, bt])
-    tops = []
-    run = list(halfs[0])
-    for k in range(N - 1):
-        nxt = halfs[k + 1][0]
-        under_here = ((k % 2 == 0) if side < 0 else (k % 2 == 1))
-        if under_here:
-            tops.append(run)
-            run = list(halfs[k + 1])
-        else:
-            run.append(nxt)
-            run.extend(halfs[k + 1][1:])
-    tops.append(run)
-    def _is_trim(pt):
-        return any(abs(pt[0] - q[0]) <= 1e-6 and abs(pt[1] - q[1]) <= 1e-6
-                   for q in trim_pts)
-    topcaps = [(not _is_trim(rr[0]), not _is_trim(rr[-1])) for rr in tops]
-    return tops, unders, vias, topcaps, N, R0, Rlast, xj
-
 def lri_build_ind(g):
-    W = float(g.get("W", g.get("dout", 160.0)))
-    H = float(g.get("H", W))
+    """Build the sym (differential symmetric) inductor geometry.
+
+    ``ind`` and ``sym`` both mean the two-arm octagonal symmetric coil;
+    any other kind raises (lri_validate already rejects it, but a direct
+    call should not silently coerce).
+    """
+    kind = str(g.get("kind", "sym")).strip().lower() or "sym"
+    if kind not in ("sym", "ind"):
+        raise ValueError("未知/已删除拓扑 kind=%s（只剩 sym 对称差分电感）" % kind)
     w = float(g["w"])
     s = float(g["s"])
     n = float(g.get("n", 3.0))
-    corner = float(g.get("corner") or 0.0)
-    seam = g.get("seam", "bottom")
-    kind = g.get("kind", "se")
-    ct = int(g.get("ct", 0) or 0)
-    _tv = g.get("tangle", 180)
-    tangle = int(float(180 if _tv in (None, "") else _tv))
-    stub = float(g.get("stub", 40.0) or 40.0)
-    out = {"metal": [], "under": [], "ports": [],
-           "bx": W, "by": H, "kind": kind}
-
-    if kind == "sym":
-        # Second-generation kernel: independent rx/ry (defaults derived from dout),
-        # any integer turns, adjustable chamfer and differential leads; same
-        # geometry as SKILL lriI3BuildSym.
-        dout = float(g.get("dout", W))
-        rx = float(g.get("rx", dout / 2.0))
-        ry = float(g.get("ry", dout / 2.0))
-        m = lri_i3_build(
-            rx, ry, n, w, s,
-            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
-            lead_len=float(g.get("lead_len", 20.0)),
-            lead_gap=g.get("lead_gap"), lead_w=g.get("lead_w"),
-            ct=int(float(g.get("ct", 0) or 0)))
-        out["metal"] = list(m["tops"])
-        out["topcaps"] = [(False, False)] * len(out["metal"])
-        out["under"] = list(m["under"])
-        out["under_poly"] = [lri_sym_under_poly(p, w)
-                             for p in m["under"]]
-        out["vias"] = list(m["vias"])
-        out["ports"] = list(m["ports"])
-        out["bx"] = 2.0 * rx
-        out["by"] = 2.0 * ry
-        out["N"] = m["N"]
-        out["bbox"] = m["bbox"]
-        return out
-
-    if kind == "se":
-        # Second-generation kernel: rfgeom law, one winding on one layer and
-        # no underpass (a single winding never crosses itself); same geometry
-        # as SKILL lriI3BuildSe.  The legacy seam/tangle/corner knobs are gone.
-        dout = float(g.get("dout", W))
-        rx = float(g.get("rx", dout / 2.0))
-        ry = float(g.get("ry", float(g.get("H", W)) / 2.0))
-        m = lri_i3_build_se(
-            rx, ry, n, w, s,
-            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
-            lead_len=float(g.get("lead_len", 20.0) or 20.0),
-            ct=int(float(g.get("ct", 0) or 0)),
-            ct_len=float(g.get("ct_len", 20.0) or 20.0))
-        out["metal"] = list(m["tops"])
-        out["topcaps"] = [(False, False)] * len(out["metal"])
-        out["under"] = list(m["under"])
-        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
-        out["vias"] = list(m["vias"])
-        out["ports"] = list(m["ports"])
-        out["bx"] = m["bx"]
-        out["by"] = m["by"]
-        out["N"] = m["N"]
-        out["bbox"] = m["bbox"]
-        return out
-
-    if kind == "diff":
-        # Second-generation kernel: two concentric counter-wound spirals,
-        # the inner one a whole ring family inside the outer and y-mirrored;
-        # same geometry as SKILL lriI3BuildDiff.  The legacy seam/tangle/
-        # corner knobs are gone.
-        dout = float(g.get("dout", W))
-        rx = float(g.get("rx", dout / 2.0))
-        ry = float(g.get("ry", float(g.get("H", W)) / 2.0))
-        m = lri_i3_build_diff(
-            rx, ry, n, w, s,
-            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
-            lead_len=float(g.get("lead_len", 20.0) or 20.0),
-            ct=int(float(g.get("ct", 0) or 0)),
-            ct_len=float(g.get("ct_len", 20.0) or 20.0))
-        out["metal"] = list(m["tops"])
-        out["topcaps"] = [(False, False)] * len(out["metal"])
-        out["under"] = list(m["under"])
-        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
-        out["vias"] = list(m["vias"])
-        out["ports"] = list(m["ports"])
-        out["bx"] = m["bx"]
-        out["by"] = m["by"]
-        out["N"] = m["N"]
-        out["bbox"] = m["bbox"]
-        return out
-
-    body = lri_spiral(W, H, w, s, n, corner, seam)
-    out["metal"] = [body]
-    nat1 = {"top": "N", "left": "W", "right": "E"}.get(seam, "S")
-    ex, ey = body[-1][0], body[-1][1]
-    Lr = math.hypot(ex, ey)
-    nat2 = lri_dir_key((ex, ey) if Lr > 1e-6 else (0.0, 1.0))
-    k1, k2 = lri_pick_dirs(tangle, nat1, nat2)
-    lead1 = _lri_lead(body[0], k1, stub)
-    out["metal"].append(lead1)
-    tip = _lri_exit_pad(body[-1], k2, W, H, stub)
-    out["under"].append([body[-1], tip])
-    out["ports"] = [("p01", lead1[-1]), ("p02", tip)]
-    if ct:
-        cut = lri_point_at(body, 0.5)
-        k3 = "S" if k1 != "S" else "N"
-        tip2 = _lri_exit_pad(cut, k3, W, H, stub)
-        out["under"].append([cut, tip2])
-        out["ports"].append(("ct1", tip2))
+    W = float(g.get("W", g.get("dout", 160.0)))
+    dout = float(g.get("dout", W))
+    rx = float(g.get("rx", dout / 2.0))
+    ry = float(g.get("ry", float(g.get("H", W)) / 2.0))
+    m = lri_i3_build(
+        rx, ry, n, w, s,
+        chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
+        lead_len=float(g.get("lead_len", 20.0)),
+        lead_gap=g.get("lead_gap"), lead_w=g.get("lead_w"),
+        ct=int(float(g.get("ct", 0) or 0)))
+    out = {"metal": list(m["tops"]), "under": list(m["under"]),
+           "under_poly": [lri_sym_under_poly(p, w) for p in m["under"]],
+           "vias": list(m["vias"]), "ports": list(m["ports"]),
+           "topcaps": [(False, False)] * len(m["tops"]),
+           "bx": 2.0 * rx, "by": 2.0 * ry, "N": m["N"], "bbox": m["bbox"],
+           "kind": "sym"}
     return out
 
 def lri_draw_sketch(c, raw):
@@ -1294,12 +597,11 @@ def lri_draw_sketch(c, raw):
                       text="kind=sym  端口同侧顶部  内端下方对称轴")
     else:
         c.create_text(140, 186, fill="#444444", font=("fixed", 8),
-                      text="n=%g  w=%g  s=%g  corner=%g"
+                      text="n=%g  w=%g  s=%g  chamfer=%g"
                            % (float(g["n"]), w, float(g["s"]),
-                              float(g["corner"])))
+                              float(g.get("chamfer", 0.0))))
         c.create_text(140, 199, fill="#666666", font=("fixed", 8),
-                      text="kind=%s  shape=%s  ct=%d  seam=%s"
-                           % (g["kind"], g["shape"], int(g["ct"]), g["seam"]))
+                      text="kind=sym  ct=%d" % int(g["ct"]))
 
 def lri_sketch_after(tab):
     try:
@@ -1323,67 +625,35 @@ def lri_redraw_sketch(tab):
     except Exception:
         pass
 
-PRESETS = [ {"name": "1nH 八角电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"kind": "se", "shape": "octagon", "n": 2.5, "w": 10, "s": 2.6,
-              "dout": 150, "ct": 0, "underpass": "direct"}},
-    {"name": "2nH 方形电感", "type": "ind", "freq": "1e9:30e9:30",
-     "geom": {"kind": "se", "shape": "square", "n": 3.5, "w": 12, "s": 2.6,
-              "dout": 220, "ct": 0, "underpass": "direct"}},
-    {"name": "中心抽头电感", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"kind": "se", "shape": "octagon", "n": 2, "w": 10, "s": 2.6,
-              "dout": 160, "ct": 1, "underpass": "direct"}},
-    {"name": "差分电感 (diff)", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"kind": "diff", "shape": "octagon", "n": 2.5, "w": 10,
-              "s": 2.6, "dout": 220, "ct": 0}},
-    {"name": "50Ω 微带线", "type": "tl", "freq": "1e9:30e9:21",
-     "geom": {"w": 20, "len": 300, "gnd": 1, "gnd_layer": "M1", "fence": 0, "cpw": 0, "gap": 5}},
-    {"name": "CPW 线", "type": "tl", "freq": "1e9:30e9:21",
-     "geom": {"w": 15, "len": 250, "gnd": 1, "gnd_layer": "M1", "fence": 0, "cpw": 1, "gap": 6}},
-    {"name": "1:1 balun", "type": "xfmr", "freq": "1e9:30e9:21",
-     "geom": {"style": "balun", "np": 2, "ns": 2, "w": 10, "s": 2.6,
-              "dout": 180, "gap": 3, "ct": 0}},
-    {"name": "叠层变压器", "type": "xfmr", "freq": "1e9:30e9:21",
-     "geom": {"style": "stacked", "np": 2, "ns": 2, "w": 10, "s": 2.6,
-              "dout": 160, "gap": 3, "ct": 0}},
-    {"name": "平行耦合线", "type": "cpl", "freq": "1e9:30e9:21",
-     "geom": {"w": 10, "gap": 3, "len": 200, "gnd": 1}}, ]
+PRESETS = [
+    {"name": "1nH 对称差分电感", "type": "ind", "freq": "1e9:30e9:30",
+     "geom": {"kind": "sym", "n": 2.5, "w": 10, "s": 2.6, "dout": 160,
+              "ct": 0}},
+    {"name": "2nH 对称差分电感", "type": "ind", "freq": "1e9:30e9:30",
+     "geom": {"kind": "sym", "n": 3.5, "w": 12, "s": 2.6, "dout": 220,
+              "ct": 0}},
+    {"name": "中心抽头对称电感", "type": "ind", "freq": "1e9:30e9:21",
+     "geom": {"kind": "sym", "n": 2, "w": 10, "s": 2.6, "dout": 160,
+              "ct": 1}},
+    {"name": "对称差分电感 (sym)", "type": "ind", "freq": "1e9:30e9:21",
+     "geom": {"kind": "sym", "n": 2.5, "w": 10, "s": 2.6, "dout": 220,
+              "ct": 0}},
+]
 
-GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/sym)", "se", False),
-            ("shape", "形状 rect/oct", "octagon", False),
-            ("seam", "端口边 seam (N/S/E/W)", "S", False),
-            ("tangle", "端口夹角 tangle (0/90/180)", "180", True),
-            ("n", "匝数 n", "3", True), ("w", "线宽 w (µm)", "10", True),
+GEOM_FORM = { "ind": [("kind", "拓扑 kind (sym)", "sym", False),
+            ("n", "每臂匝数 n (整数)", "3", True), ("w", "线宽 w (µm)", "10", True),
             ("s", "间距 s (µm)", "3.2", True), ("dout", "外径 dout (µm)", "160", True),
-            ("rx", "横向半径 rx (µm, 留空=dout/2) [仅 sym]", "", True),
-            ("ry", "纵向半径 ry (µm, 留空=dout/2) [仅 sym]", "", True),
-            ("chamfer", "拐角切角 chamfer 0..1 (留空=2-sqrt2) [仅 sym]", "", True),
-            ("lead_len", "差分引线长 lead_len (µm) [仅 sym]", "20", True),
-            ("lead_gap", "差分线间距 lead_gap (µm, 留空=s) [仅 sym]", "", True),
-            ("lead_w", "差分线宽 lead_w (µm, 留空=w) [仅 sym]", "", True),
-            ("W", "宽 W (µm, 留空=dout)", "", True),
-            ("H", "高 H (µm, 留空=dout)", "", True),
-            ("corner", "45° 切角 corner (µm, 留空=八角自动)", "", True),
-            ("din", "内径 din (µm, 留空=闭合) [仅旧内核]", "", True),
+            ("rx", "横向半径 rx (µm, 留空=dout/2)", "", True),
+            ("ry", "纵向半径 ry (µm, 留空=dout/2)", "", True),
+            ("chamfer", "拐角切角 chamfer 0..1 (留空=2-sqrt2)", "", True),
+            ("lead_len", "差分引线长 lead_len (µm)", "20", True),
+            ("lead_gap", "差分线间距 lead_gap (µm, 留空=s)", "", True),
+            ("lead_w", "差分线宽 lead_w (µm, 留空=w)", "", True),
             ("ct", "中心抽头 ct (0/1)", "0", True),
-            ("ct_dir", "抽头方向 ct_dir (N/S/E/W) [仅旧内核]", "S", False),
-            ("underpass", "underpass direct/route [仅旧内核]", "direct", False),
-            ("ex", "横向拉长 ex (µm) [仅旧内核]", "", True),
-            ("ey", "纵向拉长 ey (µm) [仅旧内核]", "", True),
-            ("stack", "叠层 stack (0/1) [仅 sym]", "0", True),
-            ("metal_main", "主金属 (留空=工艺档) [仅 sym]", "", False),
-            ("metal_aux", "副金属/跨线层 (留空=工艺档) [仅 sym]", "", False),
-            ("ind_mark", "MARKER 标记层 (0/1)", "0", True)],
-    "tl": [("w", "线宽 w (µm)", "20", True), ("len", "长度 len (µm)", "300", True),
-           ("gnd", "带地 gnd (0/1)", "1", True), ("gnd_layer", "地层", "M1", False),
-           ("fence", "围栏 fence (0/1)", "0", True), ("cpw", "CPW 模式 (0/1)", "0", True),
-           ("gap", "CPW gap (µm)", "5", True)],
-    "xfmr": [("style", "风格 balun/stacked/interleaved", "balun", False),
-             ("np", "初级匝数 np", "2", True), ("ns", "次级匝数 ns", "2", True),
-             ("w", "线宽 w (µm)", "10", True), ("s", "间距 s (µm)", "2.6", True),
-             ("dout", "外径 dout (µm)", "180", True), ("gap", "级间 gap (µm)", "3", True),
-             ("ct", "中心抽头 ct (0/1)", "0", True)], "cpl": [("w", "线宽 w (µm)", "10", True),
-            ("gap", "耦合 gap (µm)", "3", True), ("len", "长度 len (µm)", "200", True),
-            ("gnd", "带地 gnd (0/1)", "1", True)], }
+            ("stack", "叠层 stack (0/1)", "0", True),
+            ("metal_main", "主金属 (留空=工艺档)", "", False),
+            ("metal_aux", "副金属/跨线层 (留空=工艺档)", "", False),
+            ("ind_mark", "MARKER 标记层 (0/1)", "0", True)], }
 
 GEOM_NUM = set()
 
@@ -1393,16 +663,14 @@ for _rows in GEOM_FORM.values():
             GEOM_NUM.add(_k)
 
 GEOM_CHOICES = {
-    "kind": ("se", "diff", "sym"),
-    "shape": ("rect", "oct", "octagon", "square"),
-    "seam": ("S", "N", "E", "W"),
-    "tangle": ("180", "90", "0"),
-    "style": ("balun", "stacked", "interleaved"),
+    "kind": ("sym",),
 }
 
 def form_to_geom(typ, raw):
+    if typ != "ind":
+        raise LibrfError("未知器件类型 %s（只剩 ind 对称差分电感）" % typ)
     geom = {}
-    for key, _lab, _d, num in GEOM_FORM.get(typ, []):
+    for key, _lab, _d, num in GEOM_FORM["ind"]:
         v = (raw.get(key) or "").strip()
         if v == "":
             continue
@@ -1413,6 +681,4 @@ def form_to_geom(typ, raw):
                 raise LibrfError("%s: %s" % (key, e))
         else:
             geom[key] = v
-    if typ == "ind":
-        geom = lri_norm_geom(geom)
-    return geom
+    return lri_norm_geom(geom)
