@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.device — device metadata and the make_layout_emx flow."""
-from __future__ import print_function
-
 import json
 import os
 import re

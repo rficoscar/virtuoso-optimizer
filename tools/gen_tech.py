@@ -20,8 +20,6 @@ See data/tech/smic55ll_ulp_rf.json for the JSON structure. Checks:
   * each via lower/upper must be an adjacent pair in stack_order;
   * defaults.metal_main must be above metal_aux, with a complete via chain between them.
 """
-from __future__ import print_function
-
 import argparse
 import io
 import json

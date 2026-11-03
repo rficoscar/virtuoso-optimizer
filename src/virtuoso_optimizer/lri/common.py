@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.common — encoding, output, paths, errors, file and command helpers."""
-from __future__ import print_function
-
 import glob
 import json
 import os

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.selftest_librf — librf_opt self-test (python3 -m virtuoso_optimizer.librf_opt --selftest)."""
-from __future__ import print_function
-
 import math
 import os
 import re

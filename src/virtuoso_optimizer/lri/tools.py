@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.tools — EDA tool discovery (virtuoso/strmout/emx/calibre)."""
-from __future__ import print_function
-
 import os
 
 from .common import (
@@ -20,7 +18,7 @@ def _import_discover():
 def find_tools(proc=None, verbose=False, tech=None, work=None):
     if tech is None:
         tech = load_tech_profile(work=work)
-    find_prog, _find_file = _import_discover()
+    find_prog = _import_discover()[0]
     out = {}
     def _prog(key, env_name, name, subdirs):
         if find_prog is not None:

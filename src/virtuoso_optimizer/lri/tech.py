@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.tech — process profiles: loading, derivation, role layers, DRC queries and SKILL injection."""
-from __future__ import print_function
-
 import json
 import os
 import re

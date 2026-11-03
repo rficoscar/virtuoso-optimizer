@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui.tech_tab — process profile form page."""
-from __future__ import print_function
-
 class _TechTab:
     HIDDEN = ("cds_lib",)
     FIELDS = (

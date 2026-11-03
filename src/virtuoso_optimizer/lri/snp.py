@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.snp — Touchstone I/O, S/Y/Z conversions and device fingerprints."""
-from __future__ import print_function
-
 import math
 import os
 import re
@@ -64,14 +62,6 @@ def s_to_y(s, z0=50.0):
     tmp = _mat_mul(num, _mat_inv(den))
     y0 = 1.0 / complex(z0)
     return [[x * y0 for x in row] for row in tmp]
-
-def s_to_z(s, z0=50.0):
-    n = len(s)
-    eye = _mat_eye(n)
-    num = [[eye[i][j] + s[i][j] for j in range(n)] for i in range(n)]
-    den = [[eye[i][j] - s[i][j] for j in range(n)] for i in range(n)]
-    tmp = _mat_mul(num, _mat_inv(den))
-    return [[x * z0 for x in row] for row in tmp]
 
 _TS_UNITS = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
 
@@ -240,18 +230,6 @@ def _srf_from_lcurve(lcurve):
             x0, x1 = lcurve[i - 1][0], lcurve[i][0]
             return x0 + (x1 - x0) * (y0 / (y0 - y1))
     return None
-
-def _s_to_abcd2(s, z0=50.0):
-    s11, s12 = s[0][0], s[0][1]
-    s21, s22 = s[1][0], s[1][1]
-    den = 2.0 * s21
-    if den == 0:
-        raise LibrfError("extract: s21=0，无法转 ABCD")
-    a = ((1 + s11) * (1 - s22) + s12 * s21) / den
-    b = z0 * ((1 + s11) * (1 + s22) - s12 * s21) / den
-    c = ((1 - s11) * (1 - s22) - s12 * s21) / (den * z0)
-    d = ((1 - s11) * (1 + s22) + s12 * s21) / den
-    return a, b, c, d
 
 def _l0_extrapolate(lc_v, f_max):
     pts = [(f, v) for f, v in lc_v if f_max is None or f <= f_max]

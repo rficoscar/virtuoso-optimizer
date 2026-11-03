@@ -522,7 +522,6 @@ class CoordinateSearch(_UnitSpace, AlgorithmBase):
         self.axis = 0
         self.sign = 1
         self.pending_pt = None
-        self.pending_val = None
         self.started = False
 
     def _candidate(self):

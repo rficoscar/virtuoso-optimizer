@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""EM library bridge, EM fusion optimization and two-stage alignment."""
+"""EM library bridge and two-stage alignment."""

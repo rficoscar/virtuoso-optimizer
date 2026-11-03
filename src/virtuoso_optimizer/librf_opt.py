@@ -5,8 +5,6 @@ The implementation lives in the lri/ package. In-package imports
 `from virtuoso_optimizer.librf_opt import ...` are unchanged; run the
 self-test with `python3 -m virtuoso_optimizer.librf_opt --selftest`.
 """
-from __future__ import print_function
-
 from .lri.common import *  # noqa: F401,F403
 from .lri.tech import *  # noqa: F401,F403
 from .lri.tools import *  # noqa: F401,F403

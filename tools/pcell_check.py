@@ -28,8 +28,6 @@ Requires a cds.lib that resolves ``--lib`` to a scratch, tech-attached library
 
 Exit code 0 = all checks pass.
 """
-from __future__ import print_function
-
 import argparse
 import json
 import os
@@ -46,11 +44,6 @@ DEF_CXT = os.environ.get(
 DEF_TECH = "smic55ll_ulp_rf"
 DEF_CELL = "pcell_chk_ind"
 DEF_TOP = "pcell_chk_top"
-
-# Defaults from lri_pcell.il (must match the CDF table)
-DEF_PARAMS = dict(rx=80.0, ry=60.0, n=3, w=8.0, s=3.0,
-                  chamfer=0.5857864376, lead_len=20.0, lead_gap=3.0,
-                  lead_w=8.0, ct=0, stack=0)
 
 CDF_NAMES = ("rx", "ry", "n", "w", "s", "chamfer", "lead_len", "lead_gap",
              "lead_w", "ct", "stack", "metal_main", "metal_aux")

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui.main — OptimizerGui main window and run_gui entry point."""
-from __future__ import print_function
-
 import glob
 import json
 import os
@@ -160,16 +158,6 @@ class OptimizerGui:
         box.configure(state="disabled")
         tab._poll_body = body
         return tab, box, status_var, auto_var
-    def _add_field(self, parent, row, key, label, store, choices=None, width=16, sticky="w"):
-        self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=4, pady=2)
-        var = self.tk.StringVar()
-        if choices:
-            widget = self.ttk.Combobox(parent, textvariable=var, width=width, values=choices)
-        else:
-            widget = self.ttk.Entry(parent, textvariable=var, width=width)
-        widget.grid(row=row, column=1, sticky=sticky, padx=4)
-        store[key] = var
-        return widget
     def _build_toolbar(self):
         bar = self.ttk.Frame(self.root, padding=4)
         bar.pack(side="top", fill="x")
@@ -1172,35 +1160,6 @@ class OptimizerGui:
                                  "dir": os.path.dirname(hit) if hit else None,
                                  "dir_mtime": dir_mtime}
         return hit
-    def _simset_watch_paths(self):
-        paths = []
-        state_dir = self.fields["state_dir"].get().strip() if self.fields else ""
-        if state_dir:
-            state_dir = os.path.expanduser(state_dir)
-            for name in ("analyses.state", "variables.state", "outputs.state", "modelSetup.state"):
-                paths.append(os.path.join(state_dir, name))
-        nl = self._simset_netlist_path()
-        if nl:
-            paths.append(nl)
-        return paths
-    def _simset_signature(self):
-        sig = []
-        for path in self._simset_watch_paths():
-            try:
-                st = os.stat(path)
-                sig.append((path, int(st.st_mtime), st.st_size))
-            except OSError:
-                sig.append((path, None, None))
-        try:
-            sig.append(("__targets__", _targets_signature(self.target_specs)))
-        except Exception:
-            n_targets = len(self.target_specs)
-            sig.append(("__targets__", n_targets))
-        try:
-            sig.append(("__netlist_field__", self.fields["netlist"].get().strip()))
-        except Exception:
-            pass
-        return tuple(sig)
     def _simset_collect(self):
         notes = []
         state_dir = ""

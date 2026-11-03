@@ -6,40 +6,18 @@ Usage: python3 gds_render.py in.gds out.png [--scale N] [--dpi D]
 Draws BOUNDARY/PATH/BOX only; sref/aref are ignored (this toolchain emits flat geometry).
 Layer colors follow XMC 55RFSOI conventions (layer number -> color); unknown layers are gray.
 """
-from __future__ import print_function
 import struct
 import sys
 
-# GDSII record types
-RT_HEADER = 0x00
-RT_BGNLIB = 0x01
-RT_LIBNAME = 0x02
+# GDSII record types actually handled by the reader below
 RT_UNITS = 0x03
-RT_ENDLIB = 0x04
-RT_BGNSTR = 0x05
-RT_STRNAME = 0x06
-RT_ENDSTR = 0x07
 RT_BOUNDARY = 0x08
 RT_PATH = 0x09
-RT_SREF = 0x0A
-RT_AREF = 0x0B
-RT_TEXT = 0x0C
 RT_LAYER = 0x0D
 RT_DATATYPE = 0x0E
 RT_WIDTH = 0x0F
 RT_XY = 0x10
 RT_ENDEL = 0x11
-RT_SNAME = 0x12
-RT_COLROW = 0x13
-RT_TEXTNODE = 0x14
-RT_NODE = 0x15
-RT_TEXTTYPE = 0x16
-RT_PRESENTATION = 0x17
-RT_STRING = 0x19
-RT_STRANS = 0x1A
-RT_MAG = 0x1B
-RT_ANGLE = 0x1C
-RT_PATHTYPE = 0x21
 RT_BOX = 0x2D
 RT_BOXTYPE = 0x2E
 

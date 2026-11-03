@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.emx — EMX command-line setup, sNp validation and execution."""
-from __future__ import print_function
-
 import math
 import os
 

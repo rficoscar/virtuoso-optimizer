@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.layout — inductor geometry kernel (i3/symmetric/single-ended), DRC checks and form mapping."""
-from __future__ import print_function
-
 import math
 
 from .common import (
@@ -19,9 +17,6 @@ def lri_dedup(pts):
             out.append(p)
     return out
 
-def lri_plen(pts):
-    return sum(lri_seglen(a, b) for a, b in zip(pts[:-1], pts[1:]))
-
 def lri_inter(p1, p2, q1, q2):
     d1 = (p2[0] - p1[0], p2[1] - p1[1])
     d2 = (q2[0] - q1[0], q2[1] - q1[1])
@@ -31,19 +26,6 @@ def lri_inter(p1, p2, q1, q2):
     rx, ry = q1[0] - p1[0], q1[1] - p1[1]
     t = (rx * (-d2[1]) - ry * (-d2[0])) / det
     return (p1[0] + t * d1[0], p1[1] + t * d1[1])
-
-def lri_point_at(pts, frac):
-    tot = lri_plen(pts)
-    want = tot * frac
-    acc = 0.0
-    for i in range(1, len(pts)):
-        a, b = pts[i - 1], pts[i]
-        L = lri_seglen(a, b)
-        if acc + L >= want - 1e-9:
-            t = (want - acc) / L if L > 0 else 0.0
-            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-        acc += L
-    return pts[-1]
 
 def lri_sweep(pts, w):
     h = w / 2.0
@@ -208,20 +190,6 @@ SYM_VIA_CUT = float(DEFAULT_TECH["drc"]["via"]["cut"])
 SYM_VIA_SPACE = float(DEFAULT_TECH["drc"]["via"]["spacing"])
 
 SYM_VIA_ENCL = float(DEFAULT_TECH["drc"]["via"]["enclosure"])
-
-SYM_VIA_EDGE = SYM_VIA_CUT / 2.0 + SYM_VIA_ENCL
-
-SYM_IND_S = 2.5
-
-def lri_sym_via_width(w):
-    for vw in (7.5, 4.5, 1.5):
-        if vw <= w - 2.0 * SYM_VIA_ENCL + 1e-9:
-            return vw
-    return 1.5
-
-def lri_sym_stub(w):
-    back = (w / 2.0) * (math.sqrt(2.0) - 1.0)
-    return max(SYM_VIA_EDGE, 2.6 - back)
 
 def lri_sym_under_poly(pts, w):
     if len(pts) != 5:

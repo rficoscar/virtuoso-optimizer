@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui.reports — library stats, EM reports and netlist/alignment event text."""
-from __future__ import print_function
-
 import glob
 import json
 import os

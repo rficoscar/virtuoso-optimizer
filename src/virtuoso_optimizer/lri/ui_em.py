@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui_em — layout page, EM page and registration hooks (tkinter imported locally)."""
-from __future__ import print_function
-
 import json
 import os
 import sys
@@ -39,7 +37,7 @@ def _disp_cols(text):
 # The Layout page main form shows only common fields (matching the 08c workflow);
 # advanced fields live in the "Advanced..." window; behavior and config round-tripping are unchanged.
 GEOM_PRIMARY = {
-    "ind": ("kind", "shape", "seam", "n", "w", "s", "dout", "ct"),
+    "ind": ("kind", "n", "w", "s", "dout", "ct"),
 }
 
 
@@ -467,150 +465,8 @@ class _LayoutTab(_TabBase):
                 win.destroy()
             except Exception:
                 pass
-    def _browse_cdslib(self):
-        try:
-            from tkinter import filedialog
-        except Exception:
-            return
-        path = filedialog.askopenfilename(
-            parent=self.root, title="选择 cds.lib",
-            filetypes=[("cds.lib", "cds.lib"), ("所有文件", "*")])
-        if path:
-            self.a_cdslib.set(path)
-    def _on_cdslib_manual(self, *_a):
-        if self._cdslib_loading:
-            return
-        cur = self.a_cdslib.get().strip()
-        self._cdslib_dirty = bool(cur and cur != self._cdslib_auto_last)
-    def _design_workdir(self):
-        try:
-            return self.gui.fields["work_dir"].get().strip()
-        except Exception:
-            return ""
-    def _sync_cdslib_from_design(self):
-        """cds.lib default = design-page work dir / cds.lib; never overwrite after a manual edit."""
-        if self._cdslib_dirty:
-            return
-        wd = self._design_workdir()
-        if not wd:
-            return
-        val = os.path.join(os.path.expanduser(wd), "cds.lib")
-        if self.a_cdslib.get() == val:
-            return
-        cur = self.a_cdslib.get().strip()
-        if cur and cur != self._cdslib_auto_last:
-            # Custom values loaded from a config are kept and never overwritten automatically.
-            self._cdslib_dirty = True
-            return
-        self._cdslib_auto_last = val
-        self._cdslib_loading = True
-        try:
-            self.a_cdslib.set(val)
-        finally:
-            self._cdslib_loading = False
-
-    # ---- geometry form / sketch ----
-    def _rebuild_geom(self):
-        for child in self.geom_frame.winfo_children():
-            child.destroy()
-        if getattr(self, "_adv_win", None) is not None:
-            try:
-                self._adv_win.destroy()
-            except Exception:
-                pass
-            self._adv_win = None
-        self.geom_vars = {}
-        typ = self.a_type.get()
-        primary = GEOM_PRIMARY.get(typ)
-        adv = []
-        row = 0
-        for key, lab, default, _num in GEOM_FORM.get(typ, []):
-            var = self.tk.StringVar(value=default)
-            self.geom_vars[key] = var
-            if primary is not None and key not in primary:
-                adv.append((key, lab))
-                continue
-            label = self.ttk.Label(self.geom_frame, text=lab, anchor="w")
-            label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=1)
-            if key in GEOM_CHOICES:
-                ent = self.ttk.Combobox(self.geom_frame, textvariable=var,
-                                        width=10, values=GEOM_CHOICES[key],
-                                        state="readonly")
-                ent.grid(row=row, column=1, sticky="w", pady=1)
-                ent.bind("<<ComboboxSelected>>",
-                         lambda _e: lri_sketch_after(self))
-            else:
-                ent = self.ttk.Entry(self.geom_frame, textvariable=var,
-                                     width=14)
-                ent.grid(row=row, column=1, sticky="w", pady=1)
-                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
-            row += 1
-        self._geom_adv = adv
-        if adv:
-            self.ttk.Button(self.geom_frame, text="高级…（%d 项，通常不用改）"
-                            % len(adv), command=self._geom_advanced).grid(
-                                row=row, column=0, columnspan=2,
-                                sticky="w", pady=(6, 0))
-        self._draw_geom_sketch(typ)
-        self._fit_form_labels()
-
-    def _geom_advanced(self):
-        """Advanced geometry parameters: less common fields go into a separate window to keep the form compact."""
-        win = getattr(self, "_adv_win", None)
-        if win is not None:
-            try:
-                win.deiconify()
-                win.lift()
-                return
-            except Exception:
-                self._adv_win = None
-        if not self._geom_adv:
-            return
-        typ = self.a_type.get()
-        win = self.tk.Toplevel(self.root)
-        self._adv_win = win
-        win.title("高级几何参数（%s）" % typ)
-        win.transient(self.root)
-        win.geometry("620x560")
-        win.protocol("WM_DELETE_WINDOW", lambda: self._close_adv())
-        self.ttk.Label(
-            win, anchor="w", justify="left", foreground="#555555",
-            wraplength=580,
-            text="这些参数通常留空即可（自动推导或沿用工艺档）。\n"
-                 "改动会立即反映到示意图与出图几何。"
-        ).pack(fill="x", padx=10, pady=(8, 4))
-        body, outer = self._scrollable(win)
-        outer.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        for r, (key, lab) in enumerate(self._geom_adv):
-            var = self.geom_vars[key]
-            label = self.ttk.Label(body, text=lab, anchor="w")
-            label.grid(row=r, column=0, sticky="w", padx=(0, 8), pady=2)
-            if key in GEOM_CHOICES:
-                ent = self.ttk.Combobox(body, textvariable=var, width=12,
-                                        values=GEOM_CHOICES[key],
-                                        state="readonly")
-                ent.grid(row=r, column=1, sticky="w", pady=2)
-                ent.bind("<<ComboboxSelected>>",
-                         lambda _e: lri_sketch_after(self))
-            else:
-                ent = self.ttk.Entry(body, textvariable=var, width=16)
-                ent.grid(row=r, column=1, sticky="w", pady=2)
-                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
-        bar = self.ttk.Frame(win)
-        bar.pack(fill="x", padx=10, pady=(0, 8))
-        self.ttk.Button(bar, text="关闭", command=self._close_adv).pack(
-            side="right")
-
-    def _close_adv(self):
-        win = getattr(self, "_adv_win", None)
-        self._adv_win = None
-        if win is not None:
-            try:
-                win.destroy()
-            except Exception:
-                pass
     def _draw_geom_sketch(self, typ):
-        """Device geometry sketch with parameter labels (tl/xfmr/cpl)."""
+        """Device geometry sketch with parameter labels (sym inductor only)."""
         c = getattr(self, "sketch", None)
         if c is None:
             return

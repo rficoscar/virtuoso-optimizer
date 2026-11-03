@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui.plots — curve canvas and color/number formatting helpers."""
-from __future__ import print_function
-
 import math
 
 _VAR_PALETTE = ("#c23b22", "#2266cc", "#2a9d3a", "#d17a00",

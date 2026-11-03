@@ -4,7 +4,7 @@
 Usage: python make_file_kit.py [--repo DIR] [--out DIR]
 Output: put__<path>.sh (one per file), check_files.sh, MANIFEST.txt
 """
-import argparse, base64, gzip, hashlib, os, subprocess, sys
+import argparse, base64, gzip, hashlib, os, subprocess
 
 def repo_files(repo):
     out = subprocess.check_output(["git", "-C", repo, "ls-files", "-z"])

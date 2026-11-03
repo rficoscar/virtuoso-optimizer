@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.ui.results — result reading, status decisions and query/metric formatting."""
-from __future__ import print_function
-
 import json
 import math
 import os

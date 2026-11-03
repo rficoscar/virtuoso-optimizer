@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.runner — GeomRunner, stop control and EMX settings."""
-from __future__ import print_function
-
 import json
 import os
 import re

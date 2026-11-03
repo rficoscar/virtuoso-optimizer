@@ -5,8 +5,6 @@ The implementation lives in lri/ui/. In-package imports
 `from virtuoso_optimizer.gui import ...` and `python optimizer.py --gui`
 keep working unchanged.
 """
-from __future__ import print_function
-
 from .lri.ui.plots import *  # noqa: F401,F403
 from .lri.ui.netlist import *  # noqa: F401,F403
 from .lri.ui.results import *  # noqa: F401,F403

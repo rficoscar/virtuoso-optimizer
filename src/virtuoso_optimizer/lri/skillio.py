@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """lri.skillio — SKILL-driven generation, result parsing, views and strmout/cds.lib."""
-from __future__ import print_function
-
 import os
 
 from .common import (

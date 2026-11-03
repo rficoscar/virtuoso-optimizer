@@ -1,4 +1,6 @@
 from . import VERSION
+from .netlist import params as netlist_params
+from .lri.common import _force_utf8_stdio
 import argparse
 import csv
 import glob
@@ -17,20 +19,11 @@ import zlib
 import builtins
 _native_open = builtins.open
 
-_AUDIT = []
-_AUDIT_SINK = None
 _AUDIT_FILE = None
-
-def audit_sink(fn):
-    global _AUDIT_SINK
-    _AUDIT_SINK = fn
 
 def audit_file(path):
     global _AUDIT_FILE
     _AUDIT_FILE = path
-
-def audit_dump():
-    return list(_AUDIT)
 
 def audit(kind, path=None, detail=""):
     if path:
@@ -40,16 +33,10 @@ def audit(kind, path=None, detail=""):
             path = str(path)
     rec = {"ts": time.strftime("%H:%M:%S"), "kind": kind,
            "path": path or "", "detail": str(detail or "")}
-    _AUDIT.append(rec)
     if _AUDIT_FILE:
         try:
             with _native_open(_AUDIT_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-    if _AUDIT_SINK:
-        try:
-            _AUDIT_SINK(rec)
         except Exception:
             pass
     return rec
@@ -769,7 +756,6 @@ def classify(status, message, wall=None, timeout=None):
 class PenaltyLedger(object):
     def __init__(self):
         self.fail_count = 0
-        self.infra_count = 0
 
     def dnc_penalty(self, fail_index, f_worst):
         return float(f_worst) + 1.0e4 * (1.0 + float(fail_index))
@@ -778,7 +764,6 @@ class PenaltyLedger(object):
         if kind is None:
             return None
         if kind == INFRA:
-            self.infra_count += 1
             return None
         value = self.dnc_penalty(self.fail_count, f_worst)
         self.fail_count += 1
@@ -1320,100 +1305,11 @@ class MockRunner:
         hi = max(pts) * 1.1
         return lo, (hi if hi > lo else lo + 1.0)
 
-def _is_netlist_comment(line):
-    return line.startswith(("//", "*", ";", "#"))
-
-def _legacy_parameters_spans(text):
-    lines = text.splitlines()
-    spans = []
-    depth = 0
-    i = 0
-    while i < len(lines):
-        s = lines[i].lstrip()
-        if _is_netlist_comment(s):
-            i += 1
-            continue
-        if re.match(r"subckt(\s|$)", s):
-            depth += 1
-            i += 1
-            continue
-        if re.match(r"ends(\s|$)", s):
-            depth = max(0, depth - 1)
-            i += 1
-            continue
-        if depth == 0 and re.match(r"parameters(\s|$)", s):
-            j = i
-            while (j + 1 < len(lines)
-                   and (lines[j].rstrip().endswith("\\")
-                        or lines[j + 1].lstrip().startswith("+"))):
-                j += 1
-            spans.append((i, j))
-            i = j + 1
-            continue
-        i += 1
-    return spans
-
-def _legacy_parameters_payload(lines, span):
-    first, last = span
-    parts = []
-    for k in range(first, last + 1):
-        s = lines[k].strip()
-        if k > first and s.startswith("+"):
-            s = s[1:].strip()
-        if s.endswith("\\"):
-            s = s[:-1].strip()
-        if k == first:
-            s = re.sub(r"^parameters\s*", "", s)
-        if s:
-            parts.append(s)
-    return " ".join(parts)
-
-def _legacy_parse_netlist_parameters(text):
-    lines = text.splitlines()
-    params = {}
-    for span in _legacy_parameters_spans(text):
-        for tok in _legacy_parameters_payload(lines, span).split():
-            key, _eq, val = tok.partition("=")
-            if key:
-                params[key] = val
-    return params
-
-def _legacy_rewrite_netlist_parameters(text, line):
-    spans = _legacy_parameters_spans(text)
-    if not spans:
-        return text, 0
-    lines = text.splitlines(keepends=True)
-    out = []
-    i = 0
-    for n, (first, last) in enumerate(spans):
-        out.extend(lines[i:first])
-        if n == 0:
-            out.append(line + "\n")
-        i = last + 1
-    out.extend(lines[i:])
-    new_text = "".join(out)
-    if text.endswith("\n") and not new_text.endswith("\n"):
-        new_text += "\n"
-    return new_text, len(spans)
-
-def _netlist_params_module():
-    try:
-        from .netlist import params as netlist_params
-        return netlist_params
-    except Exception:
-        return None
-
 def parse_netlist_parameters(text):
-    mod = _netlist_params_module()
-    if mod is not None:
-        return mod.parse_netlist_parameters(text)
-    return _legacy_parse_netlist_parameters(text)
+    return netlist_params.parse_netlist_parameters(text)
 
 def rewrite_netlist_parameters(text, line):
-    mod = _netlist_params_module()
-    if mod is not None:
-        return mod.rewrite_netlist_parameters(text, line)
-    return _legacy_rewrite_netlist_parameters(text, line)
+    return netlist_params.rewrite_netlist_parameters(text, line)
 
 _ANALYSIS_KEYWORDS = frozenset((
     "ac", "acmatch", "acnoise", "dc", "dcmatch", "dcop", "disto", "envlp",
@@ -1596,32 +1492,22 @@ class RealRunner:
         for name, val in values.items():
             merged[name] = format_eng(val)
         line = "parameters " + " ".join(f"{k}={v}" for k, v in merged.items())
-        patch_report = None
-        mod = _netlist_params_module()
-        if mod is not None and hasattr(mod, "patch_netlist"):
-            new_text, patch_report = mod.patch_netlist(
-                text, dict(values), fixed=dict(self.fixed),
-                options=self.config.get("netlist_patch") or {})
-            try:
-                with open(os.path.join(iter_dir, "netlist_patch.json"), "w",
-                          encoding="utf-8") as f:
-                    json.dump(patch_report, f, indent=2, ensure_ascii=False)
-            except OSError:
-                pass
-            if not patch_report.get("ok"):
-                missing = ", ".join(patch_report.get("missing") or []) \
-                    or "未知变量"
-                return self._fail(
-                    "网表里找不到变量 %s；已检查顶层 parameters、"
-                    "子电路 parameters 与实例参数。详见 "
-                    "netlist_patch.json" % missing)
-        else:
-            new_text, replaced = rewrite_netlist_parameters(text, line)
-            if not replaced:
-                return self._fail(
-                    "网表顶层没有 parameters 行, 无法写入变量"
-                    "（检查网表; 子电路内的 parameters 行"
-                    "不会被改写）")
+        new_text, patch_report = netlist_params.patch_netlist(
+            text, dict(values), fixed=dict(self.fixed),
+            options=self.config.get("netlist_patch") or {})
+        try:
+            with open(os.path.join(iter_dir, "netlist_patch.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(patch_report, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+        if not patch_report.get("ok"):
+            missing = ", ".join(patch_report.get("missing") or []) \
+                or "未知变量"
+            return self._fail(
+                "网表里找不到变量 %s；已检查顶层 parameters、"
+                "子电路 parameters 与实例参数。详见 "
+                "netlist_patch.json" % missing)
         try:
             _archive_aside(os.path.join(iter_dir, "result.txt"))
         except OSError:
@@ -2475,12 +2361,6 @@ class RunLogger:
         plt.close()
         return path
 
-def read_manifest(manifest_path):
-    out = {}
-    for entry in _read_jsonl(manifest_path, skip_bad=True):
-        if isinstance(entry, dict) and "index" in entry:
-            out[int(entry["index"])] = entry
-    return out
 SIM_FAIL_TOTAL = BIG_ERROR
 
 class Settings:
@@ -3566,20 +3446,6 @@ def _warn_ascii_filesystem():
               "ansi_x3.4-1968"):
         print("警告: 文件系统编码为 %s, 含中文的路径会出错;" % enc)
         print("建议以 LANG=C.UTF-8 或 zh_CN.UTF-8 启动本程序")
-
-def _force_utf8_stdio():
-    import io as _io
-    for _name in ("stdout", "stderr"):
-        _stream = getattr(sys, _name, None)
-        _buf = getattr(_stream, "buffer", None)
-        _enc = (getattr(_stream, "encoding", "") or "").lower()
-        if _buf is not None and _enc not in ("utf-8", "utf8"):
-            try:
-                setattr(sys, _name, _io.TextIOWrapper(
-                    _buf, encoding="utf-8", errors="replace",
-                    line_buffering=True))
-            except Exception:
-                pass
 
 def _cli_reconstruct(argv):
     if not argv:

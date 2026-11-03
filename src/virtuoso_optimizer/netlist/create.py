@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 
+from ..lri.common import _force_utf8_stdio
+
 class NetlistError(Exception):
     pass
 
@@ -1439,20 +1441,6 @@ def _t_merge_named_write_back():
         assert "parameters L1=2n" in text, text
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-def _force_utf8_stdio():
-    try:
-        import io as _io
-        for name in ("stdout", "stderr"):
-            stream = getattr(sys, name, None)
-            buf = getattr(stream, "buffer", None)
-            enc = (getattr(stream, "encoding", "") or "").lower()
-            if buf is not None and enc not in ("utf-8", "utf8"):
-                setattr(sys, name, _io.TextIOWrapper(
-                    buf, encoding="utf-8", errors="replace",
-                    line_buffering=True))
-    except Exception:
-        pass
 
 def _selftest():
     _force_utf8_stdio()
