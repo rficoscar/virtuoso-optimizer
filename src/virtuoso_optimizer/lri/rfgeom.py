@@ -311,19 +311,29 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
         chamfer = 2.0 - SQ2
     if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
         raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    rings, pitch, nring = ring_family(rx, ry, w, s, 2.0 * float(n), chamfer)
+    n_half = int(round(2.0 * float(n)))
+    rings, pitch, nring = ring_family(rx, ry, w, s, (n_half + 1) // 2,
+                                      chamfer)
     a0, b0, _c0 = rings[0]
     xj = pitch / 2.0
-    pts, inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=+1)
+    pts, inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=+1,
+                          n_half=n_half)
     g = Geo()
     g.path(pts, w, "main")
     p_out, p_in = pts[0], pts[-1]
     g.path([p_out, (p_out[0], p_out[1] + lead_len)], w, "main")
     g.pin("p01", p_out[0], p_out[1] + lead_len, "N", "main")
+    # The inner end is buried inside the turns, so its lead escapes on the
+    # under layer -- the radial underpass of the reference layout -- and the
+    # port sits flush with the coil edge.  A via pad at the winding's inner
+    # end joins the two layers.
     sgn = 1.0 if p_in[1] >= 0.0 else -1.0
-    g.path([p_in, (p_in[0], p_in[1] + sgn * lead_len)], w, "main")
-    g.pin("p02", p_in[0], p_in[1] + sgn * lead_len,
-          "N" if sgn > 0.0 else "S", "main")
+    y_tip = sgn * (ry + float(lead_len))
+    g.viapad(p_in[0] - w / 2.0, min(p_in[1], p_in[1] + sgn * w),
+             p_in[0] + w / 2.0, max(p_in[1], p_in[1] + sgn * w),
+             ("under", "main"))
+    g.path([p_in, (p_in[0], y_tip)], w, "under")
+    g.pin("p02", p_in[0], y_tip, "N" if sgn > 0.0 else "S", "under")
     if ct:
         mid = point_at(pts, 0.5)
         sgc = 1.0 if mid[1] >= 0.0 else -1.0
@@ -361,14 +371,17 @@ def build_diff(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0,
         chamfer = 2.0 - SQ2
     if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
         raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    nh = 2.0 * float(n)
-    rings_a, pitch, N = ring_family(rx, ry, w, s, nh, chamfer)
+    nh = int(round(2.0 * float(n)))
+    nt = (nh + 1) // 2
+    rings_a, pitch, N = ring_family(rx, ry, w, s, nt, chamfer)
     a0, b0, _c0 = rings_a[0]
     rings_b, _pb, _Nb = ring_family(rx - N * pitch, ry - N * pitch,
-                                    w, s, nh, chamfer)
+                                    w, s, nt, chamfer)
     xj = pitch / 2.0
-    pts_a, _ia = spiral_run(rings_a, pitch, xj, w, s, chamfer, arm=+1)
-    pts_b = mirror_y(spiral_run(rings_b, pitch, xj, w, s, chamfer, arm=+1)[0])
+    pts_a, _ia = spiral_run(rings_a, pitch, xj, w, s, chamfer, arm=+1,
+                            n_half=nh)
+    pts_b = mirror_y(spiral_run(rings_b, pitch, xj, w, s, chamfer, arm=+1,
+                                n_half=nh)[0])
     g = Geo()
     g.path(pts_a, w, "main")
     g.path(pts_b, w, "main")
@@ -416,13 +429,16 @@ def build_f8(rx, ry, n, w, s, gap=None, chamfer=None, lead_len=20.0):
         raise GeomError("gap=%.3f < s=%.3f" % (gap, s))
     if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
         raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    rings, pitch, nring = ring_family(rx, ry, w, s, 2.0 * float(n), chamfer)
+    n_half = int(round(2.0 * float(n)))
+    rings, pitch, nring = ring_family(rx, ry, w, s, (n_half + 1) // 2,
+                                      chamfer)
     a0, b0, _c0 = rings[0]
     xj = pitch / 2.0
     dx = rx + gap / 2.0
     # arm=-1 puts lobe A's free end on the far left; its mirror lands on the
     # far right, so both ports sit on the outside of the device
-    run_a, _inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=-1)
+    run_a, _inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=-1,
+                             n_half=n_half)
     pts_a = shift(run_a, -dx, 0.0)
     pts_b = mirror_x(pts_a)
     g = Geo()
@@ -444,19 +460,26 @@ def build_f8(rx, ry, n, w, s, gap=None, chamfer=None, lead_len=20.0):
 
 
 # ------------------------------------------------------------------ single winding
-def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1):
-    """One inward spiral on a SINGLE layer: octagon half-rings joined by
-    axis jogs, no underpass.
+def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1,
+               n_half=None):
+    """One inward spiral on a SINGLE layer: each turn is a full concentric
+    octagon drawn as two half-rings.
 
-    A single winding never crosses itself at a turn change -- the jog simply
-    carries it from one side of the coil axis to the other -- so the X
-    crossing stays on the same metal.  ``arm`` picks the starting side; the
-    -1 case is the 180 deg rotation of the +1 case, which is how the
-    transformer secondary sits opposite its primary.
+    ``rings`` holds one entry per FULL turn and is inset by exactly one pitch
+    per turn, so both halves of a turn share the same (a, b, c).  Within a
+    turn the two halves sit on opposite sides of the coil axis and are joined
+    by a jog across that axis; between turns the jog is a 45 deg diagonal
+    across the axis stepping inward one pitch -- the turn-change crossing.
+    ``arm`` picks the starting side; the -1 case is the 180 deg rotation of
+    the +1 case, which is how the transformer secondary sits opposite its
+    primary.
+
+    ``n_half`` is how many half-rings to draw (default 2 per ring) -- an odd
+    value gives a legal half turn.
 
     Returns (pts, info).  ``pts`` is one polyline.
     """
-    nring = len(rings)
+    n_half = (2 * len(rings)) if n_half is None else int(n_half)
     a0, b0, c0 = rings[0]
     xj = pitch / 2.0
     e = cross_gap(w, s, pitch)
@@ -466,10 +489,11 @@ def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1):
         raise GeomError(
             "45 度跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" % lmax)
     pts = []
-    for k in range(nring):
-        a, b, c = rings[k]
+    for k in range(n_half):
+        # both halves of a turn live on the same ring -> one pitch per turn
+        a, b, c = rings[k // 2]
         side = arm * (1 if k % 2 == 0 else -1)
-        last = (k == nring - 1)
+        last = (k == n_half - 1)
         x_end = (xj if last else xe)
         xl = (x_lead if k == 0 else (xj if last else xe))
         half = (half_top_to_bot(a, b, c, xl, x_end, side) if k % 2 == 0
@@ -478,10 +502,11 @@ def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1):
         if last:
             break
         y_end = -b if k % 2 == 0 else b
-        y_next = -(b - pitch) if k % 2 == 0 else (b - pitch)
+        _a2, b2, _c2 = rings[min((k + 1) // 2, len(rings) - 1)]
+        y_next = b2 if (k + 1) % 2 == 0 else -b2
         pts = pts + dedup([(side * xe, y_end), (side * xj, y_end),
                            (-side * xj, y_next), (-side * xe, y_next)])[1:]
-    return pts, {"xj": xj, "xe": xe, "e": e, "N": nring}
+    return pts, {"xj": xj, "xe": xe, "e": e, "N": n_half}
 
 
 def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
@@ -512,12 +537,13 @@ def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
     for _t in (np_turns, ns_turns):
         if abs(2.0 * float(_t) - round(2.0 * float(_t))) > 1e-6:
             raise GeomError("np/ns=%.3f 必须是 0.5 的整数倍（半圈）" % float(_t))
-    rings_p, pitch, nP = ring_family(rx, ry, w, s, 2.0 * float(np_turns),
-                                    chamfer)
+    nh_p = int(round(2.0 * float(np_turns)))
+    nh_s = int(round(2.0 * float(ns_turns)))
+    rings_p, pitch, nP = ring_family(rx, ry, w, s, (nh_p + 1) // 2, chamfer)
     # interleaving: pull the secondary in by `shrink` pitches of the primary
     rs = max(0, int(round(float(shrink))))
     rings_s, pitch_s, nS = ring_family(rx - rs * pitch, ry - rs * pitch,
-                                       w, s, 2.0 * float(ns_turns), chamfer)
+                                       w, s, (nh_s + 1) // 2, chamfer)
     if abs(pitch_s - pitch) > 1e-9:
         raise GeomError("primary/secondary pitch mismatch")
 
@@ -526,8 +552,10 @@ def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
     a0, b0, _c0 = rings_p[0]
     as0, bs0, _cs0 = rings_s[0]
 
-    p_pts, p_inf = spiral_run(rings_p, pitch, xj, w, s, chamfer, arm=+1)
-    s_pts, s_inf = spiral_run(rings_s, pitch, xj, w, s, chamfer, arm=-1)
+    p_pts, p_inf = spiral_run(rings_p, pitch, xj, w, s, chamfer, arm=+1,
+                              n_half=nh_p)
+    s_pts, s_inf = spiral_run(rings_s, pitch, xj, w, s, chamfer, arm=-1,
+                              n_half=nh_s)
     g.path(p_pts, w, "main")
     g.path(s_pts, w, "aux")
 

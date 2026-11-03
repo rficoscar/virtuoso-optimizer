@@ -769,15 +769,20 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
         "bbox": (-rx, -ry, rx, y_port),
     }
 
-def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm):
+def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm, n_half=None):
     """One inward spiral on a SINGLE layer -> point list.
 
-    Counterpart of SKILL lriI3SpiralRun / rfgeom.spiral_run.  A single
-    winding never crosses itself at a turn change -- the jog only carries it
-    from one side of the coil axis to the other -- so the X crossing stays on
-    the same metal and no underpass is needed.  ``arm=-1`` is the 180 deg
-    rotation of ``arm=+1``, which is how a transformer secondary sits
-    opposite its primary.
+    Counterpart of SKILL lriI3SpiralRun / rfgeom.spiral_run.  ``rings`` holds
+    one entry per FULL turn and is inset by exactly one pitch per turn, so
+    both halves of a turn share the same (a, b, c) and the winding steps in
+    one pitch per turn as the rfgeom law requires.  Within a turn the two
+    halves are joined by a jog across the coil axis; between turns the jog is
+    a 45 deg diagonal across that axis stepping inward one pitch -- the
+    turn-change crossing.  ``arm=-1`` is the 180 deg rotation of ``arm=+1``,
+    which is how a transformer secondary sits opposite its primary.
+
+    ``n_half`` is how many half-rings to draw (default 2 per ring) -- an odd
+    value gives a legal half turn.
     """
     e = lri_i3_cross_gap(w, s, p)
     xe = xj + e
@@ -787,10 +792,11 @@ def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm):
     if lmax < 0.0:
         raise ValueError(
             "45° 跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" % lmax)
-    N = len(rings)
+    N = (2 * len(rings)) if n_half is None else int(n_half)
     pts = None
     for k in range(N):
-        a, b, c = rings[k]
+        # both halves of a turn live on the same ring -> one pitch per turn
+        a, b, c = rings[k // 2]
         kside = arm * (1 if k % 2 == 0 else -1)
         last = (k == N - 1)
         x_end = xj if last else xe
@@ -805,7 +811,8 @@ def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm):
         if last:
             break
         y_end = -b if k % 2 == 0 else b
-        y_next = -(b - p) if k % 2 == 0 else (b - p)
+        _a2, b2, _c2 = rings[min((k + 1) // 2, len(rings) - 1)]
+        y_next = b2 if (k + 1) % 2 == 0 else -b2
         jog = lri_dedup([(kside * xe, y_end), (kside * xj, y_end),
                          (-kside * xj, y_next), (-kside * xe, y_next)])
         pts = pts + jog[1:]
@@ -835,16 +842,18 @@ def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
     for _t in (np_turns, ns_turns):
         if abs(2.0 * float(_t) - round(2.0 * float(_t))) > 1e-6:
             raise ValueError("np/ns=%.3f 必须是 0.5 的整数倍（半圈）" % float(_t))
-    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, 2.0 * float(np_turns), chamfer)
+    nh_p = int(round(2.0 * float(np_turns)))
+    nh_s = int(round(2.0 * float(ns_turns)))
+    rings_p, p, nP = lri_i3_rings(rx, ry, w, s, (nh_p + 1) // 2, chamfer)
     rs = max(0, int(round(float(shrink))))
     rings_s, p_s, nS = lri_i3_rings(max(0.0, rx - rs * p),
                                     max(0.0, ry - rs * p),
-                                    w, s, 2.0 * float(ns_turns), chamfer)
+                                    w, s, (nh_s + 1) // 2, chamfer)
     if abs(p_s - p) > 1e-9:
         raise ValueError("primary/secondary pitch mismatch")
     xj = p / 2.0
-    p_pts = lri_i3_spiral_run(rings_p, p, xj, xj, w, s, +1)
-    s_pts = lri_i3_spiral_run(rings_s, p, xj, xj, w, s, -1)
+    p_pts = lri_i3_spiral_run(rings_p, p, xj, xj, w, s, +1, n_half=nh_p)
+    s_pts = lri_i3_spiral_run(rings_s, p, xj, xj, w, s, -1, n_half=nh_s)
     p_out, s_out = p_pts[0], s_pts[0]
     p_in, s_in = p_pts[-1], s_pts[-1]
     p_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
@@ -888,17 +897,22 @@ def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     """
     if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
         raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    rings, p, N = lri_i3_rings(rx, ry, w, s, 2.0 * float(n), chamfer)
+    nh = int(round(2.0 * float(n)))
+    rings, p, N = lri_i3_rings(rx, ry, w, s, (nh + 1) // 2, chamfer)
     a0, b0, _c0 = rings[0]
     xj = p / 2.0
-    pts = lri_i3_spiral_run(rings, p, xj, xj, w, s, +1)
+    pts = lri_i3_spiral_run(rings, p, xj, xj, w, s, +1, n_half=nh)
     p_out, p_in = pts[0], pts[-1]
     out_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
+    # inner end is buried in the turns -> its lead escapes on the under layer
+    # (the radial underpass of the reference layout), flush with the coil edge
     sgn = 1.0 if p_in[1] >= 0.0 else -1.0
-    in_lead = [p_in, (p_in[0], p_in[1] + sgn * lead_len)]
-    tops = [pts, out_lead, in_lead]
+    in_tip = (p_in[0], sgn * (ry + float(lead_len)))
+    in_lead = [p_in, in_tip]
+    tops = [pts, out_lead]
     ports = [("p01", out_lead[-1]), ("p02", in_lead[-1])]
-    under = []
+    under = [in_lead]
+    vias = [(p_in[0], p_in[1], w)]
     ct_geom = None
     if ct:
         # the tap leaves on the under metal so it may cross the winding it
@@ -915,7 +929,7 @@ def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     # one pitch narrower than the symmetric coil on the left
     xmin = -(rx - p) if N >= 2 else (p / 2.0 - w / 2.0)
     return {
-        "tops": tops, "under": under, "under_poly": [], "vias": [],
+        "tops": tops, "under": under, "under_poly": [], "vias": vias,
         "ports": ports, "ct": ct_geom, "kind": "se",
         "rings": rings, "N": N, "p": p, "xj": xj,
         "bx": 2.0 * rx, "by": 2.0 * ry,
@@ -940,12 +954,13 @@ def lri_i3_build_f8(rx, ry, n, w, s, gap=None,
     gap = s if gap is None else float(gap)
     if gap < s - 1e-9:
         raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
-    rings, p, N = lri_i3_rings(rx, ry, w, s, 2.0 * float(n), chamfer)
+    nh = int(round(2.0 * float(n)))
+    rings, p, N = lri_i3_rings(rx, ry, w, s, (nh + 1) // 2, chamfer)
     xj = p / 2.0
     dx = rx + gap / 2.0
     # arm=-1 puts lobe A's free end on the far left; its mirror lands on
     # the far right, so both ports sit on the outside of the device
-    run_a = lri_i3_spiral_run(rings, p, xj, xj, w, s, -1)
+    run_a = lri_i3_spiral_run(rings, p, xj, xj, w, s, -1, n_half=nh)
     pts_a = lri_shift(run_a, -dx, 0.0)
     pts_b = lri_mirrorx(pts_a)
     a_in, b_in = pts_a[-1], pts_b[-1]
@@ -981,13 +996,15 @@ def lri_i3_build_diff(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     """
     if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
         raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    nh = 2.0 * float(n)
-    rings_a, p, N = lri_i3_rings(rx, ry, w, s, nh, chamfer)
-    rings_b, _pb, _nb = lri_i3_rings(rx - N * p, ry - N * p, w, s, nh,
+    nh = int(round(2.0 * float(n)))
+    nt = (nh + 1) // 2
+    rings_a, p, N = lri_i3_rings(rx, ry, w, s, nt, chamfer)
+    rings_b, _pb, _nb = lri_i3_rings(rx - N * p, ry - N * p, w, s, nt,
                                      chamfer)
     xj = p / 2.0
-    pts_a = lri_i3_spiral_run(rings_a, p, xj, xj, w, s, +1)
-    pts_b = lri_mirrory(lri_i3_spiral_run(rings_b, p, xj, xj, w, s, +1))
+    pts_a = lri_i3_spiral_run(rings_a, p, xj, xj, w, s, +1, n_half=nh)
+    pts_b = lri_mirrory(lri_i3_spiral_run(rings_b, p, xj, xj, w, s, +1,
+                                          n_half=nh))
     a_in, b_in = pts_a[-1], pts_b[-1]
     bridge = lri_dedup([a_in, (b_in[0], a_in[1]), b_in])
     a_out, b_out = pts_a[0], pts_b[0]

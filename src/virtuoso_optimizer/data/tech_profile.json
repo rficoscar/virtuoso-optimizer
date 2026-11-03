@@ -6,40 +6,38 @@
   "_doc_drc": "参数级自检阈值（不是 sign-off DRC）：min_w/max_w 金属宽、min_s 间距、min_area 按层最小面积、via 的 cut/spacing/enclosure。按你的 PDK 规则填写。",
   "_doc_flow": "可选。显式给出叠层流程后，工艺门禁会额外校验顺序/通孔/间距/通孔电阻，默认只告警。形如 {\"metals\": [\"M1\",\"M2\",...], \"vias\": [[\"M1\",\"M2\",\"V1\"], ...], \"gaps\": [[\"M1\",\"M2\",0.35], ...], \"via_res\": {\"V1\": 1.1}, \"strict\": false}；strict 或顶层 strict_flow=true 时把 errors 升级为阻断。横截面绘制另认 gds / via_gds / text（层名或通孔名 -> GDS 层号）。",
   "_doc_proc": "layermap / proc / cds.lib 留空表示现场自动探查（*.layermap、*.proc、cds.lib）；也可用环境变量 LIBRF_LAYERMAP / LIBRF_PROC / LIBRF_CDSSETUP 指定。",
-  "name": "Generic RF CMOS (template)",
-  "techlib": "RFCMOS",
+  "name": "DEMO_2M_MIN (bundled demo process)",
+  "techlib": "demo2m_tech",
   "techlib_dir": "",
   "layermap": "",
   "proc": "",
   "layers": {
-    "spiral": "M5",
-    "underpass": "M4",
-    "route": "M3",
-    "ground": "M3",
-    "via_sp": "V4",
-    "via_un": "V3",
-    "marker": "MARKER"
+    "spiral": "M2",
+    "underpass": "M1",
+    "route": "M2",
+    "ground": "M2",
+    "via_sp": "V1",
+    "via_un": "V1",
+    "marker": "INDMY"
   },
   "text": {
-    "M5": "M5TXT",
-    "M4": "M4TXT",
-    "M3": "M3TXT",
-    "M2": "M2TXT",
-    "M1": "M1TXT"
+    "M2": "MnTXT",
+    "M1": "MnTXT",
+    "V1": "MnTXT",
+    "INDMY": "MnTXT"
   },
   "drc": {
-    "min_w": 1.0,
-    "max_w": 30.0,
-    "min_s": 1.0,
+    "min_w": 0.2,
+    "max_w": 10.0,
+    "min_s": 0.2,
     "min_area": {
-      "M5": 4.0,
-      "M4": 4.0,
-      "M3": 4.0
+      "M2": 0.0,
+      "M1": 0.0
     },
     "via": {
-      "cut": 0.5,
-      "spacing": 0.5,
-      "enclosure": 0.2
+      "cut": 0.2,
+      "spacing": 0.2,
+      "enclosure": 0.05
     }
   }
 }

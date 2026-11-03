@@ -51,7 +51,8 @@ DEF_EMX_TIMEOUT = 1800
 
 DEF_SKILL_TIMEOUT = 600
 
-LAYERMAP_NAMES = ("*.layermap", "layer.map", "layermap.txt", "layermap")
+LAYERMAP_NAMES = ("*.layermap", "layer.map", "layermap.txt", "layermap",
+                  "*.map")
 
 PROC_NAMES = ("*.proc",)
 

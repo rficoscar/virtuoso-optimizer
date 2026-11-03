@@ -3694,8 +3694,8 @@ procedure(lriBuildInd(cv req)
 ; starting side; arm=-1 is the 180-degree rotation of arm=+1, which is how
 ; the transformer secondary sits opposite its primary.  Mirrors
 ; rfgeom.spiral_run.
-procedure(lriI3SpiralRun(rings p xj xLead w s arm)
-  prog((e xe a0 c0 aN cN lmax pts k a b c side last xEnd xl seg yEnd yNext jog)
+procedure(lriI3SpiralRun(rings p xj xLead w s arm nHalf)
+  prog((e xe a0 c0 aN cN lmax pts k a b c side last xEnd xl seg yEnd yNext jog nh rr bb)
     e = lriI3CrossGap(w s p)
     xe = xj + e
     a0 = car(car(rings))     c0 = caddr(car(rings))
@@ -3705,11 +3705,15 @@ procedure(lriI3SpiralRun(rings p xj xLead w s arm)
       librfErr(sprintf(nil
         "lri[i3]: 45 度跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" lmax))
       return(nil))
+    ; rings 一环一圈，逐圈内偏一个 pitch；nHalf 是半圈环数（每圈 2 个）
+    nh = if(nHalf == nil || nHalf == 0 then 2 * length(rings) else nHalf)
     pts = nil
-    for(k 0 length(rings) - 1
-      a = car(nth(k rings)) b = cadr(nth(k rings)) c = caddr(nth(k rings))
+    for(k 0 nh - 1
+      ; 一圈的两个半圈共用同一个 ring -> 每匝只内偏一个 pitch
+      rr = nth(fix(k / 2.0) rings)
+      a = car(rr) b = cadr(rr) c = caddr(rr)
       side = arm * if(mod(k 2) == 0 then 1 else -1)
-      last = (k == length(rings) - 1)
+      last = (k == nh - 1)
       xEnd = if(last then xj else xe)
       xl   = if(k == 0 then xLead else xEnd)
       seg = lriI3HalfXY(a b c xl xEnd side)
@@ -3718,7 +3722,9 @@ procedure(lriI3SpiralRun(rings p xj xLead w s arm)
       pts = if(pts then append(pts cdr(seg)) else seg)
       unless(last
         yEnd  = if(mod(k 2) == 0 then 0.0 - b else b)
-        yNext = if(mod(k 2) == 0 then 0.0 - (b - p) else (b - p))
+        rr = nth(min(fix((k + 1) / 2.0) length(rings) - 1) rings)
+        bb = cadr(rr)
+        yNext = if(mod(k + 1 2) == 0 then bb else 0.0 - bb)
         jog = list(list(side * xe yEnd) list(side * xj yEnd)
                    list(0.0 - side * xj yNext) list(0.0 - side * xe yNext))
         pts = append(pts cdr(jog))))
@@ -3781,11 +3787,12 @@ procedure(lriI3BuildSe(cv req)
     when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
       librfErr(sprintf(nil "lri[i3]: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
       return(nil))
-    q = lriI3Rings(rx ry w s 2.0 * n chamfer)
+    ; 一圈两个半圈环，但 ring 一环一圈 -> 取 ceil(半圈数/2) 个 ring
+    q = lriI3Rings(rx ry w s fix((2.0 * n + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     rings = nth(0 q)  p = nth(1 q)  N = nth(2 q)
     xj = p / 2.0
-    pts = lriI3SpiralRun(rings p xj xj w s 1)
+    pts = lriI3SpiralRun(rings p xj xj w s 1 fix(2.0 * n))
     when(pts == nil  return(nil))
     M  = librfMetalPair(librfLyr("spiral"))
     TS = librfTxtPair(librfLyr("spiral"))
@@ -3843,14 +3850,14 @@ procedure(lriI3BuildF8(cv req)
     when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
       librfErr(sprintf(nil "f8: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
       return(nil))
-    q = lriI3Rings(rx ry w s 2.0 * n chamfer)
+    q = lriI3Rings(rx ry w s fix((2.0 * n + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     rings = nth(0 q)  p = nth(1 q)  N = nth(2 q)
     xj = p / 2.0
     dx = rx + gap / 2.0
     negDx = 0.0 - dx
     ; arm=-1 把左瓣的自由端放在最左，镜像后右瓣在最右，两个端口都在外侧
-    runA = lriI3SpiralRun(rings p xj xj w s -1)
+    runA = lriI3SpiralRun(rings p xj xj w s -1 fix(2.0 * n))
     when(runA == nil  return(nil))
     ptsA = lriShift(runA negDx 0.0)
     ptsB = lriMirrorX(ptsA)
@@ -3909,17 +3916,17 @@ procedure(lriI3BuildDiff(cv req)
     when(abs(2.0 * n - round(2.0 * n)) > 1.0e-6
       librfErr(sprintf(nil "diff: n=%.3f 必须是 0.5 的整数倍（半圈）" n))
       return(nil))
-    nh = 2.0 * n
-    q = lriI3Rings(rx ry w s nh chamfer)
+    nh = fix(2.0 * n)
+    q = lriI3Rings(rx ry w s fix((nh + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     ringsA = nth(0 q)  p = nth(1 q)  N = nth(2 q)
-    q = lriI3Rings(rx - N * p  ry - N * p  w s nh chamfer)
+    q = lriI3Rings(rx - N * p  ry - N * p  w s fix((nh + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     ringsB = nth(0 q)
     xj = p / 2.0
-    ptsA = lriI3SpiralRun(ringsA p xj xj w s 1)
+    ptsA = lriI3SpiralRun(ringsA p xj xj w s 1 nh)
     when(ptsA == nil  return(nil))
-    ptsB = lriMirrorY(lriI3SpiralRun(ringsB p xj xj w s 1))
+    ptsB = lriMirrorY(lriI3SpiralRun(ringsB p xj xj w s 1 nh))
     M  = librfMetalPair(librfLyr("spiral"))
     ML = librfMetalPair(librfLyr("underpass"))
     TS = librfTxtPair(librfLyr("spiral"))
@@ -3978,17 +3985,17 @@ procedure(lriI3BuildXfmr(cv req)
       when(abs(2.0 * _t - round(2.0 * _t)) > 1.0e-6
         librfErr(sprintf(nil "xfmr: np/ns=%.3f 必须是 0.5 的整数倍（半圈）" _t))
         return(nil)))
-    q = lriI3Rings(rx ry w s 2.0 * np chamfer)
+    q = lriI3Rings(rx ry w s fix((2.0 * np + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     ringsP = nth(0 q)  p = nth(1 q)  nP = nth(2 q)
     q = lriI3Rings(max(0.0 rx - shrink * p) max(0.0 ry - shrink * p)
-                   w s 2.0 * ns chamfer)
+                   w s fix((2.0 * ns + 1) / 2.0) chamfer)
     when(q == nil  return(nil))
     ringsS = nth(0 q)  nS = nth(2 q)
     xj = p / 2.0
-    pPts = lriI3SpiralRun(ringsP p xj xj w s 1)
+    pPts = lriI3SpiralRun(ringsP p xj xj w s 1 fix(2.0 * np))
     when(pPts == nil  return(nil))
-    sPts = lriI3SpiralRun(ringsS p xj xj w s -1)
+    sPts = lriI3SpiralRun(ringsS p xj xj w s -1 fix(2.0 * ns))
     when(sPts == nil  return(nil))
     M  = librfMetalPair(librfLyr("spiral"))
     ML = librfMetalPair(librfLyr("underpass"))
