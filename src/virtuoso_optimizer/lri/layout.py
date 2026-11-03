@@ -239,10 +239,14 @@ def lri_sym_under_poly(pts, w):
         (x4, y2 - sg * h),
         (x4, yb),
         (x2 - back, yb),
-        # abs(): the end flare must not depend on the sign of (x1-x0), else
-        # one side of the crossing gets a shorter band end and its via column
-        # sticks out (G4b floating vias).  Symmetric in x by construction.
-        (x0, y0 + sg * (h + back + abs(x1 - x0))),
+        # Inner miter of the end flare, then close the band at y0 +/- h: the
+        # end has to be the *equal-width* band, i.e. exactly lri_sweep() of
+        # this polyline.  The old tail y0 + sg*(h + back + |x1-x0|) added
+        # |x1-x0| - back too much, so every underpass painted an extra wedge
+        # (~55 um2 at w=8/s=3) that spilled TM1 under the next ring's TM2.
+        # The miter sign follows (x1-x0) so the band end never depends on it.
+        (x1 - (back if x1 >= x0 else -back), y0 + sg * h),
+        (x0, y0 + sg * h),
     ]
 
 # ---------------------------------------------------------------- i3 kernel

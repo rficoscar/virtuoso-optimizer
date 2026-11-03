@@ -1660,10 +1660,13 @@ procedure(lriUnderPolyPts(pts w)
       list(x4 (y2 - sg * h))
       list(x4 yb)
       list((x2 - back) yb)
-      ; abs(): the end flare must not depend on the sign of (x1-x0), else one
-      ; side of the crossing gets a shorter band end and its via column sticks
-      ; out (G4b floating vias).  Symmetric in x by construction.
-      list(x0 (y0 + sg * (h + back + abs(x1 - x0)))))))
+      ; Inner miter of the end flare, then close the band at y0 +/- h: the end
+      ; has to be the equal-width band (= lriSweep of this polyline).  The old
+      ; tail y0 + sg*(h + back + abs(x1-x0)) added |x1-x0| - back too much and
+      ; painted an extra wedge of TM1 under the next ring's TM2.  The miter
+      ; sign follows (x1-x0) so the band end never depends on it.
+      list((x1 - (if(x1 >= x0 then back else -back))) (y0 + sg * h))
+      list(x0 (y0 + sg * h)))))
 
 procedure(lriPtTrimmed(pt pts)
   let((hit)
