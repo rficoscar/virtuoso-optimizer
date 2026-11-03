@@ -176,7 +176,7 @@ def _selftest():
     gn = lri_norm_geom({"kind": "se", "seam": "N", "dout": 160, "n": 3,
                         "w": 10, "s": 3.2})
     check("lri seam map N->top", gn.get("seam") == "top")
-    for _kind in ("se", "diff", "f8", "sym"):
+    for _kind in ("se", "diff", "sym"):
         _n = 3 if _kind == "sym" else 2.5
         # diff 是两组同心绕线，内圈整套缩在内圈里，占地约两倍
         _dout = 320 if _kind == "diff" else 220

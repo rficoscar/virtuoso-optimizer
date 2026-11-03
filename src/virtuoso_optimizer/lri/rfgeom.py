@@ -207,17 +207,20 @@ def build_sym(rx, ry, n, w, s, chamfer=None, lead_len=20.0, lead_gap=None,
             # endpoints twice and drags each arm's ring ends onto the opposite
             # side, laying a spurious bar across the lead row (shorts p01/p02)
             # and another across the first crossing (shorts the two coils).
-            x_end = (xj if last else xe)
+            # entry = where this ring is entered (lead, or a crossing ->
+            # pulled out to xe); exit = the crossing to the next ring (xe) or,
+            # on the innermost ring, the bridge (xj).  Even rings run
+            # top -> bottom, odd rings bottom -> top.  The innermost ring's
+            # ENTRY sits next to a crossing and must stay at xe; giving it xj
+            # leaves only (p-w)/sqrt(2)-ish clearance to the diagonal.
+            x_exit = (xj if last else xe)
             if term == 180 and k == 0:
-                half = quarter_from_mid(a, b, c, x_end, side)
+                half = quarter_from_mid(a, b, c, x_exit, side)
             else:
-                # The free end of the innermost ring must land on xj to meet
-                # the bridge; only ring changes use the pulled-out xe.
-                x_lead = (xport if (k == 0 and term == 0)
-                          else (xj if last else xe))
-                half = (half_top_to_bot(a, b, c, x_lead, x_end, side)
+                x_entry = (xport if term == 0 else xj) if k == 0 else xe
+                half = (half_top_to_bot(a, b, c, x_entry, x_exit, side)
                         if k % 2 == 0 else
-                        half_bot_to_top(a, b, c, x_end, x_lead, side))
+                        half_bot_to_top(a, b, c, x_entry, x_exit, side))
             run = run + half[1:] if run else list(half)
             if last:
                 break
@@ -289,15 +292,15 @@ def point_at(pts, frac):
 
 # ------------------------------------------------------------------ single ended
 def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
-    """Single-ended octagonal inductor: one inward spiral on one layer.
+    """Single-ended octagonal inductor: one inward spiral on the main metal.
 
-    The winding follows the rfgeom law -- concentric octagons one pitch
-    apart, turn changes as symmetric 45 deg X crossings on the coil axis --
-    and, being a single winding, never crosses itself, so it needs no
-    underpass at all.  Leads are straight and axis aligned: p01 goes up from
-    the outer end, p02 leaves the inner end along that end's own y sign (up
-    when the last half-ring finishes on the top, down when it finishes on
-    the bottom), so the two never collide whatever the turn count.
+    The winding uses the stepped turn change (the legacy ``lriSpiral``
+    staircase): every ring is a closed concentric octagon and the winding
+    steps inward one pitch per turn on the left edge, so it never crosses
+    itself and needs no underpass in the winding itself.  p01 leaves the
+    bottom-centre outer end straight down; p02 is the inner end on the
+    innermost ring's left (half turn: right) edge and escapes straight out
+    through x = +-rx on the under layer, joined by a via pad.
 
     ``ct`` adds a centre tap: a via pad at the winding's mid-length point
     plus a straight radial stub on the "ct" layer out past the coil edge.
@@ -315,25 +318,25 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
     rings, pitch, nring = ring_family(rx, ry, w, s, (n_half + 1) // 2,
                                       chamfer)
     a0, b0, _c0 = rings[0]
-    xj = pitch / 2.0
-    pts, inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=+1,
-                          n_half=n_half)
+    pts, inf = spiral_step(rings, pitch, n_half=n_half, arm=+1)
     g = Geo()
     g.path(pts, w, "main")
     p_out, p_in = pts[0], pts[-1]
-    g.path([p_out, (p_out[0], p_out[1] + lead_len)], w, "main")
-    g.pin("p01", p_out[0], p_out[1] + lead_len, "N", "main")
-    # The inner end is buried inside the turns, so its lead escapes on the
-    # under layer -- the radial underpass of the reference layout -- and the
-    # port sits flush with the coil edge.  A via pad at the winding's inner
-    # end joins the two layers.
-    sgn = 1.0 if p_in[1] >= 0.0 else -1.0
-    y_tip = sgn * (ry + float(lead_len))
-    g.viapad(p_in[0] - w / 2.0, min(p_in[1], p_in[1] + sgn * w),
-             p_in[0] + w / 2.0, max(p_in[1], p_in[1] + sgn * w),
-             ("under", "main"))
-    g.path([p_in, (p_in[0], y_tip)], w, "under")
-    g.pin("p02", p_in[0], y_tip, "N" if sgn > 0.0 else "S", "under")
+    # the outer end sits at the bottom edge centre -- run its lead straight
+    # down out of the coil so it does not cross the winding
+    g.path([p_out, (p_out[0], p_out[1] - lead_len)], w, "main")
+    g.pin("p01", p_out[0], p_out[1] - lead_len, "S", "main")
+    # The inner end sits on the innermost ring's left (or, for a half turn,
+    # right) edge and is buried inside the turns, so its lead escapes on
+    # the under layer -- the radial underpass of the reference layout --
+    # straight out through x = +-rx.  A via pad at the winding's inner end
+    # joins the two layers.
+    sgn = -1.0 if p_in[0] < 0.0 else 1.0
+    x_tip = sgn * (rx + float(lead_len))
+    g.viapad(p_in[0] - w / 2.0, p_in[1] - w / 2.0,
+             p_in[0] + w / 2.0, p_in[1] + w / 2.0, ("under", "main"))
+    g.path([p_in, (x_tip, p_in[1])], w, "under")
+    g.pin("p02", x_tip, p_in[1], "W" if sgn > 0.0 else "E", "under")
     if ct:
         mid = point_at(pts, 0.5)
         sgc = 1.0 if mid[1] >= 0.0 else -1.0
@@ -343,8 +346,8 @@ def build_se(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0, ct_len=20.0):
                  ("ct", "main"))
         g.path([mid, (mid[0], y_tip)], w, "ct")
         g.pin("ct1", mid[0], y_tip, "N" if sgc > 0.0 else "S", "ct")
-    return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
-               "e": inf["e"], "p_out": p_out, "p_in": p_in}
+    return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": pitch / 2.0,
+               "e": cross_gap(w, s, pitch), "p_out": p_out, "p_in": p_in}
 
 
 
@@ -378,23 +381,30 @@ def build_diff(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0,
     rings_b, _pb, _Nb = ring_family(rx - N * pitch, ry - N * pitch,
                                     w, s, nt, chamfer)
     xj = pitch / 2.0
-    pts_a, _ia = spiral_run(rings_a, pitch, xj, w, s, chamfer, arm=+1,
-                            n_half=nh)
-    pts_b = mirror_y(spiral_run(rings_b, pitch, xj, w, s, chamfer, arm=+1,
-                                n_half=nh)[0])
+    pts_a, _ia = spiral_step(rings_a, pitch, n_half=nh, arm=+1)
+    # coil B is the y-mirror of coil A (counter-wound); on a stepped
+    # staircase that mirror keeps the two in disjoint radial ranges, so
+    # neither one's turn changes cross the other
+    pts_b = mirror_y(spiral_step(rings_b, pitch, n_half=nh, arm=+1)[0])
     g = Geo()
     g.path(pts_a, w, "main")
     g.path(pts_b, w, "main")
     a_in, b_in = pts_a[-1], pts_b[-1]
+    # the two inner ends sit on the coils' left edges, mirror images about
+    # y = 0; join them on the under metal -- the bridge has to cross the
+    # outer coil's left-edge staircase on its way across
     g.path(dedup([a_in, (b_in[0], a_in[1]), b_in]), w, "under")
     for p in (a_in, b_in):
         g.viapad(p[0] - w / 2.0, p[1] - w / 2.0,
                  p[0] + w / 2.0, p[1] + w / 2.0, ("under", "main"))
     a_out, b_out = pts_a[0], pts_b[0]
-    g.path([a_out, (a_out[0], a_out[1] + lead_len)], w, "main")
-    g.pin("p01", a_out[0], a_out[1] + lead_len, "N", "main")
-    g.path([b_out, (b_out[0], b_out[1] - lead_len)], w, "main")
-    g.pin("p02", b_out[0], b_out[1] - lead_len, "S", "main")
+    # a_out sits at the bottom edge centre and b_out (the y-mirror) at the
+    # top edge centre; each lead runs straight AWAY from the coil so it
+    # never crosses a winding
+    g.path([a_out, (a_out[0], a_out[1] - lead_len)], w, "main")
+    g.pin("p01", a_out[0], a_out[1] - lead_len, "S", "main")
+    g.path([b_out, (b_out[0], b_out[1] + lead_len)], w, "main")
+    g.pin("p02", b_out[0], b_out[1] + lead_len, "N", "main")
     if ct:
         jx, jy = (b_in[0], a_in[1])
         sgn = 1.0 if jy >= 0.0 else -1.0
@@ -407,106 +417,74 @@ def build_diff(rx, ry, n, w, s, chamfer=None, lead_len=20.0, ct=0,
                "xj": xj, "p_out": (a_out, b_out), "p_in": (a_in, b_in)}
 
 
-# ------------------------------------------------------------------ figure 8
-def build_f8(rx, ry, n, w, s, gap=None, chamfer=None, lead_len=20.0):
-    """Figure-8 inductor: two counter-wound lobes in series.
-
-    Each lobe is one inward spiral following the rfgeom law.  The right
-    lobe is the x-mirror of the left one, so the two are wound in opposite
-    senses and their fluxes add -- the point of a figure-8 -- and the
-    finished device is x-mirror symmetric.  The inner ends meet at the coil
-    centre through an underpass; the bridge has to leave lobe A across its
-    own outer ring, so it lives on its own layer and taps back with a via
-    block at each end.
-
-    ``rx``/``ry`` are PER-LOBE half extents, ``gap`` the spacing between the
-    two lobes, ``n`` the turns of each lobe (full turns; half turns legal).
-    """
-    if chamfer is None:
-        chamfer = 2.0 - SQ2
-    gap = s if gap is None else float(gap)
-    if gap < s - 1e-9:
-        raise GeomError("gap=%.3f < s=%.3f" % (gap, s))
-    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
-        raise GeomError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    n_half = int(round(2.0 * float(n)))
-    rings, pitch, nring = ring_family(rx, ry, w, s, (n_half + 1) // 2,
-                                      chamfer)
-    a0, b0, _c0 = rings[0]
-    xj = pitch / 2.0
-    dx = rx + gap / 2.0
-    # arm=-1 puts lobe A's free end on the far left; its mirror lands on the
-    # far right, so both ports sit on the outside of the device
-    run_a, _inf = spiral_run(rings, pitch, xj, w, s, chamfer, arm=-1,
-                             n_half=n_half)
-    pts_a = shift(run_a, -dx, 0.0)
-    pts_b = mirror_x(pts_a)
-    g = Geo()
-    g.path(pts_a, w, "main")
-    g.path(pts_b, w, "main")
-    a_in, b_in = pts_a[-1], pts_b[-1]
-    bridge = dedup([a_in, (a_in[0], 0.0), (0.0, 0.0), (b_in[0], 0.0), b_in])
-    g.path(bridge, w, "under")
-    for p in (a_in, b_in):
-        g.viapad(p[0] - w / 2.0, p[1] - w / 2.0,
-                 p[0] + w / 2.0, p[1] + w / 2.0, ("under", "main"))
-    for pts, name in ((pts_a, "p01"), (pts_b, "p02")):
-        p0 = pts[0]
-        g.path([p0, (p0[0], p0[1] + lead_len)], w, "main")
-        g.pin(name, p0[0], p0[1] + lead_len, "N", "main")
-    return g, {"rings": rings, "pitch": pitch, "N": nring, "xj": xj,
-               "dx": dx, "p_out": (pts_a[0], pts_b[0]),
-               "p_in": (a_in, b_in)}
-
-
 # ------------------------------------------------------------------ single winding
-def spiral_run(rings, pitch, x_lead, w, s, chamfer, term=0, arm=+1,
-               n_half=None):
-    """One inward spiral on a SINGLE layer: each turn is a full concentric
-    octagon drawn as two half-rings.
+def spiral_step(rings, pitch, n_half=None, arm=+1):
+    """One inward spiral on a SINGLE layer, stepped turn change.
 
-    ``rings`` holds one entry per FULL turn and is inset by exactly one pitch
-    per turn, so both halves of a turn share the same (a, b, c).  Within a
-    turn the two halves sit on opposite sides of the coil axis and are joined
-    by a jog across that axis; between turns the jog is a 45 deg diagonal
-    across the axis stepping inward one pitch -- the turn-change crossing.
-    ``arm`` picks the starting side; the -1 case is the 180 deg rotation of
-    the +1 case, which is how the transformer secondary sits opposite its
-    primary.
+    Every ring is a closed concentric octagon drawn once.  On the left edge
+    the winding steps inward by one pitch per turn: ring 0 descends the
+    left edge to ring 1's bottom-left corner height and jogs inward; each
+    later ring is entered at that step height on its own left edge (which
+    sits above its bottom-left corner because the staircase climbs one
+    pitch per turn), goes DOWN to the corner, around the bottom/right/top,
+    and back up the left edge to the next step height, where it jogs
+    inward again.  Climbing exactly one pitch per turn means no left-edge
+    portion is ever retraced, and because the turn change never crosses
+    the winding a single spiral needs no underpass -- this is the legacy
+    ``lriSpiral`` staircase.
 
-    ``n_half`` is how many half-rings to draw (default 2 per ring) -- an odd
-    value gives a legal half turn.
+    ``n_half`` counts half-turns (default 2 per ring).  An even value ends
+    the winding on the left edge at the staircase top; an odd value ends
+    it at the top-left corner of the last ring.  ``arm = -1`` mirrors the
+    whole spiral left/right (staircase on the right edge) so a transformer
+    secondary can sit opposite its primary.
 
-    Returns (pts, info).  ``pts`` is one polyline.
+    Returns (pts, info).  ``pts`` starts at the bottom-centre of the outer
+    ring and ends on the innermost ring's left edge.
     """
     n_half = (2 * len(rings)) if n_half is None else int(n_half)
+    nt = len(rings)
     a0, b0, c0 = rings[0]
-    xj = pitch / 2.0
-    e = cross_gap(w, s, pitch)
-    xe = xj + e
-    lmax = min(a0 - c0, rings[-1][0] - rings[-1][2]) - xe
-    if lmax < 0.0:
-        raise GeomError(
-            "45 度跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" % lmax)
-    pts = []
-    for k in range(n_half):
-        # both halves of a turn live on the same ring -> one pitch per turn
-        a, b, c = rings[k // 2]
-        side = arm * (1 if k % 2 == 0 else -1)
-        last = (k == n_half - 1)
-        x_end = (xj if last else xe)
-        xl = (x_lead if k == 0 else (xj if last else xe))
-        half = (half_top_to_bot(a, b, c, xl, x_end, side) if k % 2 == 0
-                else half_bot_to_top(a, b, c, x_end, xl, side))
-        pts = pts + half[1:] if pts else list(half)
-        if last:
-            break
-        y_end = -b if k % 2 == 0 else b
-        _a2, b2, _c2 = rings[min((k + 1) // 2, len(rings) - 1)]
-        y_next = b2 if (k + 1) % 2 == 0 else -b2
-        pts = pts + dedup([(side * xe, y_end), (side * xj, y_end),
-                           (-side * xj, y_next), (-side * xe, y_next)])[1:]
-    return pts, {"xj": xj, "xe": xe, "e": e, "N": n_half}
+    pts = [(0.0, -b0), (a0 - c0, -b0), (a0, c0 - b0), (a0, b0 - c0),
+           (a0 - c0, b0), (c0 - a0, b0), (-a0, b0 - c0)]
+    if nt == 1:
+        # single ring: descend the left edge to the bottom-left corner and
+        # along the bottom edge to the centre (or halfway for a half turn)
+        pts += [(-a0, c0 - b0), (c0 - a0, -b0), (0.0, -b0)]
+    else:
+        # descend ring 0's left edge to ring 1's bottom-left corner height
+        # and jog inward -- the staircase climbs p per turn
+        y_in = rings[1][2] - rings[1][1]
+        pts += [(-a0, y_in), (-rings[1][0], y_in)]
+        for k in range(1, nt):
+            a, b, c = rings[k]
+            last = (k == nt - 1)
+            # entered at (-a, y_in) mid-edge.  A half ring covers only the
+            # bottom half: down to the bottom-left corner, along the bottom
+            # edge, up the right edge to y_in + pitch (the staircase climbs
+            # one pitch per half turn too).
+            if 2 * k + 1 >= n_half:
+                # half ring: down to the bottom-left corner, along the
+                # bottom edge, up the right edge to -y_in -- the mirror of
+                # the entry height, so the winding stays balanced
+                pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
+                        (a, -y_in)]
+                break
+            # full ring: continue around bottom/right/top and back up the
+            # left edge
+            pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
+                    (a, b - c), (a - c, b), (c - a, b), (-a, b - c)]
+            if last:
+                # last full ring: a full turn entered at y_in ends one
+                # pitch above it on the same left edge
+                pts += [(-a, y_in + pitch)]
+                break
+            y_next = y_in + pitch
+            pts += [(-a, y_next), (-rings[k + 1][0], y_next)]
+            y_in = y_next
+    if arm < 0:
+        pts = [(-x, y) for (x, y) in pts]
+    return dedup(pts), {"N": n_half}
 
 
 def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
@@ -552,27 +530,28 @@ def build_xfmr(rx, ry, np_turns, ns_turns, w, s, gap=None, chamfer=None,
     a0, b0, _c0 = rings_p[0]
     as0, bs0, _cs0 = rings_s[0]
 
-    p_pts, p_inf = spiral_run(rings_p, pitch, xj, w, s, chamfer, arm=+1,
-                              n_half=nh_p)
-    s_pts, s_inf = spiral_run(rings_s, pitch, xj, w, s, chamfer, arm=-1,
-                              n_half=nh_s)
+    p_pts, p_inf = spiral_step(rings_p, pitch, n_half=nh_p, arm=+1)
+    s_pts, s_inf = spiral_step(rings_s, pitch, n_half=nh_s, arm=-1)
     g.path(p_pts, w, "main")
     g.path(s_pts, w, "aux")
 
-    # outer leads: straight, axis aligned, flush with the coil
+    # outer leads: straight, axis aligned, flush with the coil.  The
+    # stepped spiral starts at the bottom-centre of the outer ring, so the
+    # lead runs straight down out of the coil.
     p_out, s_out = p_pts[0], s_pts[0]
-    g.path([(p_out[0], p_out[1]), (p_out[0], p_out[1] + 20.0)], w, "main")
-    g.path([(s_out[0], s_out[1]), (s_out[0], s_out[1] + 20.0)], w, "aux")
-    g.pin("p01", p_out[0], p_out[1] + 20.0, "N", "main")
-    g.pin("p03", s_out[0], s_out[1] + 20.0, "N", "aux")
-    # inner ends terminate on the coil axis
+    g.path([p_out, (p_out[0], p_out[1] - 20.0)], w, "main")
+    g.path([s_out, (s_out[0], s_out[1] - 20.0)], w, "aux")
+    g.pin("p01", p_out[0], p_out[1] - 20.0, "S", "main")
+    g.pin("p03", s_out[0], s_out[1] - 20.0, "S", "aux")
+    # inner ends sit on the innermost ring's edge (left for the primary,
+    # right for the arm=-1 secondary) -- terminate them in place
     p_in, s_in = p_pts[-1], s_pts[-1]
-    g.pin("p02", p_in[0], p_in[1], "S", "main")
-    g.pin("p04", s_in[0], s_in[1], "S", "aux")
+    g.pin("p02", p_in[0], p_in[1], "W", "main")
+    g.pin("p04", s_in[0], s_in[1], "E", "aux")
     if ct:
         y_tip = s_in[1] + (20.0 if s_in[1] >= 0.0 else -20.0)
-        # start at s_in itself, not on the axis -- the axis point alone would
-        # leave the stub detached from the winding by |s_in.x|
+        # start at s_in itself, not on the axis -- the axis point alone
+        # would leave the stub detached from the winding by |s_in.x|
         g.path([s_in, (0.0, s_in[1]), (0.0, y_tip)], w, "ct")
         g.pin("ct1", 0.0, y_tip, "N" if y_tip > 0 else "S", "ct")
     return g, {"rings_p": rings_p, "rings_s": rings_s, "pitch": pitch,

@@ -280,8 +280,9 @@ def lri_norm_geom(g):
     shape = str(g.get("shape", "rect")).strip().lower() or "rect"
     kind = str(g.get("kind", "se")).strip().lower() or "se"
     if kind in ("figure8", "fig8", "f8"):
+        # 8 字拓扑已删除：保留原值让 lri_validate 明确拒绝，不能悄悄换成 se
         kind = "f8"
-    if kind not in ("se", "diff", "f8"):
+    elif kind not in ("se", "diff"):
         kind = "se"
     if shape in ("octagon", "oct"):
         shape = "oct"
@@ -401,6 +402,8 @@ def lri_validate(g, tech=None):
     s = float(g.get("s", 2.6))
     n = float(g.get("n", 2.5))
     kind = g.get("kind", "se")
+    if kind == "f8":
+        return False, "8 字电感 (f8) 拓扑已删除，请改用 se/diff/sym"
     if min(W, H) <= 0.0 or w <= 0.0 or s <= 0.0:
         return False, "W/H/w/s 必须 > 0"
     if w >= min(W, H):
@@ -417,8 +420,6 @@ def lri_validate(g, tech=None):
                        "最多 %.2f 圈" % (n, W, H, w, s, n_max))
     if n < 1.0:
         return False, "匝数 n 至少 1 圈（不足一圈无法形成螺旋）"
-    if kind == "f8" and min(W, H) - 8.0 <= 0:
-        return False, "f8 的 W 太小"
     try:
         corner = float(g.get("corner") or 0.0)
         if kind == "diff":
@@ -426,15 +427,6 @@ def lri_validate(g, tech=None):
             lri_spiral(W, H, w, s, n, corner, "bottom", 2.0 * p2)
             lri_spiral(W - 2.0 * p2, H - 2.0 * p2, w, s, n, corner,
                        "bottom", 2.0 * p2)
-        elif kind == "f8":
-            gapf = g.get("gap")
-            gapf = 8.0 if gapf in (None, "") else float(gapf)
-            gapf = max(gapf, w + s)
-            d = (W - gapf) / 2.0
-            cf8 = corner
-            if min(a0, b0) > 0.0:
-                cf8 = corner * min((d - w) / 2.0, b0) / min(a0, b0)
-            lri_spiral(d, H, w, s, n / 2.0, cf8, "left")
         else:
             lri_spiral(W, H, w, s, n, corner, g.get("seam", "bottom"))
     except ValueError as exc:
@@ -661,14 +653,19 @@ def lri_i3_arm(rings, p, N, xj, w, s, side, via_edge, stub,
         a, b, c = rings[k]
         kside = side * (1 if k % 2 == 0 else -1)
         last = (k == N - 1)
-        # both abscissae UNSIGNED -- lri_i3_half_xy mirrors by kside.  The
-        # free end of the innermost ring lands on xj to meet the bridge; only
-        # ring changes use the pulled-out xe.
-        x_end = xj if last else xe
-        x_lead = xj if (k == 0 or last) else xe
-        seg = lri_i3_half_xy(a, b, c, x_lead, x_end, kside)
-        if k % 2 == 1:
-            seg = list(reversed(seg))
+        # both abscissae UNSIGNED -- lri_i3_half_xy mirrors by kside.
+        # entry: lead (k == 0) or a crossing (pulled out to xe); exit: the
+        # next crossing (xe) or, on the innermost ring, the bridge (xj).
+        # half_xy takes (x_top, x_bot); odd rings run bottom -> top, so
+        # their entry is the BOTTOM end.  Giving the innermost ring's entry
+        # xj left 0.95 um to the crossing diagonal at s = 3.
+        x_exit = xj if last else xe
+        x_entry = xj if k == 0 else xe
+        if k % 2 == 0:
+            seg = lri_i3_half_xy(a, b, c, x_entry, x_exit, kside)
+        else:
+            seg = list(reversed(
+                lri_i3_half_xy(a, b, c, x_exit, x_entry, kside)))
         run = (run + seg[1:]) if run else list(seg)
         if last:
             break
@@ -769,54 +766,47 @@ def lri_i3_build(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
         "bbox": (-rx, -ry, rx, y_port),
     }
 
-def lri_i3_spiral_run(rings, p, xj, x_lead, w, s, arm, n_half=None):
-    """One inward spiral on a SINGLE layer -> point list.
+def lri_i3_step_run(rings, p, arm, n_half=None):
+    """One inward spiral on a SINGLE layer, stepped turn change -> point list.
 
-    Counterpart of SKILL lriI3SpiralRun / rfgeom.spiral_run.  ``rings`` holds
-    one entry per FULL turn and is inset by exactly one pitch per turn, so
-    both halves of a turn share the same (a, b, c) and the winding steps in
-    one pitch per turn as the rfgeom law requires.  Within a turn the two
-    halves are joined by a jog across the coil axis; between turns the jog is
-    a 45 deg diagonal across that axis stepping inward one pitch -- the
-    turn-change crossing.  ``arm=-1`` is the 180 deg rotation of ``arm=+1``,
-    which is how a transformer secondary sits opposite its primary.
-
-    ``n_half`` is how many half-rings to draw (default 2 per ring) -- an odd
-    value gives a legal half turn.
+    Counterpart of rfgeom.spiral_step and SKILL lriI3StepRun.  Every ring is
+    a closed concentric octagon; on the left edge the winding steps inward
+    one pitch per turn on a climbing staircase, so no left-edge portion is
+    retraced and a single winding never crosses itself -- no underpass is
+    needed.  ``n_half`` counts half-turns (default 2 per ring); an odd
+    value ends on the last ring's right edge at the mirror of its entry
+    height.  ``arm = -1`` mirrors left/right so a transformer secondary
+    sits opposite its primary.
     """
-    e = lri_i3_cross_gap(w, s, p)
-    xe = xj + e
-    a0, _b0, c0 = rings[0]
-    aN, _bN, cN = rings[-1]
-    lmax = min(a0 - c0, aN - cN) - xe
-    if lmax < 0.0:
-        raise ValueError(
-            "45° 跨线放不下 (可用 %.3f)；请增大 rx/ry 或减小 w/s/n" % lmax)
-    N = (2 * len(rings)) if n_half is None else int(n_half)
-    pts = None
-    for k in range(N):
-        # both halves of a turn live on the same ring -> one pitch per turn
-        a, b, c = rings[k // 2]
-        kside = arm * (1 if k % 2 == 0 else -1)
-        last = (k == N - 1)
-        x_end = xj if last else xe
-        # both abscissae UNSIGNED -- lri_i3_half_xy mirrors by kside.  The
-        # free end of the innermost ring lands on xj; only ring changes use
-        # the pulled-out xe.
-        xl = x_lead if k == 0 else (xj if last else xe)
-        seg = lri_i3_half_xy(a, b, c, xl, x_end, kside)
-        if k % 2 == 1:
-            seg = list(reversed(seg))
-        pts = (pts + seg[1:]) if pts else list(seg)
-        if last:
-            break
-        y_end = -b if k % 2 == 0 else b
-        _a2, b2, _c2 = rings[min((k + 1) // 2, len(rings) - 1)]
-        y_next = b2 if (k + 1) % 2 == 0 else -b2
-        jog = lri_dedup([(kside * xe, y_end), (kside * xj, y_end),
-                         (-kside * xj, y_next), (-kside * xe, y_next)])
-        pts = pts + jog[1:]
-    return pts
+    n_half = (2 * len(rings)) if n_half is None else int(n_half)
+    nt = len(rings)
+    a0, b0, c0 = rings[0]
+    pts = [(0.0, -b0), (a0 - c0, -b0), (a0, c0 - b0), (a0, b0 - c0),
+           (a0 - c0, b0), (c0 - a0, b0), (-a0, b0 - c0)]
+    if nt == 1:
+        pts += [(-a0, c0 - b0), (c0 - a0, -b0), (0.0, -b0)]
+    else:
+        y_in = rings[1][2] - rings[1][1]
+        pts += [(-a0, y_in), (-rings[1][0], y_in)]
+        for k in range(1, nt):
+            a, b, c = rings[k]
+            last = (k == nt - 1)
+            if 2 * k + 1 >= n_half:
+                # half ring: bottom half only, ending on the right edge at
+                # the mirror of the entry height
+                pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
+                        (a, -y_in)]
+                break
+            pts += [(-a, c - b), (c - a, -b), (a - c, -b), (a, c - b),
+                    (a, b - c), (a - c, b), (c - a, b), (-a, b - c)]
+            if last:
+                pts += [(-a, y_in + p)]
+                break
+            y_in = y_in + p
+            pts += [(-a, y_in), (-rings[k + 1][0], y_in)]
+    if arm < 0:
+        pts = [(-x, y) for (x, y) in pts]
+    return lri_dedup(pts)
 
 
 def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
@@ -852,12 +842,14 @@ def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
     if abs(p_s - p) > 1e-9:
         raise ValueError("primary/secondary pitch mismatch")
     xj = p / 2.0
-    p_pts = lri_i3_spiral_run(rings_p, p, xj, xj, w, s, +1, n_half=nh_p)
-    s_pts = lri_i3_spiral_run(rings_s, p, xj, xj, w, s, -1, n_half=nh_s)
+    p_pts = lri_i3_step_run(rings_p, p, +1, n_half=nh_p)
+    s_pts = lri_i3_step_run(rings_s, p, -1, n_half=nh_s)
     p_out, s_out = p_pts[0], s_pts[0]
     p_in, s_in = p_pts[-1], s_pts[-1]
-    p_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
-    s_lead = [s_out, (s_out[0], s_out[1] + lead_len)]
+    # outer ends sit at the bottom edge centre of each coil; the leads run
+    # straight down out of the coil
+    p_lead = [p_out, (p_out[0], p_out[1] - lead_len)]
+    s_lead = [s_out, (s_out[0], s_out[1] - lead_len)]
     tops = [p_pts, p_lead]
     under = [s_pts, s_lead]
     ports = [("p01", p_lead[-1]), ("p02", p_in),
@@ -871,7 +863,7 @@ def lri_i3_build_xfmr(rx, ry, np_turns=2.0, ns_turns=2.0, w=8.0, s=3.0,
         under.append(ct_geom["stem"])
         ports.append(("ct1", (0.0, y_tip)))
     ymax = max(p_lead[-1][1], s_lead[-1][1])
-    ymin = min(p_in[1], s_in[1])
+    ymin = min(p_in[1], s_in[1], p_lead[-1][1], s_lead[-1][1])
     return {
         "tops": tops, "under": under, "under_poly": [], "vias": [],
         "ports": ports, "ct": ct_geom, "kind": "xfmr",
@@ -901,13 +893,15 @@ def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     rings, p, N = lri_i3_rings(rx, ry, w, s, (nh + 1) // 2, chamfer)
     a0, b0, _c0 = rings[0]
     xj = p / 2.0
-    pts = lri_i3_spiral_run(rings, p, xj, xj, w, s, +1, n_half=nh)
+    pts = lri_i3_step_run(rings, p, +1, n_half=nh)
     p_out, p_in = pts[0], pts[-1]
-    out_lead = [p_out, (p_out[0], p_out[1] + lead_len)]
-    # inner end is buried in the turns -> its lead escapes on the under layer
-    # (the radial underpass of the reference layout), flush with the coil edge
-    sgn = 1.0 if p_in[1] >= 0.0 else -1.0
-    in_tip = (p_in[0], sgn * (ry + float(lead_len)))
+    # outer end sits at the bottom edge centre -- lead straight down
+    out_lead = [p_out, (p_out[0], p_out[1] - lead_len)]
+    # inner end sits on the innermost ring's left (half turn: right) edge,
+    # buried in the turns -> escape straight out through x = +-rx on the
+    # under layer, joined by a via pad at the winding's inner end
+    sgn = -1.0 if p_in[0] < 0.0 else 1.0
+    in_tip = (sgn * (rx + float(lead_len)), p_in[1])
     in_lead = [p_in, in_tip]
     tops = [pts, out_lead]
     ports = [("p01", out_lead[-1]), ("p02", in_lead[-1])]
@@ -924,62 +918,16 @@ def lri_i3_build_se(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
                    "pad": (mid[0], mid[1], w)}
         under.append(ct_geom["stem"])
         ports.append(("ct1", (mid[0], y_tip)))
-    ymax = max(out_lead[-1][1], in_lead[-1][1])
-    # single winding: even k fills the right, odd k the left, so the box is
-    # one pitch narrower than the symmetric coil on the left
-    xmin = -(rx - p) if N >= 2 else (p / 2.0 - w / 2.0)
+    ys = [q[1] for q in pts] + [out_lead[-1][1], in_tip[1], -ry, ry]
+    xs = [q[0] for q in pts] + [in_tip[0], -rx, rx]
+    ymax, ymin = max(ys), min(ys)
+    xmin, xmax = min(xs), max(xs)
     return {
         "tops": tops, "under": under, "under_poly": [], "vias": vias,
         "ports": ports, "ct": ct_geom, "kind": "se",
         "rings": rings, "N": N, "p": p, "xj": xj,
         "bx": 2.0 * rx, "by": 2.0 * ry,
-        "bbox": (xmin, -ry, rx, ymax),
-    }
-
-
-def lri_i3_build_f8(rx, ry, n, w, s, gap=None,
-                    chamfer=2.0 - math.sqrt(2.0), lead_len=20.0):
-    """Figure-8 inductor -> dict.
-
-    Counterpart of SKILL lriI3BuildF8 and rfgeom.build_f8: two lobes, the
-    right one the x-mirror of the left, so they are wound in opposite
-    senses and their fluxes add.  The inner ends meet at the coil centre
-    on the under metal -- the bridge has to leave lobe A across its own
-    outer ring, so it cannot live on the main metal.  ``rx``/``ry`` are
-    PER-LOBE half extents, ``gap`` the spacing between the lobes, ``n``
-    the turns of each lobe (full turns; half turns legal).
-    """
-    if abs(2.0 * float(n) - round(2.0 * float(n))) > 1e-6:
-        raise ValueError("n=%.3f 必须是 0.5 的整数倍（半圈）" % float(n))
-    gap = s if gap is None else float(gap)
-    if gap < s - 1e-9:
-        raise ValueError("gap=%.3f < s=%.3f" % (gap, s))
-    nh = int(round(2.0 * float(n)))
-    rings, p, N = lri_i3_rings(rx, ry, w, s, (nh + 1) // 2, chamfer)
-    xj = p / 2.0
-    dx = rx + gap / 2.0
-    # arm=-1 puts lobe A's free end on the far left; its mirror lands on
-    # the far right, so both ports sit on the outside of the device
-    run_a = lri_i3_spiral_run(rings, p, xj, xj, w, s, -1, n_half=nh)
-    pts_a = lri_shift(run_a, -dx, 0.0)
-    pts_b = lri_mirrorx(pts_a)
-    a_in, b_in = pts_a[-1], pts_b[-1]
-    bridge = lri_dedup([a_in, (a_in[0], 0.0), (0.0, 0.0),
-                        (b_in[0], 0.0), b_in])
-    tops = [pts_a, pts_b]
-    ports = []
-    for pts, name in ((pts_a, "p01"), (pts_b, "p02")):
-        p0 = pts[0]
-        lead = [p0, (p0[0], p0[1] + lead_len)]
-        tops.append(lead)
-        ports.append((name, lead[-1]))
-    ymax = pts_a[0][1] + lead_len
-    return {
-        "tops": tops, "under": [bridge], "under_poly": [], "vias": [],
-        "ports": ports, "ct": None, "kind": "f8",
-        "rings": rings, "N": N, "p": p, "xj": xj, "dx": dx,
-        "bx": 2.0 * (dx + rx), "by": 2.0 * ry,
-        "bbox": (-dx - rx, -ry, dx + rx, ymax),
+        "bbox": (xmin, ymin, xmax, ymax),
     }
 
 
@@ -1002,17 +950,22 @@ def lri_i3_build_diff(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
     rings_b, _pb, _nb = lri_i3_rings(rx - N * p, ry - N * p, w, s, nt,
                                      chamfer)
     xj = p / 2.0
-    pts_a = lri_i3_spiral_run(rings_a, p, xj, xj, w, s, +1, n_half=nh)
-    pts_b = lri_mirrory(lri_i3_spiral_run(rings_b, p, xj, xj, w, s, +1,
-                                          n_half=nh))
+    pts_a = lri_i3_step_run(rings_a, p, +1, n_half=nh)
+    pts_b = lri_mirrory(lri_i3_step_run(rings_b, p, +1, n_half=nh))
     a_in, b_in = pts_a[-1], pts_b[-1]
     bridge = lri_dedup([a_in, (b_in[0], a_in[1]), b_in])
     a_out, b_out = pts_a[0], pts_b[0]
-    tops = [pts_a, pts_b,
-            [a_out, (a_out[0], a_out[1] + lead_len)],
-            [b_out, (b_out[0], b_out[1] - lead_len)]]
-    ports = [("p01", tops[2][-1]), ("p02", tops[3][-1])]
-    under = [bridge]
+    # a_out sits at the bottom edge centre, b_out (y-mirror) at the top;
+    # each lead runs straight AWAY from its coil.  Coil B is inside coil
+    # A's footprint, so b_out's lead crosses A's windings -- put it on the
+    # under metal with a via pad at b_out.
+    a_lead = [a_out, (a_out[0], a_out[1] - lead_len)]
+    b_lead = [b_out, (b_out[0], b_out[1] + lead_len)]
+    tops = [pts_a, pts_b, a_lead]
+    under = [bridge, b_lead]
+    vias = [(b_out[0], b_out[1], w),
+            (a_in[0], a_in[1], w), (b_in[0], b_in[1], w)]
+    ports = [("p01", a_lead[-1]), ("p02", b_lead[-1])]
     ct_geom = None
     if ct:
         jx, jy = b_in[0], a_in[1]
@@ -1022,13 +975,13 @@ def lri_i3_build_diff(rx, ry, n, w, s, chamfer=2.0 - math.sqrt(2.0),
                    "pad": (jx, jy, w)}
         under.append(ct_geom["stem"])
         ports.append(("ct1", (jx, y_tip)))
-    ymax = max(a_out[1] + lead_len, b_out[1] - lead_len)
+    ys = [q[1] for q in pts_a + pts_b] + [a_lead[-1][1], b_lead[-1][1]]
     return {
-        "tops": tops, "under": under, "under_poly": [], "vias": [],
+        "tops": tops, "under": under, "under_poly": [], "vias": vias,
         "ports": ports, "ct": ct_geom, "kind": "diff",
         "rings": (rings_a, rings_b), "N": N, "p": p, "xj": xj,
         "bx": 2.0 * rx, "by": 2.0 * ry,
-        "bbox": (-rx, -ry, rx, ymax),
+        "bbox": (-rx, min(ys), rx, max(ys)),
     }
 
 
@@ -1213,34 +1166,6 @@ def lri_build_ind(g):
         out["bbox"] = m["bbox"]
         return out
 
-    if kind == "f8":
-        # Second-generation kernel: two counter-wound lobes joined at the
-        # coil centre on the under metal; same geometry as SKILL
-        # lriI3BuildF8.  rx/ry (and the dout/W fallbacks) are PER-LOBE
-        # sizes, and n counts the turns of each lobe.
-        gapf = g.get("gap")
-        gapf = s if gapf in (None, "") else float(gapf)
-        rx = float(g.get("rx", 0.0) or 0.0)
-        if rx <= 0.0:
-            rx = float(g.get("dout", W)) / 2.0
-        ry = float(g.get("ry", 0.0) or 0.0)
-        if ry <= 0.0:
-            ry = float(g.get("H", W)) / 2.0
-        m = lri_i3_build_f8(
-            rx, ry, n, w, s, gap=gapf,
-            chamfer=float(g.get("chamfer", 2.0 - math.sqrt(2.0))),
-            lead_len=float(g.get("lead_len", 20.0) or 20.0))
-        out["metal"] = list(m["tops"])
-        out["topcaps"] = [(False, False)] * len(out["metal"])
-        out["under"] = list(m["under"])
-        out["under_poly"] = [lri_sym_under_poly(p, w) for p in m["under"]]
-        out["vias"] = list(m["vias"])
-        out["ports"] = list(m["ports"])
-        out["bx"] = m["bx"]
-        out["by"] = m["by"]
-        out["N"] = m["N"]
-        out["bbox"] = m["bbox"]
-        return out
     body = lri_spiral(W, H, w, s, n, corner, seam)
     out["metal"] = [body]
     nat1 = {"top": "N", "left": "W", "right": "E"}.get(seam, "S")
@@ -1410,9 +1335,6 @@ PRESETS = [ {"name": "1nH 八角电感", "type": "ind", "freq": "1e9:30e9:30",
     {"name": "差分电感 (diff)", "type": "ind", "freq": "1e9:30e9:21",
      "geom": {"kind": "diff", "shape": "octagon", "n": 2.5, "w": 10,
               "s": 2.6, "dout": 220, "ct": 0}},
-    {"name": "8 字电感 (f8)", "type": "ind", "freq": "1e9:30e9:21",
-     "geom": {"kind": "f8", "shape": "octagon", "n": 3, "w": 10, "s": 2.6,
-              "dout": 200, "ct": 0}},
     {"name": "50Ω 微带线", "type": "tl", "freq": "1e9:30e9:21",
      "geom": {"w": 20, "len": 300, "gnd": 1, "gnd_layer": "M1", "fence": 0, "cpw": 0, "gap": 5}},
     {"name": "CPW 线", "type": "tl", "freq": "1e9:30e9:21",
@@ -1426,7 +1348,7 @@ PRESETS = [ {"name": "1nH 八角电感", "type": "ind", "freq": "1e9:30e9:30",
     {"name": "平行耦合线", "type": "cpl", "freq": "1e9:30e9:21",
      "geom": {"w": 10, "gap": 3, "len": 200, "gnd": 1}}, ]
 
-GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/f8/sym)", "se", False),
+GEOM_FORM = { "ind": [("kind", "拓扑 kind (se/diff/sym)", "se", False),
             ("shape", "形状 rect/oct", "octagon", False),
             ("seam", "端口边 seam (N/S/E/W)", "S", False),
             ("tangle", "端口夹角 tangle (0/90/180)", "180", True),
@@ -1471,7 +1393,7 @@ for _rows in GEOM_FORM.values():
             GEOM_NUM.add(_k)
 
 GEOM_CHOICES = {
-    "kind": ("se", "diff", "f8", "sym"),
+    "kind": ("se", "diff", "sym"),
     "shape": ("rect", "oct", "octagon", "square"),
     "seam": ("S", "N", "E", "W"),
     "tangle": ("180", "90", "0"),
