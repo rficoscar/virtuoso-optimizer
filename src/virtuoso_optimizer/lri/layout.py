@@ -5,7 +5,7 @@ import math
 from .common import (
     DEFAULT_TECH, LibrfError, parse_eng)
 from .tech import (
-    tech_drc)
+    tech_drc, tech_layer, tech_metals)
 
 def lri_seglen(p, q):
     return math.hypot(q[0] - p[0], q[1] - p[1])
@@ -492,52 +492,46 @@ def lri_redraw_sketch(tab):
         pass
 
 PRESETS = [
-    # One entry per panel of the six-parameter preview figure, so the GUI can
-    # reproduce exactly what was reviewed.  Every n is an integer (the kernel
-    # rejects 2.5 turns) and rx/ry are explicit instead of being derived from a
-    # square dout.
-    {"name": "A 出厂默认 (n3 w8 s3 rx80 ry60)", "type": "ind",
+    # One entry per reviewed panel of the preview figure.  The centre-tap
+    # variant is gone on purpose: 中心抽头 is not offered right now, so every
+    # preset leaves ct at the kernel default 0.  Every n is an integer (the
+    # kernel rejects 2.5 turns) and rx/ry are explicit instead of being derived
+    # from a square dout.
+    {"name": "A 出厂默认 (n3 w8 s3 rx80 ry60)", "type": "diff_ind",
      "freq": "1e9:30e9:30",
-     "geom": {"kind": "sym", "n": 3, "w": 8, "s": 3, "rx": 80, "ry": 60,
-              "ct": 0}},
-    {"name": "B 宽金属 (n2 w12 s4 rx80 ry60)", "type": "ind",
+     "geom": {"n": 3, "w": 8, "s": 3, "rx": 80, "ry": 60}},
+    {"name": "B 宽金属 (n2 w12 s4 rx80 ry60)", "type": "diff_ind",
      "freq": "1e9:30e9:30",
-     "geom": {"kind": "sym", "n": 2, "w": 12, "s": 4, "rx": 80, "ry": 60,
-              "ct": 0}},
-    {"name": "C 多圈 (n5 w5 s2.5 rx90 ry70)", "type": "ind",
+     "geom": {"n": 2, "w": 12, "s": 4, "rx": 80, "ry": 60}},
+    {"name": "C 多圈 (n5 w5 s2.5 rx90 ry70)", "type": "diff_ind",
      "freq": "1e9:30e9:30",
-     "geom": {"kind": "sym", "n": 5, "w": 5, "s": 2.5, "rx": 90, "ry": 70,
-              "ct": 0}},
-    {"name": "D 中心抽头 (n4 w8 s3 rx85 ry65)", "type": "ind",
+     "geom": {"n": 5, "w": 5, "s": 2.5, "rx": 90, "ry": 70}},
+    {"name": "D 扁宽 (n3 w6 s2.5 rx110 ry45)", "type": "diff_ind",
      "freq": "1e9:30e9:21",
-     "geom": {"kind": "sym", "n": 4, "w": 8, "s": 3, "rx": 85, "ry": 65,
-              "ct": 1}},
-    {"name": "E 扁宽 (n3 w6 s2.5 rx110 ry45)", "type": "ind",
+     "geom": {"n": 3, "w": 6, "s": 2.5, "rx": 110, "ry": 45}},
+    {"name": "E 方形 (n3 w10 s3.5 rx70 ry70)", "type": "diff_ind",
      "freq": "1e9:30e9:21",
-     "geom": {"kind": "sym", "n": 3, "w": 6, "s": 2.5, "rx": 110, "ry": 45,
-              "ct": 0}},
-    {"name": "F 方形 (n3 w10 s3.5 rx70 ry70)", "type": "ind",
-     "freq": "1e9:30e9:21",
-     "geom": {"kind": "sym", "n": 3, "w": 10, "s": 3.5, "rx": 70, "ry": 70,
-              "ct": 0}},
+     "geom": {"n": 3, "w": 10, "s": 3.5, "rx": 70, "ry": 70}},
 ]
 
-GEOM_FORM = { "ind": [("kind", u"拓扑 kind (sym)", "sym", False),
-            ("n", u"每臂匝数 n (整数)", "3", True),
+# Geometry form of the differential symmetric inductor.  The layout page renders
+# every row inline (there is no "advanced" window any more); "" means "derive
+# it" for numerics and "use the process default layer" for the metal dropdowns.
+GEOM_FORM = { "diff_ind": [("n", u"匝数 n (整数)", "3", True),
             ("w", u"线宽 w (µm)", "8", True),
             ("s", u"间距 s (µm)", "3", True),
             ("rx", u"横向半径 rx (µm)", "80", True),
             ("ry", u"纵向半径 ry (µm)", "60", True),
-            ("ct", u"中心抽头 ct (0/1)", "0", True),
-            ("dout", u"外径 dout (µm, 留空则用 rx/ry)", "", True),
-            ("chamfer", u"拐角切角 chamfer 0..1 (留空=2-sqrt2)", "", True),
             ("lead_len", u"差分引线长 lead_len (µm)", "20", True),
             ("lead_gap", u"差分线间距 lead_gap (µm, 留空=s)", "", True),
             ("lead_w", u"差分线宽 lead_w (µm, 留空=w)", "", True),
+            ("chamfer", u"拐角切角 chamfer 0..1 (留空=2-sqrt2)", "", True),
             ("stack", u"叠层 stack (0/1)", "0", True),
-            ("metal_main", u"主金属 (留空=工艺档)", "", False),
-            ("metal_aux", u"副金属/跨线层 (留空=工艺档)", "", False),
-            ("ind_mark", u"MARKER 标记层 (0/1)", "0", True)], }
+            ("metal_main", u"主金属", "", False),
+            ("metal_aux", u"副金属/跨线层", "", False)], }
+
+# Historical spelling of the same device: configs and scripts still say "ind".
+GEOM_TYPE_ALIAS = {"ind": "diff_ind"}
 
 GEOM_NUM = set()
 
@@ -546,15 +540,44 @@ for _rows in GEOM_FORM.values():
         if _num:
             GEOM_NUM.add(_k)
 
+# Rendered as a dropdown.  The metal values come from the process profile, not
+# from this table, so the form works before any profile is loaded.
 GEOM_CHOICES = {
-    "kind": ("sym",),
+    "metal_main": (),
+    "metal_aux": (),
 }
 
+# metal dropdown -> process role whose layer is the sensible default
+GEOM_METAL_ROLE = {"metal_main": "spiral", "metal_aux": "underpass"}
+
+
+def geom_metal_choices(tech=None):
+    """Layer names for the metal dropdowns (filled from the active process)."""
+    try:
+        return tech_metals(tech)
+    except Exception:
+        return []
+
+
+def geom_metal_default(tech, key):
+    """Layer a metal dropdown starts on ("" when the process profile is silent)."""
+    role = GEOM_METAL_ROLE.get(key)
+    if not role:
+        return ""
+    try:
+        return (tech_layer(tech, role) or "").strip()
+    except Exception:
+        return ""
+
+
 def form_to_geom(typ, raw):
-    if typ != "ind":
-        raise LibrfError("未知器件类型 %s（只剩 ind 对称差分电感）" % typ)
+    typ0 = str(typ or "").strip()
+    typ0 = GEOM_TYPE_ALIAS.get(typ0, typ0)
+    rows = GEOM_FORM.get(typ0)
+    if rows is None:
+        raise LibrfError("未知器件类型 %s（只剩 diff_ind 对称差分电感）" % (typ or ""))
     geom = {}
-    for key, _lab, _d, num in GEOM_FORM["ind"]:
+    for key, _lab, _d, num in rows:
         v = (raw.get(key) or "").strip()
         if v == "":
             continue

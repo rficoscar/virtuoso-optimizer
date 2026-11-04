@@ -49,6 +49,12 @@ def load_tech_profile(work=None, path=None, use_cache=True):
                 raise LibrfError("工艺配置 %s 解析失败: %s" % (cand, e))
     raw = dict((k, v) for k, v in raw.items() if not str(k).startswith("_doc"))
     prof = _deep_merge(DEFAULT_TECH, raw)
+    text = raw.get("text")
+    if isinstance(text, dict):
+        # The text table is a complete metal -> label-layer enumeration, not a
+        # partial override: merging it with the built-in demo table would list
+        # metals the process does not have (a 2-metal profile showing M3..M5).
+        prof["text"] = dict(text)
     prof["_src"] = src
     if use_cache:
         _TECH_CACHE[key] = prof
@@ -504,6 +510,49 @@ def tech_text(prof, metal):
 
 def tech_drc(prof):
     return (prof or {}).get("drc") or DEFAULT_TECH["drc"]
+
+_METAL_TOKEN = re.compile(r"^([A-Za-z_]+)(\d+)$")
+
+def _metal_sort_key(name):
+    """Bottom-to-top ordering for the usual metal names (M1 < M2 < ... < M10)."""
+    m = _METAL_TOKEN.match(str(name))
+    if m:
+        return (0, m.group(1).upper(), int(m.group(2)), str(name))
+    return (1, str(name).upper(), 0, str(name))
+
+def tech_metals(prof):
+    """Metal layers this process knows, bottom-to-top when it declares a flow.
+
+    An explicit flow/stack table wins; otherwise the metal roles plus the
+    metal-looking text layers are used; a profile that carries no layer
+    information at all falls back to the built-in default process, so a fresh
+    start (nothing loaded yet) still offers usable names in the metal dropdowns.
+    """
+    prof = prof or {}
+    flow = _tech_flow(prof) or {}
+    names = [str(x).strip() for x in (flow.get("metals") or []) if str(x).strip()]
+    if names:
+        return names
+    layers = dict(prof.get("layers") or {})
+    text = dict(prof.get("text") or {})
+    if not layers and not text:
+        layers = dict(DEFAULT_TECH.get("layers") or {})
+        text = dict(DEFAULT_TECH.get("text") or {})
+    skip = set()
+    for role in ("via_sp", "via_un", "marker"):
+        val = str(layers.get(role) or "").strip()
+        if val:
+            skip.add(val)
+    out = []
+    for role in ("spiral", "underpass", "route", "ground"):
+        val = str(layers.get(role) or "").strip()
+        if val and val not in skip and val not in out:
+            out.append(val)
+    for name in text:
+        name = str(name).strip()
+        if name and name not in skip and name not in out:
+            out.append(name)
+    return sorted(out, key=_metal_sort_key)
 
 def _skill_val(v):
     if isinstance(v, bool):

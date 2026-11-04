@@ -25,7 +25,8 @@ from .runner import (
     load_emx_settings, save_emx_settings, emx_settings_to_opts, emx_cmd_preview)
 from .layout import (
     lri_validate, lri_build_ind, lri_sketch_after, PRESETS, GEOM_FORM,
-    GEOM_CHOICES, form_to_geom)
+    GEOM_CHOICES, GEOM_METAL_ROLE, geom_metal_choices, geom_metal_default,
+    form_to_geom)
 from .ui.layout_view import LayoutView
 
 
@@ -35,13 +36,11 @@ def _disp_cols(text):
                for ch in str(text))
 
 
-# The Layout page main form shows only common fields (matching the 08c workflow);
-# advanced fields live in the "Advanced..." window; behavior and config round-tripping are unchanged.
-GEOM_PRIMARY = {
-    # rx/ry are the real shape parameters of the sym coil; dout stays available
-    # as a fallback for presets written before the split, but it is not primary.
-    "ind": ("kind", "n", "w", "s", "rx", "ry", "ct"),
-}
+# Device types offered on the Layout page: only the differential symmetric
+# inductor.  The label is the PDK/CDF name; "ind" stays the keyword understood
+# by the geometry kernel, the device request and the SKILL side.
+DEVICE_TYPES = ("diff_ind",)
+DEVICE_KEY = {"diff_ind": "ind"}
 
 
 class _TabBase(object):
@@ -284,9 +283,9 @@ class _LayoutTab(_TabBase):
                              width=self.label_cols)
         lab.pack(side="left")
         setattr(lab, "_lri_form_label", True)
-        self.a_type = self.tk.StringVar(value="ind")
+        self.a_type = self.tk.StringVar(value=DEVICE_TYPES[0])
         cb = self.ttk.Combobox(r, textvariable=self.a_type, width=12,
-                               values=("ind", "sym"),
+                               values=DEVICE_TYPES,
                                state="readonly")
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda _e: self._rebuild_geom())
@@ -298,9 +297,15 @@ class _LayoutTab(_TabBase):
         mid.pack(fill="both", expand=True, pady=2)
         self.geom_frame = self.ttk.Frame(mid)
         self.geom_frame.pack(side="left", fill="y", anchor="n")
-        self.view = LayoutView(mid, self.tk, self.ttk, height=430, width=520)
-        self.view.frame.pack(side="right", fill="both", expand=True,
-                             padx=(10, 0), pady=2)
+        # Preview and run log share the right column, so the log stays on screen
+        # while the flat parameter form (now the tallest part of the page) is
+        # being edited.
+        right = self.ttk.Frame(mid)
+        right.pack(side="right", fill="both", expand=True, padx=(10, 0), pady=2)
+        self.view = LayoutView(right, self.tk, self.ttk, height=340, width=460)
+        self.view.frame.pack(side="top", fill="both", expand=True)
+        self.a_log = self._text(right, height=4)
+        self.a_log.pack(side="bottom", fill="x", pady=(6, 0))
         # The old page called this canvas "sketch"; keep the name so the
         # debounce helper and any external hook still find a canvas.
         self.sketch = self.view.canvas
@@ -328,8 +333,6 @@ class _LayoutTab(_TabBase):
             side="left", padx=4)
         self.ttk.Button(r4, text="渲染截图",
                         command=self._render).pack(side="left", padx=4)
-        self.a_log = self._text(f, height=10)
-        self.a_log.pack(fill="both", expand=True, pady=4)
         self._fit_form_labels()
 
     # ---- cds.lib auto-sync + manual-edit protection ----
@@ -376,32 +379,53 @@ class _LayoutTab(_TabBase):
             self._cdslib_loading = False
 
     # ---- geometry form / sketch ----
+    def _geom_type(self):
+        """Kernel keyword behind the selected device label (diff_ind -> ind)."""
+        label = (self.a_type.get() or "").strip()
+        return DEVICE_KEY.get(label, "ind")
+
+    def _metal_values(self, key):
+        """Dropdown values for a metal field: the layers of the active process."""
+        try:
+            tech = self._collect_tech()
+        except Exception:
+            tech = {}
+        vals = list(geom_metal_choices(tech) or [])
+        cur = geom_metal_default(tech, key)
+        if cur and cur not in vals:
+            vals.insert(0, cur)
+        return vals
+
     def _rebuild_geom(self):
+        """Rebuild the flat geometry form: every parameter is visible on the page.
+
+        Nothing is folded into a separate window, so the whole parameter set can
+        be reviewed and edited side by side with the preview.
+        """
         for child in self.geom_frame.winfo_children():
             child.destroy()
-        if getattr(self, "_adv_win", None) is not None:
-            try:
-                self._adv_win.destroy()
-            except Exception:
-                pass
-            self._adv_win = None
         self.geom_vars = {}
-        typ = self.a_type.get()
-        primary = GEOM_PRIMARY.get(typ)
-        adv = []
+        try:
+            tech = self._collect_tech()
+        except Exception:
+            tech = {}
         row = 0
-        for key, lab, default, _num in GEOM_FORM.get(typ, []):
-            var = self.tk.StringVar(value=default)
+        for key, lab, default, _num in GEOM_FORM.get(DEVICE_TYPES[0], []):
+            start = default
+            choices = GEOM_CHOICES.get(key)
+            if key in GEOM_METAL_ROLE:
+                # start on the process layer so a fresh start shows a real layer
+                # name instead of an empty dropdown
+                vals = self._metal_values(key)
+                start = geom_metal_default(tech, key) or (vals[0] if vals else "")
+            var = self.tk.StringVar(value=start)
             self.geom_vars[key] = var
-            if primary is not None and key not in primary:
-                adv.append((key, lab))
-                continue
             label = self.ttk.Label(self.geom_frame, text=lab, anchor="w")
             label.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=1)
-            if key in GEOM_CHOICES:
+            if choices is not None:
                 ent = self.ttk.Combobox(self.geom_frame, textvariable=var,
-                                        width=10, values=GEOM_CHOICES[key],
-                                        state="readonly")
+                                        width=12, state="readonly",
+                                        values=choices or self._metal_values(key))
                 ent.grid(row=row, column=1, sticky="w", pady=1)
                 ent.bind("<<ComboboxSelected>>",
                          lambda _e: lri_sketch_after(self))
@@ -411,71 +435,25 @@ class _LayoutTab(_TabBase):
                 ent.grid(row=row, column=1, sticky="w", pady=1)
                 ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
             row += 1
-        self._geom_adv = adv
-        if adv:
-            self.ttk.Button(self.geom_frame, text="高级…（%d 项，通常不用改）"
-                            % len(adv), command=self._geom_advanced).grid(
-                                row=row, column=0, columnspan=2,
-                                sticky="w", pady=(6, 0))
-        self._draw_geom_sketch(typ)
+        self._geom_hint(row)
+        self._draw_geom_sketch()
         self._fit_form_labels()
 
-    def _geom_advanced(self):
-        """Advanced geometry parameters: less common fields go into a separate window to keep the form compact."""
-        win = getattr(self, "_adv_win", None)
-        if win is not None:
-            try:
-                win.deiconify()
-                win.lift()
-                return
-            except Exception:
-                self._adv_win = None
-        if not self._geom_adv:
-            return
-        typ = self.a_type.get()
-        win = self.tk.Toplevel(self.root)
-        self._adv_win = win
-        win.title("高级几何参数（%s）" % typ)
-        win.transient(self.root)
-        win.geometry("620x560")
-        win.protocol("WM_DELETE_WINDOW", lambda: self._close_adv())
-        self.ttk.Label(
-            win, anchor="w", justify="left", foreground="#555555",
-            wraplength=580,
-            text="这些参数通常留空即可（自动推导或沿用工艺档）。\n"
-                 "改动会立即反映到示意图与出图几何。"
-        ).pack(fill="x", padx=10, pady=(8, 4))
-        body, outer = self._scrollable(win)
-        outer.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        for r, (key, lab) in enumerate(self._geom_adv):
-            var = self.geom_vars[key]
-            label = self.ttk.Label(body, text=lab, anchor="w")
-            label.grid(row=r, column=0, sticky="w", padx=(0, 8), pady=2)
-            if key in GEOM_CHOICES:
-                ent = self.ttk.Combobox(body, textvariable=var, width=12,
-                                        values=GEOM_CHOICES[key],
-                                        state="readonly")
-                ent.grid(row=r, column=1, sticky="w", pady=2)
-                ent.bind("<<ComboboxSelected>>",
-                         lambda _e: lri_sketch_after(self))
-            else:
-                ent = self.ttk.Entry(body, textvariable=var, width=16)
-                ent.grid(row=r, column=1, sticky="w", pady=2)
-                ent.bind("<KeyRelease>", lambda _e: lri_sketch_after(self))
-        bar = self.ttk.Frame(win)
-        bar.pack(fill="x", padx=10, pady=(0, 8))
-        self.ttk.Button(bar, text="关闭", command=self._close_adv).pack(
-            side="right")
-
-    def _close_adv(self):
-        win = getattr(self, "_adv_win", None)
-        self._adv_win = None
-        if win is not None:
-            try:
-                win.destroy()
-            except Exception:
-                pass
-    def _draw_geom_sketch(self, typ):
+    def _geom_hint(self, row):
+        """Plain-language help for the two least obvious fields (stack / metal layers)."""
+        main = self.geom_vars.get("metal_main")
+        aux = self.geom_vars.get("metal_aux")
+        main = (main.get() if main is not None else "") or "工艺档螺旋层"
+        aux = (aux.get() if aux is not None else "") or "工艺档下穿层"
+        text = ("金属层默认取工艺档：螺旋 %s、跨线 %s；\n"
+                "没加载工艺时用内置默认层。\n"
+                "叠层 stack：1=主/副两层并联（需相邻层）；\n"
+                "0=副金属只跨圈。" % (main, aux))
+        self.ttk.Label(self.geom_frame, text=text, anchor="w",
+                       justify="left", foreground="#555555",
+                       wraplength=380).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+    def _draw_geom_sketch(self, typ=None):
         """Build the geometry from the form and show it in the preview.
 
         The preview is the real kernel output (lri_build_ind), not a hand-drawn
@@ -485,14 +463,15 @@ class _LayoutTab(_TabBase):
         view = getattr(self, "view", None)
         if view is None:
             return
-        typ = typ or self.a_type.get()
-        if typ != "ind":
-            view.show_error("未知器件类型 %s（只剩 ind 对称差分电感）" % typ)
+        label = str(typ or "").strip() or (self.a_type.get() or "").strip()
+        key = DEVICE_KEY.get(label)
+        if key is None:
+            view.show_error("未知器件类型 %s（只剩 diff_ind 对称差分电感）" % label)
             return
         raw = {k: (v.get() if v is not None else "")
                for k, v in (self.geom_vars or {}).items()}
         try:
-            params = form_to_geom(typ, raw)
+            params = form_to_geom(key, raw)
             geo = lri_build_ind(params)
         except Exception as exc:
             view.show_error(str(exc))
@@ -523,7 +502,7 @@ class _LayoutTab(_TabBase):
         for p in PRESETS:
             if p["name"] != name:
                 continue
-            self.a_type.set(p["type"])
+            self.a_type.set(DEVICE_TYPES[0])
             self._rebuild_geom()
             for key, val in (p.get("geom") or {}).items():
                 if key in self.geom_vars:
@@ -531,13 +510,13 @@ class _LayoutTab(_TabBase):
             if p.get("freq") and self.em_tab is not None:
                 self.em_tab.b_freq.set(p["freq"])
             self._log(self.a_log, "已应用预设：%s" % name)
-            self._draw_geom_sketch(p["type"])
+            self._draw_geom_sketch()
             return
 
     # ---- run layout ----
     def _collect_geom(self):
         raw = {k: v.get() for k, v in self.geom_vars.items()}
-        return form_to_geom(self.a_type.get(), raw)
+        return form_to_geom(self._geom_type(), raw)
     def _emx_opts(self):
         if self.em_tab is None:
             return None
@@ -550,7 +529,7 @@ class _LayoutTab(_TabBase):
             return
         try:
             geom = self._collect_geom()
-            if self.a_type.get() == "ind":
+            if self._geom_type() == "ind":
                 _ok, _msg = lri_validate(geom, tech=self._collect_tech())
                 if not _ok:
                     raise LibrfError(_msg)
@@ -562,7 +541,7 @@ class _LayoutTab(_TabBase):
             freq = self.em_tab.b_freq.get().strip() or DEF_FREQ
         except Exception:
             freq = DEF_FREQ
-        args = dict(typ=self.a_type.get(), geom=geom,
+        args = dict(typ=self._geom_type(), geom=geom,
                     cell=self.a_cell.get().strip() or None,
                     work=work, freq=freq, emx_opts=self._emx_opts(),
                     views_mode=self.a_views.get(),

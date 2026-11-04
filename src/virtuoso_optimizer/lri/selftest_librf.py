@@ -138,9 +138,10 @@ def _selftest():
     snp_p = os.path.join(tmp, "a.s2p")
     cmd = emx_cmd_preview(st, gds=gds_p, struct="c", out_snp=snp_p)
     check("emx preview order", cmd.index("--format") < cmd.index("--s-file") < cmd.index(gds_p))
-    g = form_to_geom("ind", {"kind": "sym", "n": "3", "w": "10", "s": "2.6",
-                             "dout": "150", "ct": "0"})
+    g = form_to_geom("diff_ind", {"n": "3", "w": "10", "s": "2.6",
+                                  "rx": "75", "ry": "75"})
     check("form_to_geom", g.get("kind") == "sym" and g.get("n") == 3.0)
+    check("form_to_geom 旧名 ind", form_to_geom("ind", {"n": "3"}).get("n") == 3.0)
     check("lri norm sym W/H", g.get("W") == 150.0 and g.get("H") == 150.0
           and g.get("chamfer") > 0)
     for _kind in ("sym",):
